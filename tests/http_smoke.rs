@@ -44,3 +44,31 @@ fn config_rejects_unknown_and_bad_values() {
     assert!(envd::config::parse(args(&["envd", "-port", "x"])).is_err());
     assert_eq!(envd::config::parse(args(&["envd", "-port"])).unwrap_err(), "flag needs an argument: -port");
 }
+
+#[tokio::test]
+async fn token_required_except_excluded_paths() {
+    let (addr, state) = spawn_server_with_state().await;
+    *state.access_token.write().unwrap() = Some("t".into());
+    let c = reqwest::Client::new();
+
+    assert_eq!(c.get(format!("http://{addr}/health")).send().await.unwrap().status(), 204);
+
+    let res = c.get(format!("http://{addr}/envs")).send().await.unwrap();
+    assert_eq!(res.status(), 401);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "unauthorized access, please provide a valid access token or method signing if supported"
+    );
+    assert_eq!(body["code"], 401);
+
+    let res = c.get(format!("http://{addr}/envs")).header("X-Access-Token", "t").send().await.unwrap();
+    assert_ne!(res.status(), 401);
+}
+
+#[tokio::test]
+async fn no_token_set_means_open() {
+    let (addr, _) = spawn_server_with_state().await;
+    let res = reqwest::Client::new().get(format!("http://{addr}/envs")).send().await.unwrap();
+    assert_ne!(res.status(), 401);
+}
