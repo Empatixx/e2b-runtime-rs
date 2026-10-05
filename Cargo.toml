@@ -1,0 +1,30 @@
+[package]
+name = "envd"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+connectrpc = { version = "0.9", features = ["axum", "server"] }
+buffa = { version = "0.9.2", features = ["json"] }
+buffa-types = { version = "0.9.2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = { version = "0.8", features = ["http1", "http2", "multipart", "tokio"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+http = "1"
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+connectrpc-build = "0.9"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
