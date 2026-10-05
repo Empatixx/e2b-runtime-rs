@@ -61,7 +61,7 @@ pub fn basic_username(value: Option<&str>) -> Option<String> {
     let splits = string.split_once(":");
     match splits {
         Some((username, _)) => Some(username.to_owned()),
-        None => Some(string),
+        None => Some(string.to_owned()),
     }
 }
 
