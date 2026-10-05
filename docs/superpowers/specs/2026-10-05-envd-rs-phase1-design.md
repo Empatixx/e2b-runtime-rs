@@ -23,7 +23,7 @@ proti Rust envd (`-isnotfc`, Docker) procházejí + unit/kontraktové testy ní�
 
 - tokio, axum (HTTP/1.1 + h2c), tower-http (CORS)
 - `connectrpc` (github.com/connectrpc/connect-rust) + `buffa` (protobuf runtime, binární i JSON)
-- codegen přes `buf generate` (`protoc-gen-buffa`, `protoc-gen-buffa-packaging`, `protoc-gen-connect-rust`), výstup checked-in v `src/generated/`
+- codegen v `build.rs` přes `connectrpc-build` (vyžaduje `protoc` na PATH: `brew install protobuf`)
 - rustix (signály, uid/gid, `copy_file_range`, `statfs`, `clock_settime`), `pty-process` (async), `notify`
 - `sha2`, `base64`, `subtle` (signing), `dashmap`, `tracing`
 - build: statický musl, x86_64 + aarch64
@@ -34,12 +34,12 @@ proti Rust envd (`-isnotfc`, Docker) procházejí + unit/kontraktové testy ní�
 envd-rs/
 ├── proto/                 # 1:1 kopie upstream process.proto, filesystem.proto
 ├── reference/envd.yaml    # upstream OpenAPI (reference, ne codegen)
-├── buf.gen.yaml
+├── build.rs               # connectrpc-build codegen
 ├── src/
 │   ├── main.rs            # CLI flagy: -isnotfc -port(49983) -cgroup-root -no-cgroups -verbose -version -commit
 │   ├── server.rs          # jeden axum Router: Connect služby + HTTP routy, CORS, auth layer
 │   ├── state.rs           # AppState: env vars, access token, defaults (user, workdir), registry
-│   ├── generated/
+│   ├── proto.rs           # connectrpc::include_generated!()
 │   ├── api/               # init, envs, health, files (download/upload/compose), auth, signing, encoding
 │   ├── services/process/  # služba + handler/ (spawn, multiplex, pty)
 │   ├── services/filesystem/
