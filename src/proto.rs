@@ -1,0 +1,1 @@
+connectrpc::include_generated!();
