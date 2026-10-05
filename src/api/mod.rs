@@ -1,4 +1,5 @@
 pub mod health;
+pub mod signing;
 
 use std::sync::Arc;
 
