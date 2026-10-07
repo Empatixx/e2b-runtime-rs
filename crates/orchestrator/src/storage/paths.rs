@@ -48,3 +48,23 @@ impl BuildPaths {
         format!("{}/{name}{HEADER_SUFFIX}", self.build_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn object_names_match_upstream() {
+        let build_id = Uuid::from_u128(0x1234);
+        let paths = BuildPaths::new(build_id);
+        let prefix = build_id.to_string();
+        assert_eq!(paths.memfile(), format!("{prefix}/memfile"));
+        assert_eq!(paths.memfile_header(), format!("{prefix}/memfile.header"));
+        assert_eq!(paths.rootfs(), format!("{prefix}/rootfs.ext4"));
+        assert_eq!(paths.rootfs_header(), format!("{prefix}/rootfs.ext4.header"));
+        assert_eq!(paths.snapfile(), format!("{prefix}/snapfile"));
+        assert_eq!(paths.metadata(), format!("{prefix}/metadata.json"));
+    }
+}
