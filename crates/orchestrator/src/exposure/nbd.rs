@@ -27,7 +27,7 @@ mod linux {
         server: JoinHandle<Result<(), String>>,
     }
 
-    pub fn expose(overlay: Arc<Overlay>) -> io::Result<Exposure> {
+    pub async fn expose(overlay: Arc<Overlay>) -> io::Result<Exposure> {
         let (kernel_socket, server_socket) = std::os::unix::net::UnixStream::pair()?;
         server_socket.set_nonblocking(true)?;
         let size = overlay.size();
