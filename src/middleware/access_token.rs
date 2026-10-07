@@ -11,28 +11,18 @@ use crate::app::AppState;
 
 const ACCESS_TOKEN_HEADER: &str = "x-access-token";
 
-const PUBLIC_ROUTES: &[(&str, &str)] = &[
-    ("GET", "/health"),
-    ("GET", "/files"),
-    ("POST", "/files"),
-    ("POST", "/init"),
-];
-
 pub async fn require_token(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let Some(token) = state.access_token() else {
         return next.run(request).await;
     };
 
-    let is_public = PUBLIC_ROUTES
-        .iter()
-        .any(|&(method, path)| request.method() == method && request.uri().path() == path);
     let provided = request
         .headers()
         .get(ACCESS_TOKEN_HEADER)
         .map(|value| value.as_bytes())
         .unwrap_or_default();
 
-    if is_public || bool::from(provided.ct_eq(token.as_bytes())) {
+    if bool::from(provided.ct_eq(token.as_bytes())) {
         return next.run(request).await;
     }
 
