@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_compression::tokio::bufread::GzipEncoder;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tokio::io::BufReader;
 use tokio_util::io::ReaderStream;
@@ -13,9 +13,10 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 use super::encoding::{self, GZIP};
-use super::{ErrorResponse, FilesQuery, authorize};
+use super::{FilesQuery, authorize};
 use crate::app::AppState;
 use crate::auth::READ;
+use crate::util::error_response::ErrorResponse;
 use crate::util::fs::os_error;
 use crate::util::paths::expand_and_resolve;
 
@@ -28,35 +29,56 @@ pub async fn get_files(
 ) -> Result<Response, ErrorResponse> {
     let user = authorize(&state, &query, request.headers(), READ)?;
     let requested = query.path.unwrap_or_default();
-    let path = expand_and_resolve(&requested, &user, state.defaults().workdir.as_deref())
-        .map_err(|e| ErrorResponse::bad_request(format!("error expanding and resolving path '{requested}': {e}")))?;
+    let path = expand_and_resolve(&requested, &user, state.defaults().workdir.as_deref()).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("error expanding and resolving path '{requested}': {e}"))
+            .build()
+    })?;
 
     let shown = path.display();
     let meta = std::fs::metadata(&path).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => ErrorResponse::not_found(format!("path '{shown}' does not exist")),
-        _ => ErrorResponse::internal(format!(
-            "error checking if path exists '{shown}': {}",
-            os_error("stat", &path, &e)
-        )),
+        io::ErrorKind::NotFound => ErrorResponse::builder()
+            .status(StatusCode::NOT_FOUND)
+            .message(format!("path '{shown}' does not exist"))
+            .build(),
+        _ => ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!(
+                "error checking if path exists '{shown}': {}",
+                os_error("stat", &path, &e)
+            ))
+            .build(),
     })?;
     if meta.is_dir() {
-        return Err(ErrorResponse::bad_request(format!("path '{shown}' is a directory")));
+        return Err(ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("path '{shown}' is a directory"))
+            .build());
     }
 
     let headers = request.headers();
-    let mut chosen = encoding::accept_encoding(headers)
-        .map_err(|e| ErrorResponse::not_acceptable(format!("error parsing Accept-Encoding: {e}")))?;
+    let mut chosen = encoding::accept_encoding(headers).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::NOT_ACCEPTABLE)
+            .message(format!("error parsing Accept-Encoding: {e}"))
+            .build()
+    })?;
     if CONDITIONAL_HEADERS.iter().any(|name| headers.contains_key(*name)) {
         if !encoding::identity_acceptable(headers) {
-            return Err(ErrorResponse::not_acceptable(
-                "identity encoding not acceptable for Range or conditional request",
-            ));
+            return Err(ErrorResponse::builder()
+                .status(StatusCode::NOT_ACCEPTABLE)
+                .message("identity encoding not acceptable for Range or conditional request")
+                .build());
         }
         chosen = encoding::IDENTITY;
     }
 
     let file = tokio::fs::File::open(&path).await.map_err(|e| {
-        ErrorResponse::internal(format!("error opening file '{shown}': {}", os_error("open", &path, &e)))
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error opening file '{shown}': {}", os_error("open", &path, &e)))
+            .build()
     })?;
 
     let mut response = if chosen == GZIP {

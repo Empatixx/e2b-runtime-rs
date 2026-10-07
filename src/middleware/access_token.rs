@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -8,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use subtle::ConstantTimeEq;
 
 use crate::app::AppState;
+use crate::util::error_response::ErrorResponse;
 
 const ACCESS_TOKEN_HEADER: &str = "x-access-token";
 
@@ -27,11 +27,9 @@ pub async fn require_token(State(state): State<Arc<AppState>>, request: Request,
     }
 
     tracing::error!("Trying to access secured envd without correct access token");
-    let message = "unauthorized access, please provide a valid access token or method signing if supported";
-    let status = StatusCode::UNAUTHORIZED;
-    (
-        status,
-        Json(serde_json::json!({ "code": status.as_u16(), "message": message })),
-    )
+    ErrorResponse::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .message("unauthorized access, please provide a valid access token or method signing if supported")
+        .build()
         .into_response()
 }

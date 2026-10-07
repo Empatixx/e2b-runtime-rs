@@ -4,16 +4,15 @@ mod encoding;
 pub mod upload;
 
 use std::collections::BTreeMap;
-use std::fmt::Display;
 use std::path::Path;
 
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
 use crate::auth::validate_signing;
 use crate::user::User;
+use crate::util::error_response::ErrorResponse;
 use crate::util::metadata::read_metadata;
 
 #[derive(Deserialize)]
@@ -49,61 +48,6 @@ pub fn uploaded_entry(path: &Path) -> FileEntry {
     file_entry(path, read_metadata(path))
 }
 
-pub struct ErrorResponse {
-    pub status: StatusCode,
-    pub content_type: &'static str,
-    pub body: String,
-}
-
-impl IntoResponse for ErrorResponse {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            [
-                (header::CONTENT_TYPE, self.content_type),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            ],
-            self.body,
-        )
-            .into_response()
-    }
-}
-
-impl ErrorResponse {
-    pub fn json(status: StatusCode, message: impl Display) -> Self {
-        let body = serde_json::json!({ "code": status.as_u16(), "message": message.to_string() });
-        Self {
-            status,
-            content_type: "application/json; charset=utf-8",
-            body: format!("{body}\n"),
-        }
-    }
-
-    pub fn bad_request(message: impl Display) -> Self {
-        Self::json(StatusCode::BAD_REQUEST, message)
-    }
-
-    pub fn unauthorized(message: impl Display) -> Self {
-        Self::json(StatusCode::UNAUTHORIZED, message)
-    }
-
-    pub fn not_found(message: impl Display) -> Self {
-        Self::json(StatusCode::NOT_FOUND, message)
-    }
-
-    pub fn not_acceptable(message: impl Display) -> Self {
-        Self::json(StatusCode::NOT_ACCEPTABLE, message)
-    }
-
-    pub fn internal(message: impl Display) -> Self {
-        Self::json(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-
-    pub fn insufficient_storage(message: impl Display) -> Self {
-        Self::json(StatusCode::INSUFFICIENT_STORAGE, message)
-    }
-}
-
 pub fn authorize(
     state: &AppState,
     query: &FilesQuery,
@@ -127,7 +71,12 @@ pub fn authorize(
         query.path.as_deref().unwrap_or_default(),
         operation,
     )
-    .map_err(ErrorResponse::unauthorized)?;
+    .map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .message(e)
+            .build()
+    })?;
 
     lookup_user(query.username.as_deref(), &state.defaults().user)
 }
@@ -136,10 +85,18 @@ pub fn lookup_user(username: Option<&str>, default_user: &str) -> Result<User, E
     let name = match username {
         Some(name) => name,
         None if !default_user.is_empty() => default_user,
-        None => return Err(ErrorResponse::bad_request("username not provided")),
+        None => {
+            return Err(ErrorResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .message("username not provided")
+                .build());
+        }
     };
     User::lookup(name).ok_or_else(|| {
-        ErrorResponse::unauthorized(format!("error looking up user '{name}': user: unknown user {name}"))
+        ErrorResponse::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .message(format!("error looking up user '{name}': user: unknown user {name}"))
+            .build()
     })
 }
 
@@ -149,12 +106,12 @@ fn parse_expiration(value: &str) -> Result<i64, ErrorResponse> {
             std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => "value out of range",
             _ => "invalid syntax",
         };
-        ErrorResponse {
-            status: StatusCode::BAD_REQUEST,
-            content_type: "text/plain; charset=utf-8",
-            body: format!(
-                "Invalid format for parameter signature_expiration: error binding string parameter: strconv.ParseInt: parsing {value:?}: {reason}\n"
-            ),
-        }
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!(
+                "Invalid format for parameter signature_expiration: error binding string parameter: strconv.ParseInt: parsing {value:?}: {reason}"
+            ))
+            .plain_text()
+            .build()
     })
 }
