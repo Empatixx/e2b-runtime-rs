@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use connectrpc::{ConnectError, ErrorCode};
 
@@ -98,46 +98,61 @@ pub fn list_dir(path: &Path, depth: u32) -> Result<Vec<EntryInfo>, ConnectError>
         }
     }
 
-    let max_depth = if depth == 0 { 1 } else { depth as usize };
-    let mut entries = Vec::new();
-    walk(path, &resolved, &resolved, 1, max_depth, &mut entries)
+    let mut listing = Listing {
+        shown_root: path.to_path_buf(),
+        real_root: resolved.clone(),
+        max_depth: depth.max(1) as usize,
+        entries: Vec::new(),
+    };
+    walk(&mut listing, &resolved, 1)
         .map_err(|cause| ConnectError::internal(format!("error reading directory {}: {cause}", resolved.display())))?;
-    Ok(entries)
+    Ok(listing.entries)
 }
 
-fn walk(
-    shown_root: &Path,
-    real_root: &Path,
-    dir: &Path,
-    depth: usize,
+struct Listing {
+    shown_root: PathBuf,
+    real_root: PathBuf,
     max_depth: usize,
-    entries: &mut Vec<EntryInfo>,
-) -> Result<(), String> {
-    let mut children = Vec::new();
-    let read_dir = std::fs::read_dir(dir).map_err(|e| os_error("open", dir, &e))?;
-    for child in read_dir {
-        let child = child.map_err(|e| os_error("open", dir, &e))?;
-        let is_dir = child.file_type().map_err(|e| os_error("open", dir, &e))?.is_dir();
-        children.push((child.path(), is_dir));
+    entries: Vec<EntryInfo>,
+}
+
+struct DirChild {
+    path: PathBuf,
+    is_dir: bool,
+}
+
+fn walk(listing: &mut Listing, dir: &Path, depth: usize) -> Result<(), String> {
+    let mut children = std::fs::read_dir(dir)
+        .and_then(|entries| {
+            entries
+                .map(|entry| {
+                    entry.and_then(|entry| {
+                        Ok(DirChild {
+                            is_dir: entry.file_type()?.is_dir(),
+                            path: entry.path(),
+                        })
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .map_err(|e| os_error("open", dir, &e))?;
+    if depth > listing.max_depth {
+        return Ok(());
     }
-    children.sort();
+    children.sort_by(|a, b| a.path.cmp(&b.path));
 
-    for (child, is_dir) in children {
-        if depth > max_depth {
-            break;
-        }
-
-        let mut entry = match entry_info(&child) {
+    for child in children {
+        let mut entry = match entry_info(&child.path) {
             Ok(entry) => entry,
             Err(e) if e.code == ErrorCode::NotFound => continue,
             Err(e) => return Err(format!("{}: {}", e.code.as_str(), e.message.unwrap_or_default())),
         };
-        let relative = child.strip_prefix(real_root).unwrap_or(&child);
-        entry.path = shown_root.join(relative).display().to_string();
-        entries.push(entry);
+        let relative = child.path.strip_prefix(&listing.real_root).unwrap_or(&child.path);
+        entry.path = listing.shown_root.join(relative).display().to_string();
+        listing.entries.push(entry);
 
-        if is_dir {
-            walk(shown_root, real_root, &child, depth + 1, max_depth, entries)?;
+        if child.is_dir {
+            walk(listing, &child.path, depth + 1)?;
         }
     }
     Ok(())

@@ -46,7 +46,10 @@ pub fn accept_encoding(headers: &HeaderMap) -> Result<&'static str, String> {
         return Ok(IDENTITY);
     }
 
-    let (mut encodings, identity_rejected) = parse_accept(header);
+    let AcceptHeader {
+        mut encodings,
+        identity_rejected,
+    } = parse_accept(header);
     encodings.sort_by(|a, b| b.quality.total_cmp(&a.quality));
     for accepted in encodings.iter().filter(|accepted| accepted.quality != 0.0) {
         match accepted.encoding.as_str() {
@@ -66,10 +69,15 @@ pub fn accept_encoding(headers: &HeaderMap) -> Result<&'static str, String> {
 
 pub fn identity_acceptable(headers: &HeaderMap) -> bool {
     let header = header_value(headers, "accept-encoding");
-    header.is_empty() || !parse_accept(header).1
+    header.is_empty() || !parse_accept(header).identity_rejected
 }
 
-fn parse_accept(header: &str) -> (Vec<WeightedEncoding>, bool) {
+struct AcceptHeader {
+    encodings: Vec<WeightedEncoding>,
+    identity_rejected: bool,
+}
+
+fn parse_accept(header: &str) -> AcceptHeader {
     let encodings: Vec<WeightedEncoding> = header.split(',').map(weighted).collect();
     let has = |encoding: &str, rejected: bool| {
         encodings
@@ -77,7 +85,10 @@ fn parse_accept(header: &str) -> (Vec<WeightedEncoding>, bool) {
             .any(|entry| entry.encoding == encoding && (entry.quality == 0.0) == rejected)
     };
     let identity_rejected = has(IDENTITY, true) || (has(WILDCARD, true) && !has(IDENTITY, false));
-    (encodings, identity_rejected)
+    AcceptHeader {
+        encodings,
+        identity_rejected,
+    }
 }
 
 fn weighted(value: &str) -> WeightedEncoding {

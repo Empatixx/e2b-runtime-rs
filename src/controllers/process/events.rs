@@ -56,7 +56,7 @@ pub fn live_events<R: Send + 'static>(
             }
         }
 
-        let mut end = process.end.clone();
+        let mut end = process.end.subscribe();
         let response = tokio::select! {
             _ = responses.closed() => return,
             end = end.wait_for(Option::is_some) => end

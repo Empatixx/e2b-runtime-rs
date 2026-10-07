@@ -93,19 +93,16 @@ impl Process for ProcessService {
         ctx: RequestContext,
         request: ServiceRequest<'_, ConnectRequest>,
     ) -> ServiceResult<ServiceStream<ConnectResponse>> {
-        let selector = request
-            .to_owned_message()
-            .process
-            .into_option()
-            .and_then(|process| process.selector);
+        let request = request.to_owned_message();
+        let selector = request.process.as_option();
         let interval = keepalive_interval(ctx.headers());
 
-        match self.processes.find(selector.as_ref()) {
+        match self.processes.find(selector) {
             Ok(process) => {
                 let data = process.output.subscribe();
                 connectrpc::Response::ok(live_events(process, data, interval, connect_response))
             }
-            Err(not_found) => match self.processes.find_exited(selector.as_ref()) {
+            Err(not_found) => match self.processes.find_exited(selector) {
                 Some(exited) => connectrpc::Response::ok(exited_events(exited.pid, exited.end, connect_response)),
                 None => Err(not_found),
             },
@@ -142,12 +139,7 @@ impl Process for ProcessService {
         request: ServiceRequest<'_, UpdateRequest>,
     ) -> ServiceResult<UpdateResponse> {
         let request = request.to_owned_message();
-        let process = self.processes.find(
-            request
-                .process
-                .as_option()
-                .and_then(|process| process.selector.as_ref()),
-        )?;
+        let process = self.processes.find(request.process.as_option())?;
         if let Some(pty) = request.pty.as_option() {
             process
                 .resize(pty.size.rows, pty.size.cols)
@@ -169,8 +161,7 @@ impl Process for ProcessService {
                 .to_owned_message();
             match message.event {
                 Some(InputEvent::Start(start)) => {
-                    let selector = start.process.as_option().and_then(|process| process.selector.as_ref());
-                    process = Some(self.processes.find(selector)?);
+                    process = Some(self.processes.find(start.process.as_option())?);
                 }
                 Some(InputEvent::Data(data)) => {
                     let target = process
@@ -191,12 +182,7 @@ impl Process for ProcessService {
         request: ServiceRequest<'_, SendInputRequest>,
     ) -> ServiceResult<SendInputResponse> {
         let request = request.to_owned_message();
-        let process = self.processes.find(
-            request
-                .process
-                .as_option()
-                .and_then(|process| process.selector.as_ref()),
-        )?;
+        let process = self.processes.find(request.process.as_option())?;
         handle_input(&process, request.input.into_option().and_then(|input| input.input)).await?;
         connectrpc::Response::ok(SendInputResponse::default())
     }
@@ -207,12 +193,7 @@ impl Process for ProcessService {
         request: ServiceRequest<'_, SendSignalRequest>,
     ) -> ServiceResult<SendSignalResponse> {
         let request = request.to_owned_message();
-        let process = self.processes.find(
-            request
-                .process
-                .as_option()
-                .and_then(|process| process.selector.as_ref()),
-        )?;
+        let process = self.processes.find(request.process.as_option())?;
         let signal = match request.signal.as_known() {
             Some(Signal::SIGNAL_SIGKILL) => UnixSignal::SIGKILL,
             Some(Signal::SIGNAL_SIGTERM) => UnixSignal::SIGTERM,
@@ -234,12 +215,7 @@ impl Process for ProcessService {
         request: ServiceRequest<'_, CloseStdinRequest>,
     ) -> ServiceResult<CloseStdinResponse> {
         let request = request.to_owned_message();
-        let process = self.processes.find(
-            request
-                .process
-                .as_option()
-                .and_then(|process| process.selector.as_ref()),
-        )?;
+        let process = self.processes.find(request.process.as_option())?;
         process
             .close_stdin()
             .await

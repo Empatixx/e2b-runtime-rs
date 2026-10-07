@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 
 use super::spawn::Process;
 use crate::proto::process::__buffa::oneof::process_selector::Selector;
+use crate::proto::process::ProcessSelector;
 use crate::proto::process::process_event::EndEvent;
 
 const RETENTION: Duration = Duration::from_secs(30);
@@ -61,9 +62,9 @@ impl Processes {
         self.running.lock().values().cloned().collect()
     }
 
-    pub fn find(&self, selector: Option<&Selector>) -> Result<Arc<Process>, ConnectError> {
+    pub fn find(&self, selector: Option<&ProcessSelector>) -> Result<Arc<Process>, ConnectError> {
         let running = self.running.lock();
-        match selector {
+        match selector.and_then(|selector| selector.selector.as_ref()) {
             Some(Selector::Pid(pid)) => running
                 .get(pid)
                 .cloned()
@@ -79,11 +80,11 @@ impl Processes {
         }
     }
 
-    pub fn find_exited(&self, selector: Option<&Selector>) -> Option<Exited> {
+    pub fn find_exited(&self, selector: Option<&ProcessSelector>) -> Option<Exited> {
         let now = Instant::now();
         let exited = self.exited.lock();
         let mut alive = exited.values().filter(|exited| exited.expires > now);
-        match selector {
+        match selector.and_then(|selector| selector.selector.as_ref()) {
             Some(Selector::Pid(pid)) => alive.find(|exited| exited.pid == *pid).cloned(),
             Some(Selector::Tag(tag)) => alive.find(|exited| exited.tag.as_deref() == Some(tag)).cloned(),
             None => None,
