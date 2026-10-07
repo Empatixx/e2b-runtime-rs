@@ -54,14 +54,16 @@ impl Storage {
     }
 
     pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
-        let size = self.size(path).await?;
-        if range.end > size {
-            return Err(format!("range {range:?} is past the end of {path} ({size} bytes)"));
-        }
-        self.store
+        let bytes = self
+            .store
             .get_range(&ObjectPath::from(path), range.clone())
             .await
-            .map_err(|e| format!("get {path} {range:?}: {e}"))
+            .map_err(|e| format!("get {path} {range:?}: {e}"))?;
+        let expected = range.end - range.start;
+        if bytes.len() as u64 != expected {
+            return Err(format!("get {path} {range:?}: got {} of {expected} bytes", bytes.len()));
+        }
+        Ok(bytes)
     }
 
     pub async fn size(&self, path: &str) -> Result<u64, String> {

@@ -33,6 +33,10 @@ impl Header {
         } else {
             mappings
         };
+        mappings
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, mapping)| check_alignment(index, mapping))?;
         Ok(Self { metadata, mappings })
     }
 
@@ -71,12 +75,39 @@ impl Header {
             .map(|index| self.mappings[index])
             .ok_or_else(|| format!("offset {offset} has no mapping"))?;
         let shift = offset - mapping.offset;
+        if shift >= mapping.length {
+            return Err(format!(
+                "offset {offset} is beyond the end of mapping at offset {} (ends at {})",
+                mapping.offset,
+                mapping.end()
+            ));
+        }
         Ok(Location {
             build_id: mapping.build_id,
             storage_offset: mapping.storage_offset + shift,
             length: mapping.length - shift,
         })
     }
+}
+
+fn check_alignment(index: usize, mapping: &BuildMapping) -> Result<(), String> {
+    let misaligned = [
+        ("offset", mapping.offset),
+        ("length", mapping.length),
+        ("build storage offset", mapping.storage_offset),
+    ]
+    .into_iter()
+    .find(|(_, value)| !value.is_multiple_of(PAGE_SIZE));
+    if let Some((field, value)) = misaligned {
+        return Err(format!(
+            "compact mapping: {field} {value} at index {index} not block-aligned to {PAGE_SIZE}"
+        ));
+    }
+    mapping
+        .offset
+        .checked_add(mapping.length)
+        .map(|_| ())
+        .ok_or_else(|| format!("compact mapping: mapping at index {index} overflows"))
 }
 
 fn whole_device(metadata: &Metadata) -> BuildMapping {
@@ -288,12 +319,68 @@ mod tests {
     #[test]
     fn validate_reports_gaps_and_size_mismatch() {
         assert_eq!(
-            mapping::validate(&[mapping(0, 4096, 1, 0), mapping(8192, 4096, 1, 0)], 12288).unwrap_err(),
+            mapping::validate(&[mapping(0, 4096, 1, 0), mapping(8192, 4096, 1, 0)], 12288, 4096).unwrap_err(),
             "mapping validation failed: expected offset 4096, got 8192"
         );
         assert_eq!(
-            mapping::validate(&[mapping(0, 4096, 1, 0)], 8192).unwrap_err(),
+            mapping::validate(&[mapping(0, 4096, 1, 0)], 8192, 4096).unwrap_err(),
             "mapping validation failed: total 4096 != size 8192"
+        );
+    }
+
+    #[test]
+    fn rejects_misaligned_and_overflowing_mappings() {
+        let metadata = Metadata::template(id(1), 4096, 8192);
+        let new = |mapping: BuildMapping| Header::new(metadata, vec![mapping]).unwrap_err();
+        assert_eq!(
+            new(mapping(100, 4096, 1, 0)),
+            "compact mapping: offset 100 at index 0 not block-aligned to 4096"
+        );
+        assert_eq!(
+            new(mapping(0, 100, 1, 0)),
+            "compact mapping: length 100 at index 0 not block-aligned to 4096"
+        );
+        assert_eq!(
+            new(mapping(0, 4096, 1, 7)),
+            "compact mapping: build storage offset 7 at index 0 not block-aligned to 4096"
+        );
+        assert_eq!(
+            new(mapping(u64::MAX - 4095, 8192, 1, 0)),
+            "compact mapping: mapping at index 0 overflows"
+        );
+    }
+
+    #[test]
+    fn locate_inside_a_gap_is_an_error_not_a_panic() {
+        let header = Header::new(Metadata::template(id(1), 4096, 8192), vec![mapping(0, 4096, 1, 0)]).unwrap();
+        assert_eq!(
+            header.locate(5000).unwrap_err(),
+            "offset 5000 is beyond the end of mapping at offset 0 (ends at 4096)"
+        );
+    }
+
+    #[test]
+    fn validate_checks_block_multiples_and_size() {
+        assert_eq!(
+            mapping::validate(&[mapping(0, 4096, 1, 0), mapping(4096, 8192, 1, 0)], 8192, 4096).unwrap_err(),
+            "mapping validation failed: mapping at index 1 goes beyond the size: 4096 (current offset) + 8192 (length) > 8192 (size)"
+        );
+        assert_eq!(
+            mapping::validate(&[mapping(0, 4096, 1, 0)], 4096, 8192).unwrap_err(),
+            "mapping validation failed: mapping at index 0 has an invalid length: 4096. It should be a multiple of block size: 8192"
+        );
+    }
+
+    #[test]
+    fn diff_with_zero_block_size_is_rejected() {
+        let zero = DiffMetadata {
+            dirty: blocks(&[1]),
+            empty: RoaringBitmap::new(),
+            block_size: 0,
+        };
+        assert_eq!(
+            zero.to_diff_header(&template(8), id(2)).unwrap_err(),
+            "diff block size must be a positive multiple of 4096, got 0"
         );
     }
 }

@@ -123,19 +123,34 @@ fn block_ranges(blocks: &RoaringBitmap) -> Vec<Range<u32>> {
     })
 }
 
-pub fn validate(mappings: &[BuildMapping], size: u64) -> Result<(), String> {
-    let total = mappings.iter().try_fold(0, |expected, mapping| {
-        if mapping.offset == expected {
-            Ok(mapping.end())
-        } else {
-            Err(format!(
-                "mapping validation failed: expected offset {expected}, got {}",
-                mapping.offset
-            ))
-        }
+pub fn validate(mappings: &[BuildMapping], size: u64, block_size: u64) -> Result<(), String> {
+    let total = mappings.iter().enumerate().try_fold(0, |expected, (index, mapping)| {
+        check_entry(index, mapping, expected, size, block_size).map(|()| expected + mapping.length)
     })?;
     if total != size {
         return Err(format!("mapping validation failed: total {total} != size {size}"));
+    }
+    Ok(())
+}
+
+fn check_entry(index: usize, mapping: &BuildMapping, expected: u64, size: u64, block_size: u64) -> Result<(), String> {
+    if mapping.offset != expected {
+        return Err(format!(
+            "mapping validation failed: expected offset {expected}, got {}",
+            mapping.offset
+        ));
+    }
+    if !mapping.length.is_multiple_of(block_size) {
+        return Err(format!(
+            "mapping validation failed: mapping at index {index} has an invalid length: {}. It should be a multiple of block size: {block_size}",
+            mapping.length
+        ));
+    }
+    if expected + mapping.length > size {
+        return Err(format!(
+            "mapping validation failed: mapping at index {index} goes beyond the size: {expected} (current offset) + {} (length) > {size} (size)",
+            mapping.length
+        ));
     }
     Ok(())
 }
