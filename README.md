@@ -86,10 +86,10 @@ sudo modprobe nbd nbds_max=16
 scripts/ci/vm-assets.sh                    # Firecracker fork + guest kernel into /opt/e2b
 scripts/ci/guest-rootfs.sh                 # Debian guest with envd under systemd -> /opt/e2b/rootfs.ext4
 export E2B_FIRECRACKER=/opt/e2b/firecracker E2B_KERNEL=/opt/e2b/vmlinux E2B_ROOTFS=/opt/e2b/rootfs.ext4
-scripts/ci/vm-sdk-tests.sh                 # cold-boots a sandbox, runs the egress check and the SDK tests
+scripts/ci/vm-sdk-tests.sh                 # egress check + SDK tests against a cold-booted and a resumed sandbox
 ```
 
-`cargo run -p orchestrator --example cold_boot` (as root) boots one sandbox and forwards `127.0.0.1:49983` to envd in the VM until Ctrl-C, so `examples/sdk-playground` works against it.
+`cargo run -p orchestrator --example sandbox` (as root) boots one sandbox and forwards `127.0.0.1:49983` to envd in the VM until Ctrl-C, so `examples/sdk-playground` works against it. With `E2B_RESUME=1` it cold-boots, snapshots, and serves a sandbox resumed from that snapshot over userfaultfd.
 
 **Firecracker needs Linux with `/dev/kvm`, so it does not run on macOS.** Everything that boots VMs is tested in GitHub Actions (`.github/workflows/ci.yml`, job `kvm-spike` and later integration jobs) and on bare-metal nodes with host kernel 6.12+.
 

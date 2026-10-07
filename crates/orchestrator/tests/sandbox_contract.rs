@@ -16,6 +16,7 @@ use orchestrator::storage::header::{Header, Metadata};
 use uuid::Uuid;
 
 const ACCESS_TOKEN: &str = "contract-token";
+const FAILED_BOOT_DISK: u64 = 24 << 20;
 
 struct Host {
     firecracker: PathBuf,
@@ -64,12 +65,20 @@ fn namespace_exists(slot: &Slot) -> bool {
         .any(|line| line.split_whitespace().next() == Some(slot.namespace().as_str()))
 }
 
-fn any_nbd_connected() -> bool {
+fn nbd_connected_with_size(bytes: u64) -> bool {
     std::fs::read_dir("/sys/block")
         .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("nbd"))
-        .any(|entry| entry.path().join("pid").exists())
+        .filter(|entry| entry.path().join("pid").exists())
+        .any(|entry| {
+            std::fs::read_to_string(entry.path().join("size")).is_ok_and(|sectors| {
+                sectors
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|sectors| sectors * 512 == bytes)
+            })
+        })
 }
 
 fn cgroup_exists(id: &str) -> bool {
@@ -107,7 +116,7 @@ async fn failed_cold_boot_leaves_no_slot_cgroup_or_device() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::local(&dir.path().join("store")).unwrap();
     let template_id = Uuid::new_v4();
-    let size = 16 << 20;
+    let size = FAILED_BOOT_DISK;
     storage
         .put(
             &Artifact::Rootfs.object(template_id),
@@ -134,7 +143,7 @@ async fn failed_cold_boot_leaves_no_slot_cgroup_or_device() {
     assert!(error.contains("PUT /boot-source"), "{error}");
     assert!(!namespace_exists(&slot), "slot namespace left behind");
     assert!(!cgroup_exists("sbx-fail"), "cgroup left behind");
-    assert!(!any_nbd_connected(), "nbd device left connected");
+    assert!(!nbd_connected_with_size(FAILED_BOOT_DISK), "nbd device left connected");
 }
 
 async fn cleaned_up_within(within: Duration, slot: &Slot, id: &str) -> bool {

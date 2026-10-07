@@ -31,7 +31,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | `export_diff` writes at the stream position, with 2 syscalls per block and no `copy_file_range` coalescing | M7 |
 | Exporting a partial last block would hit EOF (no overlay does this today) | M7 |
-| `Overlay` assumes a `PAGE_SIZE` block size (memfile overlays may differ) | M6 |
+| `Overlay` assumes a `PAGE_SIZE` block size; a 2 MiB-page memfile never goes through an overlay today, but rootfs with other block sizes would | any |
 | Writes past `size` extend the cache file; the block index wraps above 16 TiB | M8 |
 | Missing test: unaligned read crossing into a nil mapping | M6 |
 
@@ -65,7 +65,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | `put_file` does not `abort()` a failed multipart upload (orphaned S3 parts); its test stays under `BufWriter`'s 10 MiB so multipart is untested | M7 |
-| `sandbox_contract::any_nbd_connected` looks at every nbd device on the host; compare to a snapshot or check only our index | any |
 | Teardown leaves `firecracker.sock` and `console.log` in the work dir | M8 |
 | `examples/cold_boot` installs its signal handler only after boot; SIGTERM during boot tears nothing down | any |
 | `/init` omits `hyperloopIP`, `lifecycleID`, `volumeMounts`, `caBundle`; MMDS `address` is `""` (upstream `http://<ip>/logs`) | M8 |
@@ -73,4 +72,16 @@ Every final review ends with minors and deferred rulings. They are collected her
 | udev/blkid probing a just-disconnected `/dev/nbdN` can still reset the next owner's size; upstream uses netlink connect | M8 |
 | If killing Firecracker fails, it still holds the nbd fd while the disk closes; log it | M8 |
 | Egress check cannot probe 169.254.169.254 (MMDS answers it); Azure WireServer 168.63.129.16 is not blocked, check upstream | M8 |
+
+## Orchestrator: resume (M6)
+
+| Item | Target |
+|---|---|
+| Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | M8 |
+| Prefetch from a build-time page trace (needs template build) | template build |
+| Firecracker `use_memfd` / `use_sync_wp` (write-protect tracking, memfd copy-out) are not used | M7 |
+| A memory server that dies while the sandbox runs is only noticed at `stop()`; watch it and stop the sandbox | M8 |
+| Rate limiter reset `PATCH`es after snapshot load (upstream sends empty limiters) | M8 |
+| Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
+| `resume` builds the memfile `BuildFile` in the caller; a template cache should own it | M8 |
 

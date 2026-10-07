@@ -15,10 +15,15 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/exposure/nbd/    NBD server, ioctls, device claim
   src/network/slot.rs  netns, veth, tap, iptables per slot
   src/cgroup.rs        cgroup v2 per sandbox
-  src/firecracker/     config (VmConfig builder), client (API over unix socket), mmds.rs, process
+  src/firecracker/     config (VmConfig builder), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
+                       memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
+  src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
+                       handshake.rs (SCM_RIGHTS listener), server.rs (page-fault loop), snapshot.rs (memfile export)
   src/envd.rs          envd POST /init client (upstream retry semantics)
-  src/sandbox.rs       Sandbox lifecycle: cold_boot, stop, teardown; sandbox/config.rs builder
-  examples/cold_boot.rs dev runner: one sandbox, 127.0.0.1:49983 forwarded to envd in the VM
+  src/storage/build.rs Build: memfile + rootfs headers of a snapshot
+  src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
+                       snapshot.rs (pause + export + upload), resume.rs (snapshot load over uffd)
+  examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
   tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
 docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
 scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh
