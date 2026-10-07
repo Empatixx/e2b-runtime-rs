@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
@@ -14,6 +15,7 @@ object_store = { version = "0.14", features = ["aws"] }
 parking_lot = "0.12"
 roaring = "0.11"
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
