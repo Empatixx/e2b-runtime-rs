@@ -1571,7 +1571,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "nix 0.29.0",
  "object_store",
+ "parking_lot",
  "roaring",
  "tempfile",
  "tokio",

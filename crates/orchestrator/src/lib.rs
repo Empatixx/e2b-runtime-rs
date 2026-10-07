@@ -1,3 +1,4 @@
+pub mod block;
 pub mod storage;
 
 pub fn version() -> &'static str {
