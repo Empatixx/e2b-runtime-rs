@@ -69,12 +69,38 @@ impl IntoResponse for ErrorResponse {
     }
 }
 
-pub fn json_error(status: StatusCode, message: impl Display) -> ErrorResponse {
-    let body = serde_json::json!({ "code": status.as_u16(), "message": message.to_string() });
-    ErrorResponse {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: format!("{body}\n"),
+impl ErrorResponse {
+    pub fn json(status: StatusCode, message: impl Display) -> Self {
+        let body = serde_json::json!({ "code": status.as_u16(), "message": message.to_string() });
+        Self {
+            status,
+            content_type: "application/json; charset=utf-8",
+            body: format!("{body}\n"),
+        }
+    }
+
+    pub fn bad_request(message: impl Display) -> Self {
+        Self::json(StatusCode::BAD_REQUEST, message)
+    }
+
+    pub fn unauthorized(message: impl Display) -> Self {
+        Self::json(StatusCode::UNAUTHORIZED, message)
+    }
+
+    pub fn not_found(message: impl Display) -> Self {
+        Self::json(StatusCode::NOT_FOUND, message)
+    }
+
+    pub fn not_acceptable(message: impl Display) -> Self {
+        Self::json(StatusCode::NOT_ACCEPTABLE, message)
+    }
+
+    pub fn internal(message: impl Display) -> Self {
+        Self::json(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+
+    pub fn insufficient_storage(message: impl Display) -> Self {
+        Self::json(StatusCode::INSUFFICIENT_STORAGE, message)
     }
 }
 
@@ -101,7 +127,7 @@ pub fn authorize(
         query.path.as_deref().unwrap_or_default(),
         operation,
     )
-    .map_err(|message| json_error(StatusCode::UNAUTHORIZED, message))?;
+    .map_err(ErrorResponse::unauthorized)?;
 
     lookup_user(query.username.as_deref(), &state.defaults().user)
 }
@@ -110,13 +136,10 @@ pub fn lookup_user(username: Option<&str>, default_user: &str) -> Result<User, E
     let name = match username {
         Some(name) => name,
         None if !default_user.is_empty() => default_user,
-        None => return Err(json_error(StatusCode::BAD_REQUEST, "username not provided")),
+        None => return Err(ErrorResponse::bad_request("username not provided")),
     };
     User::lookup(name).ok_or_else(|| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            format!("error looking up user '{name}': user: unknown user {name}"),
-        )
+        ErrorResponse::unauthorized(format!("error looking up user '{name}': user: unknown user {name}"))
     })
 }
 

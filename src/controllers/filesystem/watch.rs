@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use connectrpc::{ConnectError, ErrorCode};
+use connectrpc::{ConnectError, ErrorCode, ServiceStream};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc::{Sender, UnboundedReceiver};
+use tokio::sync::mpsc::{channel, unbounded_channel};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
+use tokio_stream::wrappers::ReceiverStream;
 
 use super::entry::entry_info;
 use crate::proto::filesystem::watch_dir_response::{KeepAlive, StartEvent};
@@ -116,58 +117,66 @@ pub fn record_events(pending: &Mutex<PendingEvents>, result: notify::Result<Even
     }
 }
 
-pub async fn stream_events(
-    _watcher: RecommendedWatcher,
+pub fn stream_events(
     root: PathBuf,
+    recursive: bool,
     include_entry: bool,
     keepalive_interval: Duration,
-    mut events: UnboundedReceiver<notify::Result<Event>>,
-    responses: Sender<Result<WatchDirResponse, ConnectError>>,
-) {
-    let start = WatchDirResponse {
-        event: StartEvent::default().into(),
-        ..Default::default()
-    };
-    if responses.send(Ok(start)).await.is_err() {
-        return;
-    }
+) -> Result<ServiceStream<WatchDirResponse>, ConnectError> {
+    let (event_sender, mut events) = unbounded_channel();
+    let watcher = watch(&root, recursive, move |result| {
+        let _ = event_sender.send(result);
+    })?;
 
-    let mut keepalive = interval_at(Instant::now() + keepalive_interval, keepalive_interval);
-    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = responses.closed() => return,
-            _ = keepalive.tick() => {
-                let response = WatchDirResponse {
-                    event: KeepAlive::default().into(),
-                    ..Default::default()
-                };
-                if responses.send(Ok(response)).await.is_err() {
-                    return;
-                }
-            }
-            event = events.recv() => {
-                let event = match event {
-                    Some(Ok(event)) => event,
-                    Some(Err(e)) => {
-                        let _ = responses.send(Err(ConnectError::internal(format!("watcher error: {e}")))).await;
-                        return;
-                    }
-                    None => return,
-                };
-                for filesystem_event in filesystem_events(&event, &root, include_entry) {
+    let (responses, stream) = channel(16);
+    tokio::spawn(async move {
+        let _watcher = watcher;
+        let start = WatchDirResponse {
+            event: StartEvent::default().into(),
+            ..Default::default()
+        };
+        if responses.send(Ok(start)).await.is_err() {
+            return;
+        }
+
+        let mut keepalive = interval_at(Instant::now() + keepalive_interval, keepalive_interval);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = responses.closed() => return,
+                _ = keepalive.tick() => {
                     let response = WatchDirResponse {
-                        event: filesystem_event.into(),
+                        event: KeepAlive::default().into(),
                         ..Default::default()
                     };
                     if responses.send(Ok(response)).await.is_err() {
                         return;
                     }
-                    keepalive.reset();
+                }
+                event = events.recv() => {
+                    let event = match event {
+                        Some(Ok(event)) => event,
+                        Some(Err(e)) => {
+                            let _ = responses.send(Err(ConnectError::internal(format!("watcher error: {e}")))).await;
+                            return;
+                        }
+                        None => return,
+                    };
+                    for filesystem_event in filesystem_events(&event, &root, include_entry) {
+                        let response = WatchDirResponse {
+                            event: filesystem_event.into(),
+                            ..Default::default()
+                        };
+                        if responses.send(Ok(response)).await.is_err() {
+                            return;
+                        }
+                        keepalive.reset();
+                    }
                 }
             }
         }
-    }
+    });
+    Ok(Box::pin(ReceiverStream::new(stream)))
 }
 
 pub fn filesystem_events(event: &Event, root: &Path, include_entry: bool) -> Vec<FilesystemEvent> {
