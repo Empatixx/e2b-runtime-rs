@@ -486,6 +486,7 @@ dependencies = [
  "connectrpc-build",
  "hex",
  "http",
+ "hyper-util",
  "mime_guess",
  "multer",
  "nix",

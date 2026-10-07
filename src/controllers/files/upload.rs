@@ -2,17 +2,16 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, chown};
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio_stream::StreamExt;
-use tokio_util::io::{ReaderStream, StreamReader};
+use bytes::Bytes;
+use tokio_stream::{Stream, StreamExt};
 
-use super::{FileEntry, FilesQuery, authorize, encoding, uploaded_entry};
+use super::encoding::{self, Chunks};
+use super::{FileEntry, FilesQuery, authorize, uploaded_entry};
 use crate::app::AppState;
 use crate::auth::WRITE;
 use crate::user::User;
@@ -20,8 +19,6 @@ use crate::util::error_response::ErrorResponse;
 use crate::util::fs::{dir, os_error};
 use crate::util::metadata::{is_xattr_unsupported, metadata_from_headers, validate_metadata, write_metadata};
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
-
-const READ_BUFFER: usize = 64 * 1024;
 
 pub async fn post_files(
     State(state): State<Arc<AppState>>,
@@ -96,11 +93,7 @@ struct Upload {
     content_length: Option<u64>,
 }
 
-async fn raw_upload(
-    upload: &Upload,
-    path: Option<&str>,
-    mut body: Pin<Box<dyn AsyncRead + Send>>,
-) -> Result<Vec<FileEntry>, ErrorResponse> {
+async fn raw_upload(upload: &Upload, path: Option<&str>, mut body: Chunks) -> Result<Vec<FileEntry>, ErrorResponse> {
     let Some(path) = path else {
         return Err(ErrorResponse::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -122,7 +115,7 @@ async fn multipart_upload(
     upload: &Upload,
     path: Option<&str>,
     content_type: &str,
-    body: Pin<Box<dyn AsyncRead + Send>>,
+    body: Chunks,
 ) -> Result<Vec<FileEntry>, ErrorResponse> {
     let form_error = |e: multer::Error| {
         ErrorResponse::builder()
@@ -131,7 +124,7 @@ async fn multipart_upload(
             .build()
     };
     let boundary = multer::parse_boundary(content_type).map_err(form_error)?;
-    let mut multipart = multer::Multipart::new(ReaderStream::new(body), boundary);
+    let mut multipart = multer::Multipart::new(body, boundary);
     let mut entries: Vec<FileEntry> = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -164,8 +157,8 @@ async fn multipart_upload(
                 .build());
         }
 
-        let mut reader = StreamReader::new(field.map(|chunk| chunk.map_err(io::Error::other)));
-        write_file(upload, &file_path, &mut reader).await?;
+        let mut chunks = field.map(|chunk| chunk.map_err(io::Error::other));
+        write_file(upload, &file_path, &mut chunks).await?;
         entries.push(uploaded_entry(&file_path));
     }
     Ok(entries)
@@ -189,7 +182,11 @@ fn duplicate_path_message(path: &str, entries: &[FileEntry]) -> String {
     message
 }
 
-async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead + Unpin)) -> Result<(), ErrorResponse> {
+async fn write_file(
+    upload: &Upload,
+    path: &Path,
+    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
+) -> Result<(), ErrorResponse> {
     let shown = path.display();
     let parent = dir(path);
     ensure_dirs(&parent, upload.user.uid, upload.user.gid).map_err(|e| {
@@ -282,12 +279,12 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
     }
 }
 
-async fn copy_to_file(content: &mut (impl AsyncRead + Unpin), file: &mut std::fs::File) -> io::Result<()> {
-    let mut buffer = vec![0; READ_BUFFER];
-    loop {
-        match content.read(&mut buffer).await? {
-            0 => return Ok(()),
-            read => file.write_all(&buffer[..read])?,
-        }
+async fn copy_to_file(
+    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
+    file: &mut std::fs::File,
+) -> io::Result<()> {
+    while let Some(chunk) = content.next().await {
+        file.write_all(&chunk?)?;
     }
+    Ok(())
 }

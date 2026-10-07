@@ -16,6 +16,7 @@ axum = { version = "0.8", features = ["http1", "http2", "multipart", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 http = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -37,7 +38,7 @@ multer = "3"
 mime_guess = "2"
 parking_lot = "0.12"
 pty-process = { version = "0.5", features = ["async"] }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "thread"] }
 
 [build-dependencies]
 connectrpc-build = "0.9"
