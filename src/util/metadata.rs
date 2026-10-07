@@ -13,16 +13,17 @@ const MAX_KEY_LEN: usize = 255 - XATTR_PREFIX.len();
 const MAX_TOTAL_LEN: usize = 4096;
 
 pub fn read_metadata(path: &Path) -> BTreeMap<String, String> {
-    let Ok(names) = xattr::list_deref(path) else {
-        return BTreeMap::new();
-    };
-    names
-        .filter_map(|name| {
-            let key = name.to_str()?.strip_prefix(XATTR_PREFIX)?.to_owned();
-            let value = xattr::get_deref(path, &name).ok().flatten()?;
-            Some((key, String::from_utf8(value).ok()?))
+    xattr::list_deref(path)
+        .map(|names| {
+            names
+                .filter_map(|name| {
+                    let key = name.to_str()?.strip_prefix(XATTR_PREFIX)?.to_owned();
+                    let value = xattr::get_deref(path, &name).ok().flatten()?;
+                    Some((key, String::from_utf8(value).ok()?))
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 pub fn metadata_from_headers(headers: &HeaderMap) -> BTreeMap<String, String> {

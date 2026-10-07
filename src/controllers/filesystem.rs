@@ -160,18 +160,18 @@ impl Filesystem for FilesystemService {
         request: ServiceRequest<'_, GetWatcherEventsRequest>,
     ) -> ServiceResult<GetWatcherEventsResponse> {
         let watchers = self.watchers.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(watcher) = watchers.get(request.watcher_id) else {
-            return Err(watcher_not_found(request.watcher_id));
-        };
+        let watcher = watchers
+            .get(request.watcher_id)
+            .ok_or_else(|| watcher_not_found(request.watcher_id))?;
 
         let mut pending = watcher.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(error) = &pending.error {
-            return Err(ConnectError::internal(error.clone()));
+        match pending.error.clone() {
+            Some(error) => Err(ConnectError::internal(error)),
+            None => Response::ok(GetWatcherEventsResponse {
+                events: std::mem::take(&mut pending.events),
+                ..Default::default()
+            }),
         }
-        Response::ok(GetWatcherEventsResponse {
-            events: std::mem::take(&mut pending.events),
-            ..Default::default()
-        })
     }
 
     async fn remove_watcher(

@@ -55,28 +55,25 @@ pub fn validate_signing(
     let Some(token) = token else {
         return Ok(());
     };
+    let matches = |given: &str, expected: &str| bool::from(given.as_bytes().ct_eq(expected.as_bytes()));
 
     if let Some(header_token) = header_token.filter(|t| !t.is_empty()) {
-        if bool::from(header_token.as_bytes().ct_eq(token.as_bytes())) {
-            return Ok(());
-        }
-        return Err("access token present in header but does not match");
+        return matches(header_token, token)
+            .then_some(())
+            .ok_or("access token present in header but does not match");
     }
 
-    let Some(signature) = signature else {
-        return Err("missing signature query parameter");
-    };
+    let signature = signature.ok_or("missing signature query parameter")?;
     let expected = generate_signature(path, username, operation, token, expiration);
-    if !bool::from(signature.as_bytes().ct_eq(expected.as_bytes())) {
-        return Err("invalid signature");
-    }
+    matches(signature, &expected).then_some(()).ok_or("invalid signature")?;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64);
-    if expiration.is_some_and(|expiration| expiration < now) {
-        return Err("signature is already expired");
-    }
-    Ok(())
+    expiration
+        .is_none_or(|expiration| expiration >= now)
+        .then_some(())
+        .ok_or("signature is already expired")
 }
 
 #[cfg(test)]
