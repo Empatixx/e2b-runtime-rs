@@ -168,6 +168,7 @@ mod tests {
     use crate::block::build_file::{Artifact, DiffStore};
     use crate::memory::uffd::testing::{Pages, available};
     use crate::storage::backend::Storage;
+    use crate::storage::header::mapping::BuildMapping;
     use crate::storage::header::{Header, Metadata};
 
     const PAGE: u64 = 4096;
@@ -289,5 +290,65 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_page_does_not_hold_up_other_faults_or_stop() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        let (slow, fast) = (Uuid::new_v4(), Uuid::new_v4());
+        for build in [slow, fast] {
+            storage
+                .put(&Artifact::Memfile.object(build), Bytes::from(vec![7; PAGE as usize]))
+                .await
+                .unwrap();
+        }
+        let mappings = vec![
+            BuildMapping {
+                offset: 0,
+                length: PAGE,
+                build_id: slow,
+                storage_offset: 0,
+            },
+            BuildMapping {
+                offset: PAGE,
+                length: PAGE,
+                build_id: fast,
+                storage_offset: 0,
+            },
+        ];
+        let header = Header::new(Metadata::template(fast, PAGE, 2 * PAGE), mappings).unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        store.chunker(slow, Artifact::Memfile).await.unwrap();
+        let slow_object = dir.path().join("store").join(Artifact::Memfile.object(slow));
+        std::fs::remove_file(&slow_object).unwrap();
+        nix::unistd::mkfifo(&slow_object, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let memfile = Arc::new(BuildFile::new(header, Artifact::Memfile, store));
+        let pages = Arc::new(Pages::map(2 * PAGE as usize));
+        let regions = Regions::parse(
+            format!(
+                r#"[{{"base_host_virt_addr":{},"size":{},"offset":0,"page_size_kib":4096}}]"#,
+                pages.address(),
+                2 * PAGE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let server = MemoryServer::start(pages.register().unwrap(), regions, memfile).unwrap();
+
+        let stuck_address = pages.address();
+        let stuck = std::thread::spawn(move || Pages::read_byte(stuck_address));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let fast_page = tokio::time::timeout(Duration::from_secs(2), read_page(&pages, 1)).await;
+        let stopped = tokio::time::timeout(Duration::from_secs(2), server.stop()).await;
+        drop(std::fs::OpenOptions::new().write(true).open(&slow_object));
+        let _ = stuck.join();
+
+        assert_eq!(fast_page.ok(), Some(7), "a fault behind a slow page was not served");
+        assert!(stopped.is_ok(), "stop waited for a slow page");
     }
 }

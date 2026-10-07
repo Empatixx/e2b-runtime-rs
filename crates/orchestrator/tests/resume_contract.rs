@@ -144,6 +144,28 @@ async fn read_file(sandbox: &Sandbox, path: &str) -> (u16, String) {
     (response.status().as_u16(), response.text().await.unwrap())
 }
 
+async fn run_in_guest(sandbox: &Sandbox, command: &str) {
+    let request = serde_json::json!({ "process": { "cmd": "/bin/sh", "args": ["-c", command] } }).to_string();
+    let envelope = [
+        vec![0],
+        (request.len() as u32).to_be_bytes().to_vec(),
+        request.into_bytes(),
+    ]
+    .concat();
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/process.Process/Start", sandbox.envd_address()))
+        .header("content-type", "application/connect+json")
+        .header("connect-protocol-version", "1")
+        .header("authorization", "Basic cm9vdDo=")
+        .header("X-Access-Token", ACCESS_TOKEN)
+        .body(envelope)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "start {command}");
+    response.bytes().await.unwrap();
+}
+
 async fn health(sandbox: &Sandbox) -> u16 {
     reqwest::get(format!("http://{}/health", sandbox.envd_address()))
         .await
@@ -169,9 +191,19 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
         .await
         .unwrap();
     write_file(&cold, NOTE, NOTE_TEXT).await;
+    run_in_guest(&cold, "sync").await;
     let build_id = Uuid::new_v4();
     let build = cold.snapshot(&templates.storage, build_id).await.unwrap();
     cold.stop().await.unwrap();
+    let leftovers: Vec<PathBuf> = ["snapfile", "memfile.diff", "rootfs.diff"]
+        .iter()
+        .map(|name| templates.work.join("sbx-cold").join(name))
+        .filter(|path| path.exists())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "snapshot files left in the work dir: {leftovers:?}"
+    );
 
     let loaded = Build::load(&templates.storage, build_id).await.unwrap();
     assert_eq!(loaded, build);
@@ -191,7 +223,21 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
     let faults = resumed.faults_served();
     resumed.stop().await.unwrap();
 
+    let disk_only = templates
+        .sandbox(&host, "sbx-disk-only", fresh_slot(4036).await)
+        .rootfs(templates.overlay(loaded.rootfs.clone(), "disk-only"))
+        .cold_boot()
+        .await
+        .unwrap();
+    let note_on_disk = read_file(&disk_only, NOTE).await;
+    disk_only.stop().await.unwrap();
+
     assert_eq!(note, (200, NOTE_TEXT.to_owned()));
+    assert_eq!(
+        note_on_disk,
+        (200, NOTE_TEXT.to_owned()),
+        "the rootfs diff lost a synced write"
+    );
     assert_eq!(health, 204);
     assert!(faults > 0, "no page was served over userfaultfd");
     assert!(took < Duration::from_secs(10), "resume took {took:?}");

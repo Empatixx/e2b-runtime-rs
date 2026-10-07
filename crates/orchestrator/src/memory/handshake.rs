@@ -130,4 +130,13 @@ mod tests {
 
         assert_eq!(error, "uffd handshake: no connection within 100ms");
     }
+
+    #[tokio::test]
+    async fn binding_again_replaces_a_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("uffd.sock");
+        drop(UffdListener::bind(&socket).unwrap());
+
+        assert!(UffdListener::bind(&socket).is_ok());
+    }
 }
