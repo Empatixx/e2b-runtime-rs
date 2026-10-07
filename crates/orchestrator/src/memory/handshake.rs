@@ -24,6 +24,10 @@ pub struct Handshake {
 
 impl UffdListener {
     pub fn bind(path: &Path) -> io::Result<Self> {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))?;
         Ok(Self { listener })

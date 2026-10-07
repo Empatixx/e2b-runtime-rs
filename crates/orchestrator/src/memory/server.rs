@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use roaring::RoaringBitmap;
 use tokio::io::unix::AsyncFd;
@@ -62,18 +63,22 @@ impl MemoryServer {
 
 impl Serving {
     async fn run(self, mut stopped: oneshot::Receiver<()>) -> Result<(), String> {
+        let mut in_flight = FuturesUnordered::new();
         let mut retries = Vec::new();
         loop {
-            let events = tokio::select! {
+            let room = in_flight.len() < MAX_FAULTS_IN_FLIGHT;
+            tokio::select! {
                 _ = &mut stopped => return Ok(()),
-                events = self.next_events(!retries.is_empty()) => events,
-            };
-            let faults = match events {
-                Ok(events) => self.record_removals(events),
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-                Err(e) => return Err(format!("read uffd events: {e}")),
-            };
-            retries = self.serve_all(retries.into_iter().chain(faults).collect()).await?;
+                events = self.next_events(!retries.is_empty()), if room => {
+                    let faults = match events {
+                        Ok(events) => self.record_removals(events),
+                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                        Err(e) => return Err(format!("read uffd events: {e}")),
+                    };
+                    in_flight.extend(retries.drain(..).chain(faults).map(|address| self.serve_fault(address)));
+                }
+                Some(served) = in_flight.next() => retries.extend(served?),
+            }
         }
     }
 
@@ -110,15 +115,6 @@ impl Serving {
             .filter_map(|address| self.regions.offset_of(address).ok())
             .map(|offset| (offset / page_size) as u32);
         self.removed.lock().extend(pages);
-    }
-
-    async fn serve_all(&self, faults: Vec<u64>) -> Result<Vec<u64>, String> {
-        let outcomes: Vec<Result<Option<u64>, String>> = futures::stream::iter(faults)
-            .map(|address| self.serve_fault(address))
-            .buffer_unordered(MAX_FAULTS_IN_FLIGHT)
-            .collect()
-            .await;
-        outcomes.into_iter().filter_map(Result::transpose).collect()
     }
 
     async fn serve_fault(&self, address: u64) -> Result<Option<u64>, String> {

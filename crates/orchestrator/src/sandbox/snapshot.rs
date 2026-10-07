@@ -25,6 +25,12 @@ impl SnapshotFiles {
             rootfs: dir.join("rootfs.diff"),
         }
     }
+
+    fn remove(&self) {
+        [&self.snapfile, &self.memfile, &self.rootfs]
+            .into_iter()
+            .for_each(|path| drop(std::fs::remove_file(path)));
+    }
 }
 
 impl Sandbox {
@@ -33,17 +39,44 @@ impl Sandbox {
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
         let files = SnapshotFiles::in_dir(&self.config.work_dir);
+        let snapshot = self.write_and_upload(&client, pid, &files, storage, build_id).await;
+        files.remove();
+        snapshot
+    }
+
+    async fn write_and_upload(
+        &self,
+        client: &FirecrackerClient,
+        pid: u32,
+        files: &SnapshotFiles,
+        storage: &Storage,
+        build_id: Uuid,
+    ) -> Result<Build, String> {
         client.pause().await?;
         client.create_snapshot(&files.snapfile).await?;
-        let memfile = self.export_memory(&client, pid, &files.memfile, build_id).await?;
+        let memfile = self.export_memory(client, pid, &files.memfile, build_id).await?;
+        self.flush_disk().await?;
         let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
         let build = Build {
             build_id,
             memfile,
             rootfs,
         };
-        upload(storage, &build, &files).await?;
+        upload(storage, &build, files).await?;
         Ok(build)
+    }
+
+    async fn flush_disk(&self) -> Result<(), String> {
+        let device = self
+            .resources
+            .disk
+            .as_ref()
+            .map(|disk| disk.path())
+            .ok_or("rootfs is not exposed")?;
+        tokio::task::spawn_blocking(move || File::open(&device).and_then(|disk| disk.sync_all()))
+            .await
+            .map_err(|e| format!("flush rootfs device: {e}"))?
+            .map_err(|e| format!("flush rootfs device: {e}"))
     }
 
     async fn export_memory(
