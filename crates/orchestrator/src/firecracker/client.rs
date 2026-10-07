@@ -1,15 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::Request;
 use hyper::client::conn::http1;
+use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
 use super::config::VmConfig;
+use super::memory_info::{GuestRegion, MemoryInfo, MemoryMappings};
 use super::mmds::MmdsMetadata;
 use crate::network::slot::{GUEST_MAC, TAP_NAME};
 
@@ -66,14 +68,66 @@ impl FirecrackerClient {
         self.put("/mmds", metadata.to_json()).await
     }
 
+    pub async fn pause(&self) -> Result<(), String> {
+        self.patch("/vm", json!({ "state": "Paused" })).await
+    }
+
+    pub async fn resume(&self) -> Result<(), String> {
+        self.patch("/vm", json!({ "state": "Resumed" })).await
+    }
+
+    pub async fn create_snapshot(&self, snapfile: &Path) -> Result<(), String> {
+        self.put(
+            "/snapshot/create",
+            json!({ "snapshot_type": "Full", "snapshot_path": snapfile }),
+        )
+        .await
+    }
+
+    pub async fn load_snapshot(&self, snapfile: &Path, uffd_socket: &Path) -> Result<(), String> {
+        self.put(
+            "/snapshot/load",
+            json!({
+                "snapshot_path": snapfile,
+                "enable_diff_snapshots": false,
+                "resume_vm": false,
+                "mem_backend": { "backend_type": "Uffd", "backend_path": uffd_socket },
+            }),
+        )
+        .await
+    }
+
+    pub async fn memory_mappings(&self) -> Result<Vec<GuestRegion>, String> {
+        self.get::<MemoryMappings>("/memory/mappings")
+            .await
+            .map(|response| response.mappings)
+    }
+
+    pub async fn memory_info(&self) -> Result<MemoryInfo, String> {
+        self.get("/memory").await
+    }
+
     pub async fn put(&self, path: &str, body: Value) -> Result<(), String> {
-        let call = format!("PUT {path}");
-        tokio::time::timeout(self.timeout, self.send(&call, path, body))
+        self.request(Method::PUT, path, Some(body)).await.map(|_| ())
+    }
+
+    async fn patch(&self, path: &str, body: Value) -> Result<(), String> {
+        self.request(Method::PATCH, path, Some(body)).await.map(|_| ())
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        let body = self.request(Method::GET, path, None).await?;
+        serde_json::from_slice(&body).map_err(|e| format!("GET {path}: {e}"))
+    }
+
+    async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Bytes, String> {
+        let call = format!("{method} {path}");
+        tokio::time::timeout(self.timeout, self.send(&call, method, path, body))
             .await
             .unwrap_or_else(|_| Err(format!("{call}: timed out after {:?}", self.timeout)))
     }
 
-    async fn send(&self, call: &str, path: &str, body: Value) -> Result<(), String> {
+    async fn send(&self, call: &str, method: Method, path: &str, body: Option<Value>) -> Result<Bytes, String> {
         let stream = UnixStream::connect(&self.socket)
             .await
             .map_err(|e| format!("{call}: connect {}: {e}", self.socket.display()))?;
@@ -82,23 +136,27 @@ impl FirecrackerClient {
             .map_err(|e| format!("{call}: {e}"))?;
         tokio::spawn(connection);
 
-        let request = Request::put(path)
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
             .header("host", "localhost")
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(body.to_string())))
+            .body(Full::new(
+                body.map_or_else(Bytes::new, |body| Bytes::from(body.to_string())),
+            ))
             .map_err(|e| format!("{call}: {e}"))?;
         let response = sender.send_request(request).await.map_err(|e| format!("{call}: {e}"))?;
         let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
         let body = response
             .into_body()
             .collect()
             .await
-            .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
-            .unwrap_or_default();
-        Err(format!("{call}: {status}: {body}"))
+            .map(|collected| collected.to_bytes())
+            .map_err(|e| format!("{call}: {e}"))?;
+        status
+            .is_success()
+            .then_some(body.clone())
+            .ok_or_else(|| format!("{call}: {status}: {}", String::from_utf8_lossy(&body)))
     }
 }
 
@@ -113,6 +171,7 @@ mod tests {
 
     use super::*;
     use crate::firecracker::config::VmConfig;
+    use crate::firecracker::memory_info::GuestRegion;
     use crate::firecracker::mmds::MmdsMetadata;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +185,7 @@ mod tests {
     struct Faults {
         fail: Option<&'static str>,
         hang: Option<&'static str>,
+        answers: &'static [(&'static str, &'static str)],
     }
 
     async fn fake_firecracker(socket: PathBuf, faults: Faults) -> Arc<Mutex<Vec<Call>>> {
@@ -155,9 +215,14 @@ mod tests {
                 let call = Call {
                     method: parts.next().unwrap().to_owned(),
                     path: parts.next().unwrap().to_owned(),
-                    body: serde_json::from_slice(&body).unwrap(),
+                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                 };
                 let failing = faults.fail == Some(call.path.as_str());
+                let answer = faults
+                    .answers
+                    .iter()
+                    .find(|(path, _)| *path == call.path)
+                    .map(|(_, body)| *body);
                 let hanging = faults.hang == Some(call.path.as_str());
                 recorded.lock().push(call);
                 if hanging {
@@ -167,10 +232,13 @@ mod tests {
                     });
                     continue;
                 }
-                let response = if failing {
-                    "HTTP/1.1 400 Bad Request\r\ncontent-length: 27\r\n\r\n{\"fault_message\":\"bad cfg\"}"
-                } else {
-                    "HTTP/1.1 204 No Content\r\n\r\n"
+                let response = match (failing, answer) {
+                    (true, _) => {
+                        "HTTP/1.1 400 Bad Request\r\ncontent-length: 27\r\n\r\n{\"fault_message\":\"bad cfg\"}"
+                            .to_owned()
+                    }
+                    (false, Some(body)) => format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}", body.len()),
+                    (false, None) => "HTTP/1.1 204 No Content\r\n\r\n".to_owned(),
                 };
                 reader.get_mut().write_all(response.as_bytes()).await.unwrap();
             }
@@ -283,5 +351,124 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, "PUT /boot-source: timed out after 100ms");
+    }
+
+    async fn calls_after(faults: Faults, call: impl AsyncFnOnce(FirecrackerClient)) -> Vec<Call> {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), faults).await;
+        call(FirecrackerClient::new(socket)).await;
+        calls.lock().clone()
+    }
+
+    fn call(method: &str, path: &str, body: Value) -> Call {
+        Call {
+            method: method.into(),
+            path: path.into(),
+            body,
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_patch_the_vm_state() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client.pause().await.unwrap();
+            client.resume().await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                call("PATCH", "/vm", json!({ "state": "Paused" })),
+                call("PATCH", "/vm", json!({ "state": "Resumed" })),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_snapshot_sends_a_full_snapshot_without_a_memory_file() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client.create_snapshot(Path::new("/run/sbx/snapfile")).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![call(
+                "PUT",
+                "/snapshot/create",
+                json!({ "snapshot_type": "Full", "snapshot_path": "/run/sbx/snapfile" })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_uses_the_uffd_backend() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client
+                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"))
+                .await
+                .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![call(
+                "PUT",
+                "/snapshot/load",
+                json!({
+                    "snapshot_path": "/run/sbx/snapfile",
+                    "enable_diff_snapshots": false,
+                    "resume_vm": false,
+                    "mem_backend": { "backend_type": "Uffd", "backend_path": "/run/sbx/uffd.sock" }
+                })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_mappings_are_parsed() {
+        let faults = Faults {
+            answers: &[(
+                "/memory/mappings",
+                r#"{"mappings":[{"base_host_virt_addr":4096,"size":8192,"offset":0,"page_size":4096}]}"#,
+            )],
+            ..Faults::default()
+        };
+        let mut mappings = Vec::new();
+        let calls = calls_after(faults, async |client| {
+            mappings = client.memory_mappings().await.unwrap();
+        })
+        .await;
+
+        assert_eq!(calls, vec![call("GET", "/memory/mappings", Value::Null)]);
+        assert_eq!(
+            mappings,
+            vec![GuestRegion {
+                base_host_virt_addr: 4096,
+                size: 8192,
+                offset: 0,
+                page_size: 4096
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_info_turns_word_bitmaps_into_page_sets() {
+        let faults = Faults {
+            answers: &[("/memory", r#"{"resident":[5,1],"empty":[4]}"#)],
+            ..Faults::default()
+        };
+        let mut info = None;
+        calls_after(faults, async |client| {
+            info = Some(client.memory_info().await.unwrap());
+        })
+        .await;
+
+        let info = info.unwrap();
+        assert_eq!(info.resident.iter().collect::<Vec<_>>(), vec![0, 2, 64]);
+        assert_eq!(info.empty.iter().collect::<Vec<_>>(), vec![2]);
     }
 }
