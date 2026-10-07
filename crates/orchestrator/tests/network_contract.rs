@@ -41,6 +41,24 @@ async fn slot_is_created_once_and_destroyed_cleanly() {
     assert!(!succeeds("ip", &["link", "show", "veth-4001"]));
 }
 
+#[tokio::test]
+async fn destroy_finishes_a_slot_whose_namespace_is_already_gone() {
+    if !root() {
+        eprintln!("skipping: needs root");
+        return;
+    }
+    let slot = Slot::new(4016).unwrap();
+    let _ = slot.destroy().await;
+    slot.create().await.unwrap();
+    assert!(succeeds("ip", &["netns", "delete", "ns-4016"]));
+
+    slot.destroy().await.unwrap();
+
+    assert!(!succeeds("ip", &["link", "show", "veth-4016"]));
+    slot.create().await.unwrap();
+    slot.destroy().await.unwrap();
+}
+
 #[test]
 fn cgroup_holds_a_process_and_is_removed() {
     if !root() {

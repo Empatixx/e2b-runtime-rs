@@ -17,5 +17,7 @@ SERVER=$!
 for _ in $(seq 1 20); do curl -sf -o /dev/null "http://$HOST_IP:8099" && break; sleep 0.5; done
 (cd examples/sdk-playground && npm install --silent && BLOCKED_URL="$HOST_IP:8099" E2B_DEBUG=true node egress.mjs)
 kill $SERVER
+DROPPED=$(sudo ip netns exec ns-4020 iptables -w -L FORWARD -v -n -x | awk '$3 == "DROP" && $9 ~ /^(10\.0\.0\.0\/8|172\.16\.0\.0\/12|192\.168\.0\.0\/16)$/ { sum += $1 } END { print sum + 0 }')
+[ "$DROPPED" -gt 0 ] || { echo "guest firewall did not drop the private-range probe"; exit 1; }
 
 scripts/sdk-run.sh

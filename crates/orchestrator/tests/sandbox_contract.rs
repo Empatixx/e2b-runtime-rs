@@ -126,6 +126,59 @@ async fn failed_cold_boot_leaves_no_slot_cgroup_or_device() {
     assert!(!any_nbd_connected(), "nbd device left connected");
 }
 
+async fn cleaned_up_within(within: Duration, slot: &Slot, id: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if !namespace_exists(slot) && !cgroup_exists(id) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_cold_boot_tears_everything_down() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, /dev/kvm, nbd and E2B_FIRECRACKER / E2B_KERNEL");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::local(&dir.path().join("store")).unwrap();
+    let template_id = Uuid::new_v4();
+    let size = 16 << 20;
+    storage
+        .put(
+            &Artifact::Rootfs.object(template_id),
+            Bytes::from(vec![0; size as usize]),
+        )
+        .await
+        .unwrap();
+    let slot = Slot::new(4013).unwrap();
+    let _ = slot.destroy().await;
+
+    let boot = Sandbox::builder()
+        .id("sbx-cancel")
+        .template_id(&template_id.to_string())
+        .rootfs(overlay(storage, dir.path(), template_id, size).await)
+        .slot(slot)
+        .firecracker(&host.firecracker)
+        .kernel(&host.kernel)
+        .work_dir(dir.path().join("sbx-cancel"))
+        .envd_timeout(Duration::from_secs(120))
+        .cold_boot();
+    let cancelled = tokio::time::timeout(Duration::from_secs(3), boot).await;
+
+    assert!(
+        cancelled.is_err(),
+        "cold boot of an empty disk must still be waiting for envd"
+    );
+    assert!(
+        cleaned_up_within(Duration::from_secs(15), &slot, "sbx-cancel").await,
+        "a cancelled cold boot left its slot or cgroup behind"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cold_boot_initialises_envd_with_token_and_mmds() {
     let rootfs = guest_rootfs();
