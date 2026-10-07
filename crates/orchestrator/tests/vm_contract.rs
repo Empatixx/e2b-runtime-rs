@@ -11,6 +11,7 @@ use orchestrator::block::overlay::Overlay;
 use orchestrator::cgroup::Cgroup;
 use orchestrator::exposure::nbd::expose;
 use orchestrator::firecracker::config::VmConfig;
+use orchestrator::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use orchestrator::firecracker::process::FirecrackerProcess;
 use orchestrator::network::slot::Slot;
 use orchestrator::storage::backend::Storage;
@@ -97,13 +98,20 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
 
     let socket = dir.path().join("fc.sock");
     let console = dir.path().join("console.log");
-    let vm = FirecrackerProcess::spawn(&assets.firecracker, &socket, &slot.namespace(), &console)
-        .await
+    let launch = Launch::builder()
+        .binary(&assets.firecracker)
+        .socket(&socket)
+        .namespace(&slot.namespace())
+        .console(&console)
+        .rootfs(disk.path())
+        .kernel(&assets.kernel)
+        .build()
         .unwrap();
+    let vm = FirecrackerProcess::spawn(&launch).await.unwrap();
     cgroup.add(vm.pid().unwrap()).unwrap();
     let config = VmConfig::builder()
-        .kernel(&assets.kernel)
-        .rootfs(disk.path())
+        .kernel(GUEST_KERNEL)
+        .rootfs(GUEST_ROOTFS)
         .extra_boot_args("init=/bin/sleep -- 3600")
         .build()
         .unwrap();

@@ -11,6 +11,7 @@ pub const TAP_NAME: &str = "tap0";
 pub const TAP_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 22);
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 21);
 pub const GUEST_MAC: &str = "02:FC:00:00:00:05";
+pub const TAP_MAC: &str = "02:FC:00:00:00:06";
 
 const VETH_BASE: Ipv4Addr = Ipv4Addr::new(10, 12, 0, 0);
 const HOST_IP_BASE: Ipv4Addr = Ipv4Addr::new(10, 11, 0, 0);
@@ -126,6 +127,8 @@ impl Slot {
     async fn create_tap(&self) -> Result<(), String> {
         let tap_cidr = format!("{TAP_IP}/30");
         self.inside(&["ip", "tuntap", "add", TAP_NAME, "mode", "tap"]).await?;
+        self.inside(&["ip", "link", "set", TAP_NAME, "address", TAP_MAC])
+            .await?;
         self.inside(&["ip", "addr", "add", &tap_cidr, "dev", TAP_NAME]).await?;
         self.inside(&["ip", "link", "set", TAP_NAME, "up"]).await
     }

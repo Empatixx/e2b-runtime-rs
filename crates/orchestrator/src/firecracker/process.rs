@@ -8,6 +8,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 use super::client::FirecrackerClient;
+use super::launch::Launch;
 
 const READY_POLLS: u32 = 500;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -20,27 +21,26 @@ pub struct FirecrackerProcess {
 }
 
 impl FirecrackerProcess {
-    pub async fn spawn(binary: &Path, socket: &Path, namespace: &str, console: &Path) -> Result<Self, String> {
-        remove_stale_socket(socket)?;
+    pub async fn spawn(launch: &Launch) -> Result<Self, String> {
+        remove_stale_socket(&launch.socket)?;
+        let console = &launch.console;
         let console_file = File::create(console).map_err(|e| format!("create console {}: {e}", console.display()))?;
         let console_err = console_file
             .try_clone()
             .map_err(|e| format!("clone console {}: {e}", console.display()))?;
-        let child = Command::new("ip")
-            .args(["netns", "exec", namespace])
-            .arg(binary)
-            .arg("--api-sock")
-            .arg(socket)
+        let child = Command::new("unshare")
+            .args(["-m", "--", "sh", "-c"])
+            .arg(launch.script())
             .stdin(Stdio::null())
             .stdout(console_file)
             .stderr(console_err)
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("spawn firecracker {}: {e}", binary.display()))?;
+            .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
         let mut process = Self {
             child,
-            socket: socket.to_path_buf(),
-            console: console.to_path_buf(),
+            socket: launch.socket.clone(),
+            console: console.clone(),
         };
         process.wait_until_ready().await?;
         Ok(process)

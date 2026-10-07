@@ -13,6 +13,7 @@ use crate::envd::{self, ENVD_PORT};
 use crate::exposure::nbd::expose;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::config::VmConfig;
+use crate::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
 
@@ -74,8 +75,8 @@ impl Sandbox {
 
     async fn start(&mut self) -> Result<(), String> {
         let rootfs = self.attach_disk_and_slot().await?;
-        let client = self.spawn_firecracker().await?;
-        self.boot(&client, rootfs).await?;
+        let client = self.spawn_firecracker(rootfs).await?;
+        self.boot(&client).await?;
         self.init_envd().await
     }
 
@@ -88,18 +89,20 @@ impl Sandbox {
         created.and(exposed)
     }
 
-    async fn spawn_firecracker(&mut self) -> Result<FirecrackerClient, String> {
+    async fn spawn_firecracker(&mut self, rootfs: PathBuf) -> Result<FirecrackerClient, String> {
         std::fs::create_dir_all(&self.config.work_dir)
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
         let cgroup = Cgroup::create(&self.config.id).map_err(|e| format!("create cgroup {}: {e}", self.config.id))?;
         let cgroup = self.resources.cgroup.insert(cgroup);
-        let vm = FirecrackerProcess::spawn(
-            &self.config.firecracker,
-            &self.config.work_dir.join("firecracker.sock"),
-            &self.config.slot.namespace(),
-            &self.config.work_dir.join("console.log"),
-        )
-        .await?;
+        let launch = Launch::builder()
+            .binary(&self.config.firecracker)
+            .socket(self.config.work_dir.join("firecracker.sock"))
+            .namespace(&self.config.slot.namespace())
+            .console(self.config.work_dir.join("console.log"))
+            .rootfs(rootfs)
+            .kernel(&self.config.kernel)
+            .build()?;
+        let vm = FirecrackerProcess::spawn(&launch).await?;
         let vm = self.resources.vm.insert(vm);
         vm.pid()
             .ok_or_else(|| "firecracker exited before joining its cgroup".to_owned())
@@ -107,10 +110,10 @@ impl Sandbox {
             .map(|()| vm.client())
     }
 
-    async fn boot(&self, client: &FirecrackerClient, rootfs: PathBuf) -> Result<(), String> {
+    async fn boot(&self, client: &FirecrackerClient) -> Result<(), String> {
         let vm_config = VmConfig::builder()
-            .kernel(&self.config.kernel)
-            .rootfs(rootfs)
+            .kernel(GUEST_KERNEL)
+            .rootfs(GUEST_ROOTFS)
             .vcpus(self.config.vcpus)
             .memory_mib(self.config.memory_mib)
             .extra_boot_args(&format!("init={}", self.config.init_path))

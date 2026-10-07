@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+use orchestrator::firecracker::launch::Launch;
+use orchestrator::firecracker::process::FirecrackerProcess;
 use orchestrator::network::slot::Slot;
 
 fn root() -> bool {
@@ -28,6 +30,11 @@ async fn slot_is_created_once_and_destroyed_cleanly() {
     ));
     assert!(succeeds("ip", &["link", "show", "veth-4001"]));
     assert!(succeeds("ip", &["route", "show", "10.11.15.161"]));
+    let tap_mac = Command::new("ip")
+        .args(["netns", "exec", "ns-4001", "cat", "/sys/class/net/tap0/address"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&tap_mac.stdout).trim(), "02:fc:00:00:00:06");
 
     let again = slot.create().await.unwrap_err();
     assert!(again.contains("ip netns add ns-4001"), "{again}");
@@ -191,13 +198,16 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
     std::fs::write(&socket, "stale").unwrap();
 
     let started = std::time::Instant::now();
-    let result = orchestrator::firecracker::process::FirecrackerProcess::spawn(
-        std::path::Path::new("/bin/false"),
-        &socket,
-        &slot.namespace(),
-        &dir.path().join("console.log"),
-    )
-    .await;
+    let launch = Launch::builder()
+        .binary("/bin/false")
+        .socket(&socket)
+        .namespace(&slot.namespace())
+        .console(dir.path().join("console.log"))
+        .rootfs("/dev/null")
+        .kernel("/dev/null")
+        .build()
+        .unwrap();
+    let result = FirecrackerProcess::spawn(&launch).await;
     slot.destroy().await.unwrap();
 
     let error = result.err().expect("a firecracker that exits must not look ready");
