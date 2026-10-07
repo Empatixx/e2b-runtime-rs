@@ -8,6 +8,8 @@ description: Use when adding or moving code in envd-rs — new endpoint, Connect
 Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `foo/`. Never create `mod.rs`.
 
 ```
+Cargo.toml             root package (envd) + [workspace] members [".", "crates/orchestrator"]
+crates/orchestrator/   orchestrator crate (same style and layout rules as src/)
 src/
   main.rs              parse config, init tracing, bind, serve. Nothing else.
   lib.rs               pub mod list only
