@@ -10,7 +10,9 @@ Match the upstream Go envd exactly at the edges: routes, status codes, headers, 
 
 Write simple, plain code: free functions, `match`, `?` and iterator chains. Let good names explain the code and keep source files free of comments. Use structs with named fields for every piece of data.
 
-Keep things flat and direct, adding a new layer only when the compiler asks for it. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` holding the exact text the client sees.
+Put readability first. Split work into small, well-named methods with low cognitive complexity, so each one reads top to bottom in a few lines. Keep it simple and direct, and reach for an abstraction when it makes the calling code read like the domain.
+
+Hide low-level details such as `unsafe`, syscalls, ioctls and byte layouts behind small types with a clean, safe API. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` holding the exact text the client sees.
 
 Write code as method chains. Transform `Option`, `Result` and iterators with combinators like `map`, `and_then`, `filter`, `map_or`, `is_none_or` and `try_for_each`, the way `keepalive_interval` reads a header in one chain. Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`, give a struct its own `builder()` when it is created in several places, and use library builders like `OpenOptions` and `Response::builder`.
 

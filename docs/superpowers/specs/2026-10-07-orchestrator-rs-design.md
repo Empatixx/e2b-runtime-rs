@@ -30,7 +30,7 @@ Kubernetes runs only long-lived services: API and proxy as Deployments, the orch
 - **Host kernel** on our nodes is 6.12 LTS or newer.
 - **Block device exposure** is separate from the block layer. The block layer only knows `read_at` / `write_at` on an overlay. **ublk** (`libublk`, io_uring, ~10 ms attach) is the primary way to expose it to Firecracker. **NBD** (kernel nbd over generic netlink, ~300 ms attach) is a fallback for hosts without `ublk_drv`.
 - **Object storage** is S3-compatible (MinIO on the cluster) through `object_store`, with a local filesystem backend for tests.
-- **Code style** follows the envd crate: crates.io module layout, no comments, method chains, builders, named fields.
+- **Code style** puts readability first: small well-named methods with low cognitive complexity, method chains, builders, named fields, no comments, crates.io module layout. Low-level details (`unsafe`, syscalls, ioctls, byte layouts) hide behind small types with a safe, domain-level API.
 
 ## Repository layout
 
