@@ -18,6 +18,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/ci/s3.sh
       - run: cargo fmt --all --check
+      - run: sudo modprobe nbd nbds_max=16
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: sudo -E env "PATH=$PATH" cargo test --workspace
 
