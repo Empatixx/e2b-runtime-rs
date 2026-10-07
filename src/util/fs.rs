@@ -60,8 +60,8 @@ pub fn eval_symlinks(path: &Path) -> io::Result<PathBuf> {
             return Err(io::Error::other("EvalSymlinks: too many links"));
         }
 
-        let target = std::fs::read_link(&resolved)
-            .map_err(|e| io::Error::new(e.kind(), os_error("readlink", &resolved, &e)))?;
+        let target =
+            std::fs::read_link(&resolved).map_err(|e| io::Error::new(e.kind(), os_error("readlink", &resolved, &e)))?;
         resolved.pop();
         if target.is_absolute() {
             resolved = PathBuf::from("/");
@@ -91,7 +91,10 @@ mod tests {
     #[test]
     fn error_text() {
         let err = io::Error::from_raw_os_error(nix::libc::ENOENT);
-        assert_eq!(os_error("lstat", Path::new("/x"), &err), "lstat /x: no such file or directory");
+        assert_eq!(
+            os_error("lstat", Path::new("/x"), &err),
+            "lstat /x: no such file or directory"
+        );
     }
 
     #[test]

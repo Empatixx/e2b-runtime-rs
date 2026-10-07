@@ -84,7 +84,13 @@ mod tests {
             parse_args(&["envd", "-verbose=yes"]).unwrap_err(),
             "invalid boolean value \"yes\" for -verbose: parse error"
         );
-        assert_eq!(parse_args(&["envd", "-port=x"]).unwrap_err(), "invalid value \"x\" for flag -port: parse error");
-        assert_eq!(parse_args(&["envd", "--cgroup-root", "/cg"]).unwrap().cgroup_root, "/cg");
+        assert_eq!(
+            parse_args(&["envd", "-port=x"]).unwrap_err(),
+            "invalid value \"x\" for flag -port: parse error"
+        );
+        assert_eq!(
+            parse_args(&["envd", "--cgroup-root", "/cg"]).unwrap().cgroup_root,
+            "/cg"
+        );
     }
 }

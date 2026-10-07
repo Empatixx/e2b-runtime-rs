@@ -6,14 +6,20 @@ use common::spawn_server_with_state;
 use serde_json::{Value, json};
 
 fn current_user() -> String {
-    nix::unistd::User::from_uid(nix::unistd::getuid()).unwrap().unwrap().name
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap()
+        .name
 }
 
 async fn call(addr: std::net::SocketAddr, method: &str, user: &str, body: Value) -> (u16, Value) {
     let res = reqwest::Client::new()
         .post(format!("http://{addr}/filesystem.Filesystem/{method}"))
         .header("content-type", "application/json")
-        .header("authorization", format!("Basic {}", STANDARD.encode(format!("{user}:"))))
+        .header(
+            "authorization",
+            format!("Basic {}", STANDARD.encode(format!("{user}:"))),
+        )
         .json(&body)
         .send()
         .await
@@ -42,7 +48,10 @@ async fn stat_missing_is_not_found() {
     let (status, body) = call(addr, "Stat", &current_user(), json!({ "path": "/definitely/not/here" })).await;
     assert_eq!(status, 404);
     assert_eq!(body["code"], "not_found");
-    assert_eq!(body["message"], "file not found: lstat /definitely/not/here: no such file or directory");
+    assert_eq!(
+        body["message"],
+        "file not found: lstat /definitely/not/here: no such file or directory"
+    );
 }
 
 #[tokio::test]
@@ -71,7 +80,10 @@ async fn unknown_basic_user_is_rejected_on_every_route() {
     assert_eq!(res.status(), 401);
     assert_eq!(res.headers()["content-type"], "application/json");
     let body: Value = res.json().await.unwrap();
-    assert_eq!(body, json!({ "code": "unauthenticated", "message": "invalid username: 'definitely-missing-user'" }));
+    assert_eq!(
+        body,
+        json!({ "code": "unauthenticated", "message": "invalid username: 'definitely-missing-user'" })
+    );
 }
 
 #[tokio::test]
@@ -79,7 +91,10 @@ async fn not_yet_ported_methods_are_unimplemented() {
     let (addr, _) = spawn_server_with_state().await;
     let (status, body) = call(addr, "CreateWatcher", &current_user(), json!({ "path": "/" })).await;
     assert_eq!(status, 501);
-    assert_eq!(body["message"], "filesystem.Filesystem.CreateWatcher is not implemented");
+    assert_eq!(
+        body["message"],
+        "filesystem.Filesystem.CreateWatcher is not implemented"
+    );
 }
 
 #[tokio::test]
@@ -100,11 +115,22 @@ async fn make_dir_list_move_remove_roundtrip() {
 
     let (status, body) = call(addr, "ListDir", &me, json!({ "path": root, "depth": 2 })).await;
     assert_eq!(status, 200, "{body}");
-    let listed: Vec<&str> = body["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+    let listed: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
     assert_eq!(listed, vec![root.join("a").to_str().unwrap(), dir.to_str().unwrap()]);
 
     let moved = root.join("c");
-    let (status, body) = call(addr, "Move", &me, json!({ "source": root.join("a"), "destination": moved })).await;
+    let (status, body) = call(
+        addr,
+        "Move",
+        &me,
+        json!({ "source": root.join("a"), "destination": moved }),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["entry"]["path"], moved.to_str().unwrap());
 

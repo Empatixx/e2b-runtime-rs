@@ -1,4 +1,4 @@
-use envd::{config, server, state::AppState};
+use envd::{app::AppState, config, router};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,6 +15,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = config.port;
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(port, "envd listening");
-    axum::serve(listener, server::build_router(AppState::new(config))).await?;
+    axum::serve(listener, router::build_router(AppState::new(config))).await?;
     Ok(())
 }

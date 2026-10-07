@@ -12,7 +12,10 @@ pub struct Defaults {
 
 impl Default for Defaults {
     fn default() -> Self {
-        Self { user: "root".into(), workdir: None }
+        Self {
+            user: "root".into(),
+            workdir: None,
+        }
     }
 }
 

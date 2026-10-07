@@ -36,7 +36,9 @@ async fn init_token_rotation_rules() {
     let (addr, _) = spawn_server_with_state().await;
     let c = reqwest::Client::new();
     let post = |tok: &'static str| {
-        c.post(format!("http://{addr}/init")).json(&serde_json::json!({ "accessToken": tok })).send()
+        c.post(format!("http://{addr}/init"))
+            .json(&serde_json::json!({ "accessToken": tok }))
+            .send()
     };
     assert_eq!(post("t1").await.unwrap().status(), 204, "first init sets token");
     assert_eq!(post("t1").await.unwrap().status(), 204, "same token again ok");
@@ -49,7 +51,12 @@ async fn init_token_rotation_rules() {
 async fn init_rejects_bad_json_and_older_timestamp_keeps_data() {
     let (addr, state) = spawn_server_with_state().await;
     let c = reqwest::Client::new();
-    let res = c.post(format!("http://{addr}/init")).body("{not json").send().await.unwrap();
+    let res = c
+        .post(format!("http://{addr}/init"))
+        .body("{not json")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), 400);
 
     let init = |ts: &str, user: &str| {

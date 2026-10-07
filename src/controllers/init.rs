@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
+use crate::app::AppState;
 use crate::host;
-use crate::state::AppState;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +30,11 @@ pub struct InitRequest {
     pub lifecycle_id: Option<String>,
 }
 
-pub fn validate_token(current: Option<&str>, requested: Option<&str>, mmds_hash: Option<&str>) -> Result<(), &'static str> {
+pub fn validate_token(
+    current: Option<&str>,
+    requested: Option<&str>,
+    mmds_hash: Option<&str>,
+) -> Result<(), &'static str> {
     if let (Some(current), Some(requested)) = (current, requested)
         && bool::from(current.as_bytes().ct_eq(requested.as_bytes()))
     {
@@ -69,7 +73,11 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
     let mmds_hash = if state.config.is_not_fc {
         None
     } else {
-        host::mmds::get_opts().await.ok().map(|opts| opts.access_token_hash).filter(|hash| !hash.is_empty())
+        host::mmds::get_opts()
+            .await
+            .ok()
+            .map(|opts| opts.access_token_hash)
+            .filter(|hash| !hash.is_empty())
     };
     if let Err(e) = validate_token(state.access_token().as_deref(), requested_token, mmds_hash.as_deref()) {
         tracing::error!("{e}");
@@ -147,8 +155,17 @@ mod tests {
         assert_eq!(validate_token(Some("t1"), Some("t2"), t2_hash), Ok(()));
         assert_eq!(validate_token(None, Some("t1"), None), Ok(()));
         assert_eq!(validate_token(None, None, None), Ok(()));
-        assert_eq!(validate_token(Some("t1"), None, None), Err("access token reset not authorized"));
-        assert_eq!(validate_token(Some("t1"), Some("t2"), None), Err("access token validation failed"));
-        assert_eq!(validate_token(None, Some("t2"), other_hash), Err("access token validation failed"));
+        assert_eq!(
+            validate_token(Some("t1"), None, None),
+            Err("access token reset not authorized")
+        );
+        assert_eq!(
+            validate_token(Some("t1"), Some("t2"), None),
+            Err("access token validation failed")
+        );
+        assert_eq!(
+            validate_token(None, Some("t2"), other_hash),
+            Err("access token validation failed")
+        );
     }
 }

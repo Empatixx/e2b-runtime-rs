@@ -6,9 +6,9 @@ use buffa::EnumValue;
 use buffa_types::google::protobuf::Timestamp;
 use connectrpc::ConnectError;
 
-use crate::fsutil::{eval_symlinks, os_error};
 use crate::proto::filesystem::{EntryInfo, FileType};
 use crate::user::{group_name, user_name};
+use crate::util::fs::{eval_symlinks, os_error};
 
 const METADATA_XATTR_PREFIX: &str = "user.e2b.";
 
@@ -16,10 +16,16 @@ pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ConnectError::not_found(format!("file not found: {}", os_error("lstat", path, &e))));
+            return Err(ConnectError::not_found(format!(
+                "file not found: {}",
+                os_error("lstat", path, &e)
+            )));
         }
         Err(e) => {
-            return Err(ConnectError::internal(format!("error getting file info: {}", os_error("lstat", path, &e))));
+            return Err(ConnectError::internal(format!(
+                "error getting file info: {}",
+                os_error("lstat", path, &e)
+            )));
         }
     };
 
@@ -34,7 +40,9 @@ pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
     };
 
     let mut entry = EntryInfo {
-        name: path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
+        name: path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
         r#type: EnumValue::from(file_type),
         path: path.display().to_string(),
         size: meta.size() as i64,
@@ -91,7 +99,11 @@ fn permissions(meta: &Metadata) -> String {
 
 fn modified_time(meta: &Metadata) -> Option<Timestamp> {
     let (seconds, nanos) = (meta.mtime(), meta.mtime_nsec());
-    (seconds != 0 || nanos != 0).then(|| Timestamp { seconds, nanos: nanos as i32, ..Default::default() })
+    (seconds != 0 || nanos != 0).then(|| Timestamp {
+        seconds,
+        nanos: nanos as i32,
+        ..Default::default()
+    })
 }
 
 fn xattr_metadata(path: &Path) -> Vec<(String, String)> {
@@ -125,7 +137,13 @@ mod tests {
         let file = tmp.path().join("f");
         std::fs::write(&file, b"").unwrap();
 
-        for (mode, expected) in [(0o644, "-rw-r--r--"), (0o755, "-rwxr-xr-x"), (0o000, "----------"), (0o4755, "urwxr-xr-x"), (0o2755, "grwxr-xr-x")] {
+        for (mode, expected) in [
+            (0o644, "-rw-r--r--"),
+            (0o755, "-rwxr-xr-x"),
+            (0o000, "----------"),
+            (0o4755, "urwxr-xr-x"),
+            (0o2755, "grwxr-xr-x"),
+        ] {
             std::fs::set_permissions(&file, PermissionsExt::from_mode(mode)).unwrap();
             assert_eq!(permissions_of(&file), expected);
         }
