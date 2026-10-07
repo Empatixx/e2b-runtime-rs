@@ -214,3 +214,172 @@ async fn request_timeout_kills_the_process() {
     let (events, _) = collect(open(addr, "Connect", json!({ "process": { "pid": pid } })).await).await;
     assert_eq!(events.last().unwrap()["end"]["status"], "signal: killed", "{events:?}");
 }
+
+async fn call(addr: std::net::SocketAddr, method: &str, body: Value) -> (u16, Value) {
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/process.Process/{method}"))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (res.status().as_u16(), res.json().await.unwrap())
+}
+
+async fn started(addr: std::net::SocketAddr, body: Value) -> (Stream, u64) {
+    let mut stream = open(addr, "Start", body).await;
+    let pid = next_frame(&mut stream).await.unwrap().body["event"]["start"]["pid"]
+        .as_u64()
+        .unwrap();
+    (stream, pid)
+}
+
+async fn read_until(stream: &mut Stream, kind: &str, expected: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    while output(&events, kind) != expected {
+        let frame = next_frame(stream).await.expect("more output");
+        events.push(frame.body["event"].clone());
+    }
+    events
+}
+
+#[tokio::test]
+async fn list_shows_running_processes_with_tags() {
+    let (addr, _) = spawn_server_with_state().await;
+    let mut body = start_body("/bin/sleep", &["2"]);
+    body["tag"] = json!("sleeper");
+    let (_stream, pid) = started(addr, body).await;
+
+    let (status, body) = call(addr, "List", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    let listed = body["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|process| process["pid"] == pid)
+        .unwrap();
+    assert_eq!(listed["tag"], "sleeper");
+    assert_eq!(listed["config"], json!({ "cmd": "/bin/sleep", "args": ["2"] }));
+}
+
+#[tokio::test]
+async fn send_input_and_close_stdin() {
+    let (addr, _) = spawn_server_with_state().await;
+    let (mut stream, pid) = started(addr, start_body("/bin/cat", &[])).await;
+
+    let input = json!({ "process": { "pid": pid }, "input": { "stdin": STANDARD.encode("hello\n") } });
+    assert_eq!(call(addr, "SendInput", input).await, (200, json!({})));
+    read_until(&mut stream, "stdout", "hello\n").await;
+
+    assert_eq!(
+        call(addr, "CloseStdin", json!({ "process": { "pid": pid } })).await,
+        (200, json!({}))
+    );
+    let (events, _) = collect(stream).await;
+    assert_eq!(events.last().unwrap()["end"]["status"], "exit status 0");
+}
+
+#[tokio::test]
+async fn stream_input_writes_in_order() {
+    let (addr, _) = spawn_server_with_state().await;
+    let (mut stream, pid) = started(addr, start_body("/bin/cat", &[])).await;
+
+    let frames = [
+        json!({ "start": { "process": { "pid": pid } } }),
+        json!({ "data": { "input": { "stdin": STANDARD.encode("one ") } } }),
+        json!({ "keepalive": {} }),
+        json!({ "data": { "input": { "stdin": STANDARD.encode("two\n") } } }),
+    ];
+    let body: Vec<u8> = frames.iter().flat_map(envelope).collect();
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/process.Process/StreamInput"))
+        .header("content-type", "application/connect+json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let (_, trailer) = collect(Stream {
+        response,
+        buffer: Vec::new(),
+    })
+    .await;
+    assert_eq!(trailer, json!({}));
+    read_until(&mut stream, "stdout", "one two\n").await;
+}
+
+#[tokio::test]
+async fn sigterm_ends_process_with_signal_status() {
+    let (addr, _) = spawn_server_with_state().await;
+    let (stream, pid) = started(addr, start_body("/bin/sleep", &["30"])).await;
+
+    let signal = json!({ "process": { "pid": pid }, "signal": "SIGNAL_SIGTERM" });
+    assert_eq!(call(addr, "SendSignal", signal).await, (200, json!({})));
+    let (events, _) = collect(stream).await;
+    assert_eq!(
+        events.last().unwrap()["end"],
+        json!({ "exitCode": -1, "status": "signal: terminated", "error": "signal: terminated" })
+    );
+}
+
+#[tokio::test]
+async fn update_resizes_pty() {
+    let (addr, _) = spawn_server_with_state().await;
+    let body = json!({
+        "process": { "cmd": "/bin/sh", "args": ["-c", "sleep 0.5; stty size"] },
+        "pty": { "size": { "cols": 80, "rows": 24 } }
+    });
+    let (mut stream, pid) = started(addr, body).await;
+
+    let resize = json!({ "process": { "pid": pid }, "pty": { "size": { "cols": 120, "rows": 50 } } });
+    assert_eq!(call(addr, "Update", resize).await, (200, json!({})));
+    read_until(&mut stream, "pty", "50 120\r\n").await;
+}
+
+#[tokio::test]
+async fn control_errors_match_go() {
+    let (addr, _) = spawn_server_with_state().await;
+    let (status, body) = call(addr, "SendInput", json!({ "process": { "pid": 999999 } })).await;
+    assert_eq!(
+        (status, body["message"].as_str()),
+        (404, Some("process with pid 999999 not found"))
+    );
+
+    let pty =
+        json!({ "process": { "cmd": "/bin/sleep", "args": ["5"] }, "pty": { "size": { "cols": 80, "rows": 24 } } });
+    let (_pty_stream, pty_pid) = started(addr, pty).await;
+    let (_pipe_stream, pipe_pid) = started(addr, start_body("/bin/sleep", &["5"])).await;
+
+    let stdin = json!({ "process": { "pid": pty_pid }, "input": { "stdin": "eA==" } });
+    let (status, body) = call(addr, "SendInput", stdin).await;
+    assert_eq!(status, 500);
+    assert_eq!(
+        body["message"],
+        "error writing to stdin: tty assigned to process — input should be written to the pty, not the stdin"
+    );
+
+    let tty = json!({ "process": { "pid": pipe_pid }, "input": { "pty": "eA==" } });
+    let (_, body) = call(addr, "SendInput", tty).await;
+    assert_eq!(
+        body["message"],
+        "error writing to tty: tty not assigned to process — input should be written to the stdin, not the tty"
+    );
+
+    let (status, body) = call(addr, "CloseStdin", json!({ "process": { "pid": pty_pid } })).await;
+    assert_eq!(status, 500);
+    assert_eq!(body["code"], "unknown");
+    assert_eq!(
+        body["message"],
+        "error closing stdin: cannot close stdin for PTY process — send Ctrl+D (0x04) instead"
+    );
+
+    let (status, body) = call(addr, "SendSignal", json!({ "process": { "pid": pipe_pid } })).await;
+    assert_eq!(
+        (status, body["message"].as_str()),
+        (501, Some("invalid signal: SIGNAL_UNSPECIFIED"))
+    );
+
+    let resize = json!({ "process": { "pid": pipe_pid }, "pty": { "size": { "cols": 1, "rows": 1 } } });
+    let (status, body) = call(addr, "Update", resize).await;
+    assert_eq!(status, 500);
+    assert_eq!(body["message"], "error resizing tty: tty not assigned to process");
+}

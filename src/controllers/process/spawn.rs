@@ -12,7 +12,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Gid, Pid, Uid};
 use pty_process::{OwnedWritePty, Size};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{Mutex, watch};
@@ -43,6 +43,63 @@ pub struct Process {
     pub stdin: Mutex<Option<ChildStdin>>,
     pub pty: Option<Mutex<OwnedWritePty>>,
     pub stop_output: CancellationToken,
+}
+
+impl Process {
+    pub async fn write_stdin(&self, data: &[u8]) -> Result<(), String> {
+        if self.pty.is_some() {
+            return Err("tty assigned to process — input should be written to the pty, not the stdin".to_owned());
+        }
+        let mut stdin = self.stdin.lock().await;
+        let stdin = stdin.as_mut().ok_or("stdin not enabled or closed")?;
+        stdin.write_all(data).await.map_err(|e| {
+            format!(
+                "error writing to stdin of process '{}': write |1: {}",
+                self.pid,
+                reason(&e)
+            )
+        })
+    }
+
+    pub async fn write_pty(&self, data: &[u8]) -> Result<(), String> {
+        let pty = self
+            .pty
+            .as_ref()
+            .ok_or("tty not assigned to process — input should be written to the stdin, not the tty")?;
+        pty.lock().await.write_all(data).await.map_err(|e| {
+            format!(
+                "error writing to tty of process '{}': write /dev/ptmx: {}",
+                self.pid,
+                reason(&e)
+            )
+        })
+    }
+
+    pub async fn close_stdin(&self) -> Result<(), String> {
+        if self.pty.is_some() {
+            return Err("cannot close stdin for PTY process — send Ctrl+D (0x04) instead".to_owned());
+        }
+        self.stdin.lock().await.take();
+        Ok(())
+    }
+
+    pub async fn resize(&self, rows: u32, cols: u32) -> Result<(), String> {
+        let pty = self.pty.as_ref().ok_or("tty not assigned to process")?;
+        pty.lock()
+            .await
+            .resize(Size::new(rows as u16, cols as u16))
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn signal(&self, signal: Signal) -> Result<(), String> {
+        if matches!(signal, Signal::SIGKILL | Signal::SIGTERM) {
+            self.stop_output.cancel();
+        }
+        if self.end.borrow().is_some() {
+            return Err("os: process already finished".to_owned());
+        }
+        kill(Pid::from_raw(self.pid as i32), signal).map_err(|errno| reason(&io::Error::from(errno)))
+    }
 }
 
 pub struct Launch {
