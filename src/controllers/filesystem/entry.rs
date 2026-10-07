@@ -7,11 +7,15 @@ use buffa_types::google::protobuf::Timestamp;
 use connectrpc::ConnectError;
 
 use crate::proto::filesystem::{EntryInfo, FileType};
-use crate::user::{group_name, user_name};
+use crate::user::OwnerNames;
 use crate::util::fs::{eval_symlinks, os_error};
 use crate::util::metadata::read_metadata;
 
 pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
+    entry_info_with_owners(path, &mut OwnerNames::default())
+}
+
+pub fn entry_info_with_owners(path: &Path, owners: &mut OwnerNames) -> Result<EntryInfo, ConnectError> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -47,8 +51,8 @@ pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
         size: meta.size() as i64,
         mode,
         permissions: permissions(&meta),
-        owner: user_name(meta.uid()),
-        group: group_name(meta.gid()),
+        owner: owners.user(meta.uid()),
+        group: owners.group(meta.gid()),
         modified_time: modified_time(&meta).into(),
         is_symlink: symlink_target.is_some(),
         symlink_target,
@@ -112,6 +116,7 @@ mod tests {
     use connectrpc::ErrorCode;
 
     use super::*;
+    use crate::user::user_name;
 
     fn permissions_of(path: &Path) -> String {
         permissions(&std::fs::symlink_metadata(path).unwrap())

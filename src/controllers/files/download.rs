@@ -21,6 +21,7 @@ use crate::util::fs::os_error;
 use crate::util::paths::expand_and_resolve;
 
 const CONDITIONAL_HEADERS: [&str; 4] = ["range", "if-modified-since", "if-none-match", "if-range"];
+const READ_CHUNK: usize = 256 * 1024;
 
 pub async fn get_files(
     State(state): State<Arc<AppState>>,
@@ -85,14 +86,18 @@ pub async fn get_files(
         let content_type = mime_guess::from_path(&requested)
             .first_raw()
             .unwrap_or("application/octet-stream");
-        let body = Body::from_stream(ReaderStream::new(GzipEncoder::new(BufReader::new(file))));
+        let reader = GzipEncoder::new(BufReader::with_capacity(READ_CHUNK, file));
+        let body = Body::from_stream(ReaderStream::with_capacity(reader, READ_CHUNK));
         (
             [(header::CONTENT_ENCODING, GZIP), (header::CONTENT_TYPE, content_type)],
             body,
         )
             .into_response()
     } else {
-        let served = ServeFile::new(&path).oneshot(request).await;
+        let served = ServeFile::new(&path)
+            .with_buf_chunk_size(READ_CHUNK)
+            .oneshot(request)
+            .await;
         served.map(Body::new).into_response()
     };
 

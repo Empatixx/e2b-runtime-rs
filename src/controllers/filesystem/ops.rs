@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use connectrpc::{ConnectError, ErrorCode};
 
-use super::entry::entry_info;
+use super::entry::{entry_info, entry_info_with_owners};
 use crate::proto::filesystem::EntryInfo;
-use crate::user::User;
+use crate::user::{OwnerNames, User};
 use crate::util::fs::{dir, eval_symlinks, os_error, reason};
 use crate::util::paths::ensure_dirs;
 
@@ -103,6 +103,7 @@ pub fn list_dir(path: &Path, depth: u32) -> Result<Vec<EntryInfo>, ConnectError>
         real_root: resolved.clone(),
         max_depth: depth.max(1) as usize,
         entries: Vec::new(),
+        owners: OwnerNames::default(),
     };
     walk(&mut listing, &resolved, 1)
         .map_err(|cause| ConnectError::internal(format!("error reading directory {}: {cause}", resolved.display())))?;
@@ -114,6 +115,7 @@ struct Listing {
     real_root: PathBuf,
     max_depth: usize,
     entries: Vec<EntryInfo>,
+    owners: OwnerNames,
 }
 
 struct DirChild {
@@ -142,7 +144,7 @@ fn walk(listing: &mut Listing, dir: &Path, depth: usize) -> Result<(), String> {
     children.sort_by(|a, b| a.path.cmp(&b.path));
 
     for child in children {
-        let mut entry = match entry_info(&child.path) {
+        let mut entry = match entry_info_with_owners(&child.path, &mut listing.owners) {
             Ok(entry) => entry,
             Err(e) if e.code == ErrorCode::NotFound => continue,
             Err(e) => return Err(format!("{}: {}", e.code.as_str(), e.message.unwrap_or_default())),

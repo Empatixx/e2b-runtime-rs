@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::os::unix::fs::chown;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, chown};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use tokio::io::{AsyncRead, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -20,6 +20,8 @@ use crate::util::error_response::ErrorResponse;
 use crate::util::fs::{dir, os_error};
 use crate::util::metadata::{is_xattr_unsupported, metadata_from_headers, validate_metadata, write_metadata};
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
+
+const READ_BUFFER: usize = 64 * 1024;
 
 pub async fn post_files(
     State(state): State<Arc<AppState>>,
@@ -214,13 +216,12 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
         _ => {}
     }
 
-    let file = tokio::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o666)
         .open(path)
-        .await
         .map_err(|e| {
             let cause = os_error("open", path, &e);
             match e.kind() {
@@ -243,29 +244,25 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
             .build()
     })?;
 
-    let mut writer = BufWriter::new(file);
-    let written = async {
-        tokio::io::copy(content, &mut writer).await?;
-        writer.flush().await
-    };
-    written.await.map_err(|e| match (e.kind(), upload.content_length) {
-        (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::builder()
-            .status(StatusCode::INSUFFICIENT_STORAGE)
-            .message(format!(
-                "attempted to write {length} bytes: not enough disk space available"
-            ))
-            .build(),
-        (io::ErrorKind::StorageFull, _) => ErrorResponse::builder()
-            .status(StatusCode::INSUFFICIENT_STORAGE)
-            .message("not enough disk space available")
-            .build(),
-        _ => ErrorResponse::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .message(format!("error writing file: {e}"))
-            .build(),
-    })?;
+    copy_to_file(content, &mut file)
+        .await
+        .map_err(|e| match (e.kind(), upload.content_length) {
+            (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message(format!(
+                    "attempted to write {length} bytes: not enough disk space available"
+                ))
+                .build(),
+            (io::ErrorKind::StorageFull, _) => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message("not enough disk space available")
+                .build(),
+            _ => ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!("error writing file: {e}"))
+                .build(),
+        })?;
 
-    let file = writer.into_inner().into_std().await;
     match write_metadata(&file, &upload.metadata) {
         Ok(()) => Ok(()),
         Err(e) if is_xattr_unsupported(&e) => {
@@ -282,5 +279,15 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .message(format!("error writing file metadata: {e}"))
             .build()),
+    }
+}
+
+async fn copy_to_file(content: &mut (impl AsyncRead + Unpin), file: &mut std::fs::File) -> io::Result<()> {
+    let mut buffer = vec![0; READ_BUFFER];
+    loop {
+        match content.read(&mut buffer).await? {
+            0 => return Ok(()),
+            read => file.write_all(&buffer[..read])?,
+        }
     }
 }

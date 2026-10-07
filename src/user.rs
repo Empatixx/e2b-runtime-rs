@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use nix::unistd::{Gid, Group, Uid};
@@ -38,6 +39,22 @@ pub fn group_name(gid: u32) -> String {
         .map_or_else(|| gid.to_string(), |g| g.name)
 }
 
+#[derive(Debug, Default)]
+pub struct OwnerNames {
+    users: HashMap<u32, String>,
+    groups: HashMap<u32, String>,
+}
+
+impl OwnerNames {
+    pub fn user(&mut self, uid: u32) -> String {
+        self.users.entry(uid).or_insert_with(|| user_name(uid)).clone()
+    }
+
+    pub fn group(&mut self, gid: u32) -> String {
+        self.groups.entry(gid).or_insert_with(|| group_name(gid)).clone()
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn supplementary_groups(user: &nix::unistd::User) -> Vec<u32> {
     std::ffi::CString::new(user.name.as_str())
@@ -71,5 +88,14 @@ mod tests {
         assert_eq!(user_name(0), "root");
         assert_eq!(user_name(4_000_000), "4000000");
         assert_eq!(group_name(4_000_000), "4000000");
+    }
+
+    #[test]
+    fn owner_names_match_direct_lookup() {
+        let mut owners = OwnerNames::default();
+        assert_eq!(owners.user(0), user_name(0));
+        assert_eq!(owners.user(0), user_name(0));
+        assert_eq!(owners.group(0), group_name(0));
+        assert_eq!(owners.user(4_000_000), "4000000");
     }
 }
