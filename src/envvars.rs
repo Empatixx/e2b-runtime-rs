@@ -8,11 +8,13 @@ struct Var {
 }
 
 #[derive(Debug, Default)]
-pub struct EnvVars(RwLock<BTreeMap<String, Var>>);
+pub struct EnvVars {
+    vars: RwLock<BTreeMap<String, Var>>,
+}
 
 impl EnvVars {
     pub fn store(&self, key: &str, value: &str) {
-        self.0.write().unwrap_or_else(PoisonError::into_inner).insert(
+        self.vars.write().unwrap_or_else(PoisonError::into_inner).insert(
             key.to_owned(),
             Var {
                 value: value.to_owned(),
@@ -22,7 +24,7 @@ impl EnvVars {
     }
 
     pub fn all(&self) -> BTreeMap<String, String> {
-        self.0
+        self.vars
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
@@ -31,7 +33,7 @@ impl EnvVars {
     }
 
     pub fn replace_user_vars(&self, vars: &BTreeMap<String, String>) {
-        let mut map = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let mut map = self.vars.write().unwrap_or_else(PoisonError::into_inner);
         map.retain(|key, var| var.internal || vars.contains_key(key));
         for (key, value) in vars {
             if !map.get(key).is_some_and(|var| var.internal) {
