@@ -40,3 +40,21 @@ fn slot_is_created_once_and_destroyed_cleanly() {
     assert!(!succeeds("ip", &["netns", "exec", "ns-4001", "true"]));
     assert!(!succeeds("ip", &["link", "show", "veth-4001"]));
 }
+
+#[test]
+fn cgroup_holds_a_process_and_is_removed() {
+    if !root() {
+        eprintln!("skipping: needs root");
+        return;
+    }
+    let cgroup = orchestrator::cgroup::Cgroup::create("contract-test").unwrap();
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    cgroup.add(child.id()).unwrap();
+    assert_eq!(cgroup.pids().unwrap(), vec![child.id()]);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let path = cgroup.path().to_path_buf();
+    cgroup.remove().unwrap();
+    assert!(!path.exists());
+}

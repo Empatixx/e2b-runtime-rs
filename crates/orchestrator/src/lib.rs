@@ -1,4 +1,6 @@
 pub mod block;
+#[cfg(target_os = "linux")]
+pub mod cgroup;
 pub mod exposure;
 pub mod network;
 pub mod storage;
