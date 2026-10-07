@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::extract::{Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWriteExt, BufWriter};
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -213,7 +213,7 @@ async fn write_file(
         }
     };
 
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
@@ -237,8 +237,9 @@ async fn write_file(
         })?;
     }
 
-    let written = match tokio::io::copy(content, &mut file).await {
-        Ok(_) => file.flush().await,
+    let mut writer = BufWriter::new(file);
+    let written = match tokio::io::copy(content, &mut writer).await {
+        Ok(_) => writer.flush().await,
         Err(e) => Err(e),
     };
     written.map_err(|e| match e.kind() {
@@ -252,7 +253,7 @@ async fn write_file(
         _ => internal(format!("error writing file: {e}")),
     })?;
 
-    let file = file.into_std().await;
+    let file = writer.into_inner().into_std().await;
     match write_metadata(&file, upload.metadata) {
         Ok(()) => Ok(()),
         Err(e) if is_xattr_unsupported(&e) => {

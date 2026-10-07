@@ -83,7 +83,10 @@ impl Filesystem for FilesystemService {
         let path = expand_and_resolve(request.path, &user, defaults.workdir.as_deref())
             .map_err(ConnectError::invalid_argument)?;
 
-        let entries = ops::list_dir(&path, request.depth)?;
+        let depth = request.depth;
+        let entries = tokio::task::spawn_blocking(move || ops::list_dir(&path, depth))
+            .await
+            .map_err(|e| ConnectError::internal(e.to_string()))??;
         Response::ok(ListDirResponse {
             entries,
             ..Default::default()
@@ -100,7 +103,9 @@ impl Filesystem for FilesystemService {
         let path = expand_and_resolve(request.path, &user, defaults.workdir.as_deref())
             .map_err(ConnectError::invalid_argument)?;
 
-        ops::remove_all(&path)?;
+        tokio::task::spawn_blocking(move || ops::remove_all(&path))
+            .await
+            .map_err(|e| ConnectError::internal(e.to_string()))??;
         Response::ok(RemoveResponse::default())
     }
 
