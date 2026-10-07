@@ -31,6 +31,12 @@ pub fn clean(path: &Path) -> PathBuf {
     out
 }
 
+pub fn dir(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    text.rfind('/')
+        .map_or_else(|| PathBuf::from("."), |index| clean(Path::new(&text[..=index])))
+}
+
 pub fn eval_symlinks(path: &Path) -> io::Result<PathBuf> {
     let mut pending = names(path);
     let mut resolved = PathBuf::from("/");
@@ -85,6 +91,14 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+
+    #[test]
+    fn dir_like_go_filepath_dir() {
+        assert_eq!(dir(Path::new("/a/b/")), Path::new("/a/b"));
+        assert_eq!(dir(Path::new("/a/b")), Path::new("/a"));
+        assert_eq!(dir(Path::new("/a")), Path::new("/"));
+        assert_eq!(dir(Path::new("/a/../b/c")), Path::new("/b"));
+    }
 
     #[test]
     fn error_text() {

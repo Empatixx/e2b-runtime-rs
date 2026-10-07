@@ -266,3 +266,16 @@ async fn watch_dir_streams_start_events_and_keepalives() {
     };
     assert_eq!(keepalive, json!({ "keepalive": {} }));
 }
+
+#[tokio::test]
+async fn absolute_paths_are_kept_verbatim() {
+    let (addr, _) = spawn_server_with_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let with_slash = format!("{}/made/", root.display());
+
+    let (status, body) = call(addr, "MakeDir", &current_user(), json!({ "path": with_slash })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["entry"]["path"], with_slash);
+    assert_eq!(body["entry"]["name"], "made");
+}

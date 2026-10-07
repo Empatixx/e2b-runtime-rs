@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::{file_entry, lookup_user};
 use crate::app::AppState;
 use crate::util::error_response::ErrorResponse;
-use crate::util::fs::os_error;
+use crate::util::fs::{dir, os_error};
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
 
 #[derive(Deserialize)]
@@ -85,8 +85,8 @@ pub async fn post_files_compose(State(state): State<Arc<AppState>>, body: Bytes)
         })
         .collect::<Result<Vec<PathBuf>, ErrorResponse>>()?;
 
-    let parent = destination.parent().unwrap_or(Path::new("/"));
-    ensure_dirs(parent, user.uid, user.gid).map_err(|e| {
+    let parent = dir(&destination);
+    ensure_dirs(&parent, user.uid, user.gid).map_err(|e| {
         ErrorResponse::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .message(format!("error ensuring directories: {e}"))
