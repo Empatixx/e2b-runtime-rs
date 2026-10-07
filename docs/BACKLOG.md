@@ -29,14 +29,11 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Waiters queued behind a failed chunk fetch retry one after another (up to N×60 s in a storage outage). Share one fetch result per chunk. | M6 |
-| `BlockTracker::is_present` is O(blocks); use range cardinality | M6 |
-| Blocking file I/O inside async fns (`fill` does a 4 MiB pwrite on a tokio worker) | M6 |
 | `export_diff` writes at the stream position, with 2 syscalls per block and no `copy_file_range` coalescing | M7 |
 | Exporting a partial last block would hit EOF (no overlay does this today) | M7 |
 | `Overlay` assumes a `PAGE_SIZE` block size (memfile overlays may differ) | M6 |
 | Writes past `size` extend the cache file; the block index wraps above 16 TiB | M8 |
-| Missing tests: chunk fetch timeout; unaligned read crossing into a nil mapping | M6 |
+| Missing test: unaligned read crossing into a nil mapping | M6 |
 
 ## Orchestrator: NBD (M3a)
 

@@ -35,7 +35,8 @@ impl BlockTracker {
     }
 
     pub fn is_present(&self, blocks: Range<u32>) -> bool {
-        blocks.into_iter().all(|block| self.state(block).is_some())
+        let wanted = u64::from(blocks.end.saturating_sub(blocks.start));
+        self.data.range_cardinality(blocks.clone()) + self.zero.range_cardinality(blocks) == wanted
     }
 
     pub fn data(&self) -> &RoaringBitmap {
@@ -65,5 +66,18 @@ mod tests {
         assert!(tracker.is_present(5..5));
         assert_eq!(tracker.data().iter().collect::<Vec<_>>(), vec![0]);
         assert_eq!(tracker.zero().iter().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn is_present_counts_a_range() {
+        let mut tracker = BlockTracker::default();
+        tracker.set(10..20, BlockState::Data);
+        tracker.set(20..30, BlockState::Zero);
+
+        assert!(tracker.is_present(10..30));
+        assert!(tracker.is_present(15..16));
+        assert!(!tracker.is_present(9..30));
+        assert!(!tracker.is_present(25..31));
+        assert!(tracker.is_present(5..5));
     }
 }
