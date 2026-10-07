@@ -1,0 +1,11 @@
+{
+  "name": "sdk-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "E2B_DEBUG=true node demo.mjs"
+  },
+  "dependencies": {
+    "e2b": "latest"
+  }
+}

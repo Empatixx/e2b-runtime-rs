@@ -1,0 +1,50 @@
+name: e2b-runtime
+
+services:
+  envd:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: e2b-runtime-rs/envd:dev
+    ports:
+      - "49983:49983"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/49983"]
+      interval: 1s
+      retries: 30
+
+  envd-init:
+    image: curlimages/curl:latest
+    depends_on:
+      envd:
+        condition: service_healthy
+    command:
+      - -sf
+      - -X
+      - POST
+      - http://envd:49983/init
+      - -H
+      - "content-type: application/json"
+      - -d
+      - '{"defaultUser":"user","defaultWorkdir":"/home/user"}'
+    restart: "no"
+
+  s3:
+    image: rustfs/rustfs:latest
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: minio
+      RUSTFS_SECRET_KEY: minio123
+    ports:
+      - "9000:9000"
+    volumes:
+      - s3-data:/data
+
+volumes:
+  s3-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.249.83.0/24
