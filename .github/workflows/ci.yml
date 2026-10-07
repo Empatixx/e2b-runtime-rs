@@ -16,7 +16,7 @@ jobs:
           toolchain: "1.98"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/ci/minio.sh
+      - run: scripts/ci/s3.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: sudo -E env "PATH=$PATH" cargo test --workspace
