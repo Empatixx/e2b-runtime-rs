@@ -24,6 +24,14 @@ jobs:
       - run: sudo chmod 666 /dev/kvm
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: sudo -E env "PATH=$PATH" cargo test --workspace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10.34.5"
+      - run: sudo chown -R "$(id -u):$(id -g)" target
+      - run: scripts/ci/vm-sdk-tests.sh
 
   kvm-spike:
     runs-on: ubuntu-24.04
