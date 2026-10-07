@@ -9,7 +9,6 @@ fn current_user() -> String {
     nix::unistd::User::from_uid(nix::unistd::getuid()).unwrap().unwrap().name
 }
 
-/// Connect unary call with the JSON codec, as the E2B SDK can send it.
 async fn call(addr: std::net::SocketAddr, method: &str, user: &str, body: Value) -> (u16, Value) {
     let res = reqwest::Client::new()
         .post(format!("http://{addr}/filesystem.Filesystem/{method}"))
@@ -48,7 +47,6 @@ async fn stat_missing_is_not_found() {
 
 #[tokio::test]
 async fn basic_user_reaches_the_service() {
-    // home of the Basic user proves the middleware's AuthUser got into the Connect ctx
     let (addr, _) = spawn_server_with_state().await;
     let me = nix::unistd::User::from_uid(nix::unistd::getuid()).unwrap().unwrap();
     let (status, body) = call(addr, "Stat", &me.name, json!({ "path": "" })).await;
@@ -58,7 +56,6 @@ async fn basic_user_reaches_the_service() {
 
 #[tokio::test]
 async fn unknown_basic_user_is_rejected_on_every_route() {
-    // upstream authn middleware wraps the whole mux, not only Connect
     let (addr, _) = spawn_server_with_state().await;
     let (status, body) = call(addr, "Stat", "definitely-missing-user", json!({ "path": "/" })).await;
     assert_eq!(status, 401);
@@ -83,4 +80,36 @@ async fn not_yet_ported_methods_are_unimplemented() {
     let (status, body) = call(addr, "CreateWatcher", &current_user(), json!({ "path": "/" })).await;
     assert_eq!(status, 501);
     assert_eq!(body["message"], "filesystem.Filesystem.CreateWatcher is not implemented");
+}
+
+#[tokio::test]
+async fn make_dir_list_move_remove_roundtrip() {
+    let (addr, _) = spawn_server_with_state().await;
+    let me = current_user();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("a/b");
+
+    let (status, body) = call(addr, "MakeDir", &me, json!({ "path": dir })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["entry"]["type"], "FILE_TYPE_DIRECTORY");
+
+    let (status, body) = call(addr, "MakeDir", &me, json!({ "path": dir })).await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["code"], "already_exists");
+
+    let (status, body) = call(addr, "ListDir", &me, json!({ "path": root, "depth": 2 })).await;
+    assert_eq!(status, 200, "{body}");
+    let listed: Vec<&str> = body["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert_eq!(listed, vec![root.join("a").to_str().unwrap(), dir.to_str().unwrap()]);
+
+    let moved = root.join("c");
+    let (status, body) = call(addr, "Move", &me, json!({ "source": root.join("a"), "destination": moved })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["entry"]["path"], moved.to_str().unwrap());
+
+    let (status, body) = call(addr, "Remove", &me, json!({ "path": moved })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!({}));
+    assert!(!moved.exists());
 }

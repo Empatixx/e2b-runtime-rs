@@ -1,7 +1,3 @@
-//! CLI flags compatible with Go's `flag` package, as used by upstream envd:
-//! `-x` and `--x` are the same, values come as `-x=v` or `-x v`,
-//! and a bool flag without a value means `true`.
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub is_not_fc: bool,
@@ -28,48 +24,67 @@ impl Default for Config {
 }
 
 pub fn parse(args: impl Iterator<Item = String>) -> Result<Config, String> {
-    let mut cfg = Config::default();
-    // skip(1) = drop the program name (args[0])
-    let mut it = args.skip(1);
+    let mut config = Config::default();
+    let mut args = args.skip(1);
 
-    while let Some(arg) = it.next() {
-        let name = arg.trim_start_matches('-');
-        // "-port=80" -> key "port", inline Some("80");  "-port" -> key "port", inline None
-        let (key, inline) = match name.split_once('=') {
-            Some((k, v)) => (k, Some(v.to_string())),
-            None => (name, None),
+    while let Some(arg) = args.next() {
+        let (name, inline) = match arg.trim_start_matches('-').split_once('=') {
+            Some((name, value)) => (name.to_owned(), Some(value.to_owned())),
+            None => (arg.trim_start_matches('-').to_owned(), None),
         };
 
-        match key {
-            "isnotfc" => cfg.is_not_fc = parse_bool(key, inline)?,
-            "no-cgroups" => cfg.no_cgroups = parse_bool(key, inline)?,
-            "verbose" => cfg.verbose = parse_bool(key, inline)?,
-            "version" => cfg.version = parse_bool(key, inline)?,
-            "commit" => cfg.commit = parse_bool(key, inline)?,
-            "port" => cfg.port = parse_u16(key, take_value(key, inline, &mut it)?)?,
-            "cgroup-root" => cfg.cgroup_root = take_value(key, inline, &mut it)?,
-            other => return Err(format!("flag provided but not defined: -{other}")),
+        match name.as_str() {
+            "isnotfc" => config.is_not_fc = bool_flag(&name, inline)?,
+            "no-cgroups" => config.no_cgroups = bool_flag(&name, inline)?,
+            "verbose" => config.verbose = bool_flag(&name, inline)?,
+            "version" => config.version = bool_flag(&name, inline)?,
+            "commit" => config.commit = bool_flag(&name, inline)?,
+            "port" => {
+                let value = flag_value(&name, inline, &mut args)?;
+                config.port = value
+                    .parse()
+                    .map_err(|_| format!("invalid value {value:?} for flag -{name}: parse error"))?;
+            }
+            "cgroup-root" => config.cgroup_root = flag_value(&name, inline, &mut args)?,
+            _ => return Err(format!("flag provided but not defined: -{name}")),
         }
     }
 
-    Ok(cfg)
+    Ok(config)
 }
 
-/// Value flag: `-x=v` (inline) or `-x v` (next argument); a missing value is an error.
-fn take_value(key: &str, inline: Option<String>, it: &mut impl Iterator<Item = String>) -> Result<String, String> {
+fn flag_value(name: &str, inline: Option<String>, args: &mut impl Iterator<Item = String>) -> Result<String, String> {
     inline
-        .or_else(|| it.next())
-        .ok_or(format!("flag needs an argument: -{key}"))
+        .or_else(|| args.next())
+        .ok_or_else(|| format!("flag needs an argument: -{name}"))
 }
 
-fn parse_u16(key: &str, value: String) -> Result<u16, String> {
-    value.parse().map_err(|_| format!("invalid value {value:?} for flag -{key}: not a valid port"))
+fn bool_flag(name: &str, inline: Option<String>) -> Result<bool, String> {
+    let Some(value) = inline else { return Ok(true) };
+    match value.as_str() {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
+        "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
+        _ => Err(format!("invalid boolean value {value:?} for -{name}: parse error")),
+    }
 }
 
-/// Bool flag value: missing means `true` (`-verbose`), otherwise "true"/"false".
-fn parse_bool(key: &str, inline: Option<String>) -> Result<bool, String> {
-    match inline {
-        None => Ok(true),
-        Some(v) => v.parse::<bool>().map_err(|e| format!("invalid value {v:?} for flag -{key}: {e}")),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_args(list: &[&str]) -> Result<Config, String> {
+        parse(list.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn bool_spellings_and_errors() {
+        assert!(parse_args(&["envd", "-verbose=T"]).unwrap().verbose);
+        assert!(!parse_args(&["envd", "-verbose=0"]).unwrap().verbose);
+        assert_eq!(
+            parse_args(&["envd", "-verbose=yes"]).unwrap_err(),
+            "invalid boolean value \"yes\" for -verbose: parse error"
+        );
+        assert_eq!(parse_args(&["envd", "-port=x"]).unwrap_err(), "invalid value \"x\" for flag -port: parse error");
+        assert_eq!(parse_args(&["envd", "--cgroup-root", "/cg"]).unwrap().cgroup_root, "/cg");
     }
 }
