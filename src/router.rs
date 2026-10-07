@@ -9,17 +9,20 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::app::AppState;
 use crate::controllers::filesystem::FilesystemService;
+use crate::controllers::process::ProcessService;
 use crate::controllers::{envs, files, health, init};
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
 use crate::proto::filesystem::FilesystemExt;
+use crate::proto::process::ProcessExt;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let filesystem = FilesystemService {
         state: state.clone(),
         watchers: Mutex::default(),
     };
-    let connect = Arc::new(filesystem).register(connectrpc::Router::new());
+    let process = ProcessService::new(state.clone());
+    let connect = Arc::new(process).register(Arc::new(filesystem).register(connectrpc::Router::new()));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

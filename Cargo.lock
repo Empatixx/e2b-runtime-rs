@@ -491,8 +491,10 @@ dependencies = [
  "nix",
  "notify",
  "parking_lot",
+ "pty-process",
  "rand",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -1365,6 +1367,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pty-process"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71cec9e2670207c5ebb9e477763c74436af3b9091dd550b9fb3c1bec7f3ea266"
+dependencies = [
+ "rustix",
+ "tokio",
 ]
 
 [[package]]
