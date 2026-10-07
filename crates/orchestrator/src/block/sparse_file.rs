@@ -14,12 +14,7 @@ impl SparseFile {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
         file.set_len(size)?;
         Ok(Self {
             file,
@@ -94,5 +89,14 @@ mod tests {
         let path = dir.path().join("cache");
         drop(SparseFile::create(&path, 4096).unwrap());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn refuses_to_reuse_a_path_another_cache_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache");
+        let _owner = SparseFile::create(&path, 4096).unwrap();
+        let error = SparseFile::create(&path, 4096).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 }

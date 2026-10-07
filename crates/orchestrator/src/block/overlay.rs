@@ -47,11 +47,12 @@ impl Overlay {
     }
 
     async fn read_block(&self, offset: u64, block: &mut [u8]) -> Result<(), String> {
-        if self.cache.is_present(offset, block.len() as u64) {
-            return self
-                .cache
-                .read_at(offset, block)
-                .map_err(|e| format!("read overlay cache at {offset}: {e}"));
+        let cached = self
+            .cache
+            .read_if_present(offset, block)
+            .map_err(|e| format!("read overlay cache at {offset}: {e}"))?;
+        if cached {
+            return Ok(());
         }
         self.base.read_at(offset, block).await
     }
@@ -75,7 +76,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::block::build_file::Artifact;
+    use crate::block::build_file::{Artifact, DiffStore};
     use crate::storage::backend::Storage;
     use crate::storage::header::{Header, Metadata};
 
@@ -109,12 +110,8 @@ mod tests {
     async fn pause_and_resume_round_trip_through_a_diff() {
         let dir = tempfile::tempdir().unwrap();
         let (storage, template) = template(dir.path()).await;
-        let base = BuildFile::new(
-            template.clone(),
-            Artifact::Rootfs,
-            storage.clone(),
-            dir.path().join("cache"),
-        );
+        let store = Arc::new(DiffStore::new(storage.clone(), dir.path().join("cache")));
+        let base = BuildFile::new(template.clone(), Artifact::Rootfs, store.clone());
         let overlay = Overlay::new(Arc::new(base), &dir.path().join("overlay")).unwrap();
 
         overlay.write_at(4096, &[7; 4096]).unwrap();
@@ -134,7 +131,7 @@ mod tests {
             .unwrap();
 
         let header = diff.to_diff_header(&template, id(2)).unwrap();
-        let resumed = BuildFile::new(header, Artifact::Rootfs, storage, dir.path().join("resumed"));
+        let resumed = BuildFile::new(header, Artifact::Rootfs, store);
         let after_resume = read_all(async |bytes| resumed.read_at(0, bytes).await).await;
         assert_eq!(after_resume, before_pause);
     }
@@ -143,7 +140,8 @@ mod tests {
     async fn rejects_misaligned_reads() {
         let dir = tempfile::tempdir().unwrap();
         let (storage, template) = template(dir.path()).await;
-        let base = BuildFile::new(template, Artifact::Rootfs, storage, dir.path().join("cache"));
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let base = BuildFile::new(template, Artifact::Rootfs, store);
         let overlay = Overlay::new(Arc::new(base), &dir.path().join("overlay")).unwrap();
 
         let mut buf = vec![0; 4096];

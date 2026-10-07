@@ -24,7 +24,9 @@ pub struct Chunker {
 
 impl Chunker {
     pub async fn open(storage: Storage, object: &str, cache_path: &Path) -> Result<Self, String> {
-        let size = storage.size(object).await?;
+        let size = tokio::time::timeout(FETCH_TIMEOUT, storage.size(object))
+            .await
+            .map_err(|_| format!("head {object}: timed out after 60s"))??;
         let cache = BlockCache::create(cache_path, size, PAGE_SIZE)
             .map_err(|e| format!("create cache {}: {e}", cache_path.display()))?;
         Ok(Self {

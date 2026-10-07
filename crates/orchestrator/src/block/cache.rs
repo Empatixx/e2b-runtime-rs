@@ -40,10 +40,19 @@ impl BlockCache {
         self.file.read_at(offset, buf)
     }
 
+    pub fn read_if_present(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+        let tracker = self.tracker.read();
+        if !tracker.is_present(self.blocks(offset, buf.len() as u64)) {
+            return Ok(false);
+        }
+        self.file.read_at(offset, buf)?;
+        Ok(true)
+    }
+
     pub fn fill(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        let mut tracker = self.tracker.write();
         self.file.write_at(offset, data)?;
-        let blocks = self.blocks(offset, data.len() as u64);
-        self.tracker.write().set(blocks, BlockState::Data);
+        tracker.set(self.blocks(offset, data.len() as u64), BlockState::Data);
         Ok(())
     }
 
@@ -56,10 +65,11 @@ impl BlockCache {
 
     pub fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String> {
         self.check_aligned(offset, length)?;
+        let mut tracker = self.tracker.write();
         self.file
             .punch_hole(offset, length)
             .map_err(|e| format!("punch hole at {offset}: {e}"))?;
-        self.tracker.write().set(self.blocks(offset, length), BlockState::Zero);
+        tracker.set(self.blocks(offset, length), BlockState::Zero);
         Ok(())
     }
 
@@ -81,12 +91,11 @@ impl BlockCache {
         if block.iter().all(|byte| *byte == 0) {
             return self.write_zeroes_at(offset, block.len() as u64);
         }
+        let mut tracker = self.tracker.write();
         self.file
             .write_at(offset, block)
             .map_err(|e| format!("write at {offset}: {e}"))?;
-        self.tracker
-            .write()
-            .set(self.blocks(offset, block.len() as u64), BlockState::Data);
+        tracker.set(self.blocks(offset, block.len() as u64), BlockState::Data);
         Ok(())
     }
 
@@ -196,5 +205,27 @@ mod tests {
         let mut tail = [0; 904];
         cache.read_at(4096, &mut tail).unwrap();
         assert_eq!(tail, [4; 904]);
+    }
+
+    #[test]
+    fn concurrent_data_and_zero_writes_keep_tracker_and_file_in_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(cache(dir.path(), 1));
+        for _ in 0..200 {
+            let writers: Vec<_> = [vec![6; 4096], vec![0; 4096]]
+                .into_iter()
+                .map(|block| {
+                    let cache = cache.clone();
+                    std::thread::spawn(move || cache.write_at(0, &block).unwrap())
+                })
+                .collect();
+            writers.into_iter().for_each(|writer| writer.join().unwrap());
+
+            let mut block = [9; 4096];
+            cache.read_at(0, &mut block).unwrap();
+            let zero_in_file = block.iter().all(|byte| *byte == 0);
+            let zero_in_tracker = cache.tracker.read().state(0) == Some(BlockState::Zero);
+            assert_eq!(zero_in_file, zero_in_tracker);
+        }
     }
 }
