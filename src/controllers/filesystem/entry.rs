@@ -9,8 +9,7 @@ use connectrpc::ConnectError;
 use crate::proto::filesystem::{EntryInfo, FileType};
 use crate::user::{group_name, user_name};
 use crate::util::fs::{eval_symlinks, os_error};
-
-const METADATA_XATTR_PREFIX: &str = "user.e2b.";
+use crate::util::metadata::read_metadata;
 
 pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
     let meta = match std::fs::symlink_metadata(path) {
@@ -55,7 +54,7 @@ pub fn entry_info(path: &Path) -> Result<EntryInfo, ConnectError> {
         symlink_target,
         ..Default::default()
     };
-    entry.metadata.extend(xattr_metadata(path));
+    entry.metadata.extend(read_metadata(path));
     Ok(entry)
 }
 
@@ -104,19 +103,6 @@ fn modified_time(meta: &Metadata) -> Option<Timestamp> {
         nanos: nanos as i32,
         ..Default::default()
     })
-}
-
-fn xattr_metadata(path: &Path) -> Vec<(String, String)> {
-    let Ok(names) = xattr::list_deref(path) else {
-        return Vec::new();
-    };
-    names
-        .filter_map(|name| {
-            let key = name.to_str()?.strip_prefix(METADATA_XATTR_PREFIX)?.to_owned();
-            let value = xattr::get_deref(path, &name).ok().flatten()?;
-            Some((key, String::from_utf8(value).ok()?))
-        })
-        .collect()
 }
 
 #[cfg(test)]
