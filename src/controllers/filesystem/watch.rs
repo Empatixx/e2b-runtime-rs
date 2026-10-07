@@ -7,7 +7,7 @@ use connectrpc::{ConnectError, ErrorCode};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
-use tokio::time::{Instant, interval_at};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use super::entry::entry_info;
 use crate::proto::filesystem::watch_dir_response::{KeepAlive, StartEvent};
@@ -133,6 +133,7 @@ pub async fn stream_events(
     }
 
     let mut keepalive = interval_at(Instant::now() + keepalive_interval, keepalive_interval);
+    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = responses.closed() => return,
