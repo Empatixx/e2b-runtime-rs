@@ -32,7 +32,15 @@ fn config_defaults() {
 
 #[test]
 fn config_accepts_single_and_double_dash() {
-    let c = envd::config::parse(args(&["envd", "--port", "1234", "-isnotfc", "-no-cgroups=true", "-commit"])).unwrap();
+    let c = envd::config::parse(args(&[
+        "envd",
+        "--port",
+        "1234",
+        "-isnotfc",
+        "-no-cgroups=true",
+        "-commit",
+    ]))
+    .unwrap();
     assert_eq!(c.port, 1234);
     assert!(c.is_not_fc && c.no_cgroups);
     assert!(c.commit);
@@ -40,9 +48,15 @@ fn config_accepts_single_and_double_dash() {
 
 #[test]
 fn config_rejects_unknown_and_bad_values() {
-    assert_eq!(envd::config::parse(args(&["envd", "-nope"])).unwrap_err(), "flag provided but not defined: -nope");
+    assert_eq!(
+        envd::config::parse(args(&["envd", "-nope"])).unwrap_err(),
+        "flag provided but not defined: -nope"
+    );
     assert!(envd::config::parse(args(&["envd", "-port", "x"])).is_err());
-    assert_eq!(envd::config::parse(args(&["envd", "-port"])).unwrap_err(), "flag needs an argument: -port");
+    assert_eq!(
+        envd::config::parse(args(&["envd", "-port"])).unwrap_err(),
+        "flag needs an argument: -port"
+    );
 }
 
 #[tokio::test]
@@ -51,7 +65,10 @@ async fn token_required_except_excluded_paths() {
     *state.access_token.write().unwrap() = Some("t".into());
     let c = reqwest::Client::new();
 
-    assert_eq!(c.get(format!("http://{addr}/health")).send().await.unwrap().status(), 204);
+    assert_eq!(
+        c.get(format!("http://{addr}/health")).send().await.unwrap().status(),
+        204
+    );
 
     let res = c.get(format!("http://{addr}/envs")).send().await.unwrap();
     assert_eq!(res.status(), 401);
@@ -62,13 +79,22 @@ async fn token_required_except_excluded_paths() {
     );
     assert_eq!(body["code"], 401);
 
-    let res = c.get(format!("http://{addr}/envs")).header("X-Access-Token", "t").send().await.unwrap();
+    let res = c
+        .get(format!("http://{addr}/envs"))
+        .header("X-Access-Token", "t")
+        .send()
+        .await
+        .unwrap();
     assert_ne!(res.status(), 401);
 }
 
 #[tokio::test]
 async fn no_token_set_means_open() {
     let (addr, _) = spawn_server_with_state().await;
-    let res = reqwest::Client::new().get(format!("http://{addr}/envs")).send().await.unwrap();
+    let res = reqwest::Client::new()
+        .get(format!("http://{addr}/envs"))
+        .send()
+        .await
+        .unwrap();
     assert_ne!(res.status(), 401);
 }

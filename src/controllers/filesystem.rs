@@ -5,13 +5,12 @@ use std::sync::Arc;
 
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 
-use crate::http::auth::request_user;
-use crate::paths::expand_and_resolve;
+use crate::app::AppState;
+use crate::auth::request_user;
 use crate::proto::filesystem::*;
-use crate::state::AppState;
 use crate::user::User;
+use crate::util::paths::expand_and_resolve;
 use entry::entry_info;
-
 
 pub struct FilesystemService {
     pub state: Arc<AppState>,
@@ -26,20 +25,34 @@ impl Filesystem for FilesystemService {
             .map_err(ConnectError::invalid_argument)?;
 
         let entry = entry_info(&path)?;
-        Response::ok(StatResponse { entry: entry.into(), ..Default::default() })
+        Response::ok(StatResponse {
+            entry: entry.into(),
+            ..Default::default()
+        })
     }
 
-    async fn make_dir(&self, ctx: RequestContext, request: ServiceRequest<'_, MakeDirRequest>) -> ServiceResult<MakeDirResponse> {
+    async fn make_dir(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, MakeDirRequest>,
+    ) -> ServiceResult<MakeDirResponse> {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let path = expand_and_resolve(request.path, &user, defaults.workdir.as_deref())
             .map_err(ConnectError::invalid_argument)?;
 
         let entry = ops::make_dir(&path, &user)?;
-        Response::ok(MakeDirResponse { entry: entry.into(), ..Default::default() })
+        Response::ok(MakeDirResponse {
+            entry: entry.into(),
+            ..Default::default()
+        })
     }
 
-    async fn r#move(&self, ctx: RequestContext, request: ServiceRequest<'_, MoveRequest>) -> ServiceResult<MoveResponse> {
+    async fn r#move(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, MoveRequest>,
+    ) -> ServiceResult<MoveResponse> {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let source = expand_and_resolve(request.source, &user, defaults.workdir.as_deref())
@@ -48,20 +61,34 @@ impl Filesystem for FilesystemService {
             .map_err(ConnectError::invalid_argument)?;
 
         let entry = ops::rename(&source, &destination, &user)?;
-        Response::ok(MoveResponse { entry: entry.into(), ..Default::default() })
+        Response::ok(MoveResponse {
+            entry: entry.into(),
+            ..Default::default()
+        })
     }
 
-    async fn list_dir(&self, ctx: RequestContext, request: ServiceRequest<'_, ListDirRequest>) -> ServiceResult<ListDirResponse> {
+    async fn list_dir(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ListDirRequest>,
+    ) -> ServiceResult<ListDirResponse> {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let path = expand_and_resolve(request.path, &user, defaults.workdir.as_deref())
             .map_err(ConnectError::invalid_argument)?;
 
         let entries = ops::list_dir(&path, request.depth)?;
-        Response::ok(ListDirResponse { entries, ..Default::default() })
+        Response::ok(ListDirResponse {
+            entries,
+            ..Default::default()
+        })
     }
 
-    async fn remove(&self, ctx: RequestContext, request: ServiceRequest<'_, RemoveRequest>) -> ServiceResult<RemoveResponse> {
+    async fn remove(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, RemoveRequest>,
+    ) -> ServiceResult<RemoveResponse> {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let path = expand_and_resolve(request.path, &user, defaults.workdir.as_deref())
@@ -76,7 +103,9 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, WatchDirRequest>,
     ) -> ServiceResult<ServiceStream<WatchDirResponse>> {
-        Err(ConnectError::unimplemented("filesystem.Filesystem.WatchDir is not implemented"))
+        Err(ConnectError::unimplemented(
+            "filesystem.Filesystem.WatchDir is not implemented",
+        ))
     }
 
     async fn create_watcher(
@@ -84,7 +113,9 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, CreateWatcherRequest>,
     ) -> ServiceResult<CreateWatcherResponse> {
-        Err(ConnectError::unimplemented("filesystem.Filesystem.CreateWatcher is not implemented"))
+        Err(ConnectError::unimplemented(
+            "filesystem.Filesystem.CreateWatcher is not implemented",
+        ))
     }
 
     async fn get_watcher_events(
@@ -92,7 +123,9 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, GetWatcherEventsRequest>,
     ) -> ServiceResult<GetWatcherEventsResponse> {
-        Err(ConnectError::unimplemented("filesystem.Filesystem.GetWatcherEvents is not implemented"))
+        Err(ConnectError::unimplemented(
+            "filesystem.Filesystem.GetWatcherEvents is not implemented",
+        ))
     }
 
     async fn remove_watcher(
@@ -100,6 +133,8 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, RemoveWatcherRequest>,
     ) -> ServiceResult<RemoveWatcherResponse> {
-        Err(ConnectError::unimplemented("filesystem.Filesystem.RemoveWatcher is not implemented"))
+        Err(ConnectError::unimplemented(
+            "filesystem.Filesystem.RemoveWatcher is not implemented",
+        ))
     }
 }

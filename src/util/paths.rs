@@ -4,11 +4,15 @@ use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Uid};
 
-use crate::fsutil::{clean, os_error};
 use crate::user::User;
+use crate::util::fs::{clean, os_error};
 
 pub fn expand_and_resolve(path: &str, user: &User, default_workdir: Option<&str>) -> Result<PathBuf, String> {
-    let path = if path.is_empty() { default_workdir.unwrap_or_default() } else { path };
+    let path = if path.is_empty() {
+        default_workdir.unwrap_or_default()
+    } else {
+        path
+    };
 
     let expanded = match path.strip_prefix('~') {
         None => PathBuf::from(path),
@@ -59,7 +63,13 @@ mod tests {
     use super::*;
 
     fn user() -> User {
-        User { name: "user".into(), uid: 1000, gid: 1000, home: "/home/user".into(), groups: vec![] }
+        User {
+            name: "user".into(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/user".into(),
+            groups: vec![],
+        }
     }
 
     #[test]

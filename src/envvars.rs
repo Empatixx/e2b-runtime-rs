@@ -12,10 +12,13 @@ pub struct EnvVars(RwLock<BTreeMap<String, Var>>);
 
 impl EnvVars {
     pub fn store(&self, key: &str, value: &str) {
-        self.0
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key.to_owned(), Var { value: value.to_owned(), internal: true });
+        self.0.write().unwrap_or_else(PoisonError::into_inner).insert(
+            key.to_owned(),
+            Var {
+                value: value.to_owned(),
+                internal: true,
+            },
+        );
     }
 
     pub fn all(&self) -> BTreeMap<String, String> {
@@ -32,7 +35,13 @@ impl EnvVars {
         map.retain(|key, var| var.internal || vars.contains_key(key));
         for (key, value) in vars {
             if !map.get(key).is_some_and(|var| var.internal) {
-                map.insert(key.clone(), Var { value: value.clone(), internal: false });
+                map.insert(
+                    key.clone(),
+                    Var {
+                        value: value.clone(),
+                        internal: false,
+                    },
+                );
             }
         }
     }
