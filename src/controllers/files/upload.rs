@@ -7,8 +7,7 @@ use std::sync::Arc;
 use axum::extract::{Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 
 use super::encoding::{self, Chunks};
 use super::{FileEntry, FilesQuery, authorize, uploaded_entry};
@@ -93,7 +92,7 @@ struct Upload {
     content_length: Option<u64>,
 }
 
-async fn raw_upload(upload: &Upload, path: Option<&str>, mut body: Chunks) -> Result<Vec<FileEntry>, ErrorResponse> {
+async fn raw_upload(upload: &Upload, path: Option<&str>, body: Chunks) -> Result<Vec<FileEntry>, ErrorResponse> {
     let Some(path) = path else {
         return Err(ErrorResponse::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -107,7 +106,7 @@ async fn raw_upload(upload: &Upload, path: Option<&str>, mut body: Chunks) -> Re
             .build()
     })?;
 
-    write_file(upload, &path, &mut body).await?;
+    write_file(upload, &path, body).await?;
     Ok(vec![uploaded_entry(&path)])
 }
 
@@ -157,8 +156,8 @@ async fn multipart_upload(
                 .build());
         }
 
-        let mut chunks = field.map(|chunk| chunk.map_err(io::Error::other));
-        write_file(upload, &file_path, &mut chunks).await?;
+        let chunks: Chunks = Box::pin(field.map(|chunk| chunk.map_err(io::Error::other)));
+        write_file(upload, &file_path, chunks).await?;
         entries.push(uploaded_entry(&file_path));
     }
     Ok(entries)
@@ -182,11 +181,7 @@ fn duplicate_path_message(path: &str, entries: &[FileEntry]) -> String {
     message
 }
 
-async fn write_file(
-    upload: &Upload,
-    path: &Path,
-    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
-) -> Result<(), ErrorResponse> {
+async fn write_file(upload: &Upload, path: &Path, content: Chunks) -> Result<(), ErrorResponse> {
     let shown = path.display();
     let parent = dir(path);
     ensure_dirs(&parent, upload.user.uid, upload.user.gid).map_err(|e| {
@@ -279,10 +274,7 @@ async fn write_file(
     }
 }
 
-async fn copy_to_file(
-    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
-    file: &mut std::fs::File,
-) -> io::Result<()> {
+async fn copy_to_file(mut content: Chunks, file: &mut std::fs::File) -> io::Result<()> {
     while let Some(chunk) = content.next().await {
         file.write_all(&chunk?)?;
     }
