@@ -63,3 +63,21 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Firecracker does not get its own session (`setsid`) | M8 |
 | `vm_contract` has no cleanup guard when it panics | any |
 | `MAX_SLOT` is 16383 vs upstream 32766 (deliberate; revisit for large nodes) | M8 |
+
+## Orchestrator: cold boot (M5)
+
+| Item | Target |
+|---|---|
+| envd `/init` attempt can overshoot the deadline by up to 1 s; per-attempt timeout 1 s vs upstream ~50 ms (bound each attempt by `min(attempt, deadline - now)`, use 100–200 ms) | M6 |
+| A guest that dies during `/init` is waited for the full envd timeout; race init against the Firecracker process exiting (upstream `ErrFcProcessExited`) | M6 |
+| MMDS is written after `InstanceStart`; upstream writes it before start and only with a token | M6 |
+| `put_file` does not `abort()` a failed multipart upload (orphaned S3 parts); its test stays under `BufWriter`'s 10 MiB so multipart is untested | M7 |
+| `sandbox_contract::any_nbd_connected` looks at every nbd device on the host; compare to a snapshot or check only our index | any |
+| Teardown leaves `firecracker.sock` and `console.log` in the work dir | M8 |
+| `examples/cold_boot` installs its signal handler only after boot; SIGTERM during boot tears nothing down | any |
+| `/init` omits `hyperloopIP`, `lifecycleID`, `volumeMounts`, `caBundle`; MMDS `address` is `""` (upstream `http://<ip>/logs`) | M8 |
+| A cold boot cancelled while `expose` is mid-attach leaks that NBD device (no `Drop` for `NbdDevice`, see M3a) | M8 |
+| udev/blkid probing a just-disconnected `/dev/nbdN` can still reset the next owner's size; upstream uses netlink connect | M8 |
+| If killing Firecracker fails, it still holds the nbd fd while the disk closes; log it | M8 |
+| Egress check cannot probe 169.254.169.254 (MMDS answers it); Azure WireServer 168.63.129.16 is not blocked, check upstream | M8 |
+
