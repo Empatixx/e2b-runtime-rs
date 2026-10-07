@@ -1578,6 +1578,7 @@ dependencies = [
  "nix 0.29.0",
  "object_store",
  "parking_lot",
+ "reqwest 0.12.28",
  "roaring",
  "serde_json",
  "sha2",

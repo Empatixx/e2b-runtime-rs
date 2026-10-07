@@ -79,7 +79,7 @@ impl FirecrackerProcess {
         ))
     }
 
-    fn console_tail(&self) -> String {
+    pub fn console_tail(&self) -> String {
         let console = std::fs::read_to_string(&self.console).unwrap_or_default();
         let start = console.len().saturating_sub(CONSOLE_TAIL);
         console.get(start..).unwrap_or_default().trim().to_owned()
