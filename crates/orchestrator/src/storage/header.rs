@@ -1,10 +1,21 @@
-mod mapping;
+mod diff;
+pub mod mapping;
 mod metadata;
 
+pub use diff::DiffMetadata;
 pub use mapping::{BuildMapping, MAPPING_SIZE};
 pub use metadata::{METADATA_SIZE, Metadata};
 
+use uuid::Uuid;
+
 pub const PAGE_SIZE: u64 = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+    pub build_id: Uuid,
+    pub storage_offset: u64,
+    pub length: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -47,6 +58,24 @@ impl Header {
         }
         let mappings = entries.iter().map(BuildMapping::decode).collect();
         Self::new(metadata, mappings)
+    }
+
+    pub fn locate(&self, offset: u64) -> Result<Location, String> {
+        let size = self.metadata.size;
+        if offset >= size {
+            return Err(format!("offset {offset} is out of bounds (size {size})"));
+        }
+        let index = self.mappings.partition_point(|mapping| mapping.offset <= offset);
+        let mapping = index
+            .checked_sub(1)
+            .map(|index| self.mappings[index])
+            .ok_or_else(|| format!("offset {offset} has no mapping"))?;
+        let shift = offset - mapping.offset;
+        Ok(Location {
+            build_id: mapping.build_id,
+            storage_offset: mapping.storage_offset + shift,
+            length: mapping.length - shift,
+        })
     }
 }
 
@@ -141,5 +170,130 @@ mod tests {
 
         let zero_block = Header::new(Metadata::template(id(1), 0, 4096), Vec::new());
         assert_eq!(zero_block.unwrap_err(), "block size cannot be zero");
+    }
+
+    use roaring::RoaringBitmap;
+
+    fn mapping(offset: u64, length: u64, build: u8, storage_offset: u64) -> BuildMapping {
+        BuildMapping {
+            offset,
+            length,
+            build_id: id(build),
+            storage_offset,
+        }
+    }
+
+    fn template(blocks: u64) -> Header {
+        Header::new(Metadata::template(id(1), 4096, blocks * 4096), Vec::new()).unwrap()
+    }
+
+    fn blocks(indices: &[u32]) -> RoaringBitmap {
+        indices.iter().copied().collect()
+    }
+
+    fn diff(dirty: &[u32], empty: &[u32]) -> DiffMetadata {
+        DiffMetadata {
+            dirty: blocks(dirty),
+            empty: blocks(empty),
+            block_size: 4096,
+        }
+    }
+
+    #[test]
+    fn diff_in_the_middle_splits_the_parent() {
+        let header = diff(&[2, 3], &[]).to_diff_header(&template(8), id(2)).unwrap();
+        assert_eq!(header.metadata.generation, 1);
+        assert_eq!(header.metadata.build_id, id(2));
+        assert_eq!(header.metadata.base_build_id, id(1));
+        assert_eq!(
+            header.mappings,
+            vec![
+                mapping(0, 8192, 1, 0),
+                mapping(8192, 8192, 2, 0),
+                mapping(16384, 16384, 1, 16384),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_at_both_edges_and_empty_blocks() {
+        let header = diff(&[0, 7], &[3]).to_diff_header(&template(8), id(2)).unwrap();
+        assert_eq!(
+            header.mappings,
+            vec![
+                mapping(0, 4096, 2, 0),
+                mapping(4096, 8192, 1, 4096),
+                mapping(12288, 4096, 0, 0),
+                mapping(16384, 12288, 1, 16384),
+                mapping(28672, 4096, 2, 4096),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_covering_everything_replaces_the_parent() {
+        let all: Vec<u32> = (0..8).collect();
+        let header = diff(&all, &[]).to_diff_header(&template(8), id(2)).unwrap();
+        assert_eq!(header.mappings, vec![mapping(0, 32768, 2, 0)]);
+    }
+
+    #[test]
+    fn empty_diff_keeps_parent_mappings() {
+        let parent = template(8);
+        let header = diff(&[], &[]).to_diff_header(&parent, id(2)).unwrap();
+        assert_eq!(header.mappings, parent.mappings);
+        assert_eq!(header.metadata.generation, 1);
+    }
+
+    #[test]
+    fn second_generation_resolves_through_one_lookup() {
+        let first = diff(&[2, 3], &[]).to_diff_header(&template(8), id(2)).unwrap();
+        let second = diff(&[3, 4], &[]).to_diff_header(&first, id(3)).unwrap();
+        assert_eq!(
+            second.mappings,
+            vec![
+                mapping(0, 8192, 1, 0),
+                mapping(8192, 4096, 2, 0),
+                mapping(12288, 8192, 3, 0),
+                mapping(20480, 12288, 1, 20480),
+            ]
+        );
+        assert_eq!(
+            second.locate(9000).unwrap(),
+            Location {
+                build_id: id(2),
+                storage_offset: 808,
+                length: 3288,
+            }
+        );
+    }
+
+    #[test]
+    fn locate_handles_the_edges() {
+        let header = diff(&[2, 3], &[]).to_diff_header(&template(8), id(2)).unwrap();
+        assert_eq!(
+            header.locate(32767).unwrap(),
+            Location {
+                build_id: id(1),
+                storage_offset: 32767,
+                length: 1,
+            }
+        );
+        assert_eq!(
+            header.locate(32768).unwrap_err(),
+            "offset 32768 is out of bounds (size 32768)"
+        );
+    }
+
+    #[test]
+    fn validate_reports_gaps_and_size_mismatch() {
+        assert_eq!(
+            mapping::validate(&[mapping(0, 4096, 1, 0), mapping(8192, 4096, 1, 0)], 12288).unwrap_err(),
+            "mapping validation failed: expected offset 4096, got 8192"
+        );
+        assert_eq!(
+            mapping::validate(&[mapping(0, 4096, 1, 0)], 8192).unwrap_err(),
+            "mapping validation failed: total 4096 != size 8192"
+        );
     }
 }
