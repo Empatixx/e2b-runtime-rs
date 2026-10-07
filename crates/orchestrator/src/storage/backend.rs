@@ -5,9 +5,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
+use object_store::buffered::BufWriter;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+
+use tokio::io::AsyncWriteExt;
 
 use super::header::Header;
 
@@ -42,6 +45,17 @@ impl Storage {
             .await
             .map(|_| ())
             .map_err(|e| format!("put {path}: {e}"))
+    }
+
+    pub async fn put_file(&self, path: &str, file: &Path) -> Result<(), String> {
+        let mut source = tokio::fs::File::open(file)
+            .await
+            .map_err(|e| format!("open {}: {e}", file.display()))?;
+        let mut writer = BufWriter::new(self.store.clone(), ObjectPath::from(path));
+        tokio::io::copy(&mut source, &mut writer)
+            .await
+            .map_err(|e| format!("put {path}: {e}"))?;
+        writer.shutdown().await.map_err(|e| format!("put {path}: {e}"))
     }
 
     pub async fn get(&self, path: &str) -> Result<Bytes, String> {
@@ -168,6 +182,19 @@ mod tests {
         storage.delete_prefix(prefix).await.unwrap();
         assert!(storage.get(&path).await.is_err());
         assert!(storage.get(&header_path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn put_file_streams_a_file_into_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        let content: Vec<u8> = (0..9 << 20).map(|i: u32| (i % 251) as u8).collect();
+        let source = dir.path().join("rootfs.ext4");
+        std::fs::write(&source, &content).unwrap();
+
+        storage.put_file("t/rootfs.ext4", &source).await.unwrap();
+
+        assert_eq!(storage.get("t/rootfs.ext4").await.unwrap(), Bytes::from(content));
     }
 
     #[tokio::test]
