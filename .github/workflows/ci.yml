@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: sudo modprobe nbd nbds_max=16
       - run: scripts/ci/vm-assets.sh
+      - run: scripts/ci/guest-rootfs.sh
       - run: sudo chmod 666 /dev/kvm
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: sudo -E env "PATH=$PATH" cargo test --workspace

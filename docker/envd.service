@@ -1,0 +1,21 @@
+[Unit]
+Description=Env Daemon Service
+DefaultDependencies=no
+After=systemd-journald.socket systemd-remount-fs.service local-fs.target systemd-tmpfiles-setup.service
+Wants=systemd-journald.socket
+Conflicts=shutdown.target
+Before=shutdown.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+User=root
+Group=root
+ExecStart=/usr/bin/envd
+OOMPolicy=continue
+OOMScoreAdjust=-1000
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target
