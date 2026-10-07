@@ -216,11 +216,8 @@ fn start_pipes(args: &[String], env: &[(String, String)], cwd: &Path, user: &Use
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    unsafe {
-        command.pre_exec(switch_user(user));
-    }
 
-    let mut child = command.spawn()?;
+    let mut child = spawn_as(&mut command, user)?;
     let stdout = child.stdout.take().map(|stdout| OutputPipe {
         reader: Box::new(stdout),
         chunk_size: PIPE_CHUNK,
@@ -271,6 +268,16 @@ fn start_pty(
             kind: Data::Pty,
         }],
     })
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_as(command: &mut tokio::process::Command, user: &User) -> io::Result<Child> {
+    super::credentials::with_user_credentials(user, || command.spawn())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_as(command: &mut tokio::process::Command, user: &User) -> io::Result<Child> {
+    unsafe { command.pre_exec(switch_user(user)) }.spawn()
 }
 
 fn switch_user(user: &User) -> impl FnMut() -> io::Result<()> + Send + Sync + 'static {

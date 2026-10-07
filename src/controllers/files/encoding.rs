@@ -4,25 +4,31 @@ use std::pin::Pin;
 use async_compression::tokio::bufread::GzipDecoder;
 use axum::body::Body;
 use axum::http::HeaderMap;
-use tokio::io::AsyncRead;
-use tokio_stream::StreamExt;
-use tokio_util::io::StreamReader;
+use bytes::Bytes;
+use tokio_stream::{Stream, StreamExt};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 pub const GZIP: &str = "gzip";
 pub const IDENTITY: &str = "identity";
 const WILDCARD: &str = "*";
 const SUPPORTED: &str = "[gzip]";
+const DECODED_CHUNK: usize = 64 * 1024;
+
+pub type Chunks = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
 
 struct WeightedEncoding {
     encoding: String,
     quality: f64,
 }
 
-pub fn decoded_body(headers: &HeaderMap, body: Body) -> Result<Pin<Box<dyn AsyncRead + Send>>, String> {
-    let reader = StreamReader::new(body.into_data_stream().map(|chunk| chunk.map_err(io::Error::other)));
+pub fn decoded_body(headers: &HeaderMap, body: Body) -> Result<Chunks, String> {
+    let chunks = body.into_data_stream().map(|chunk| chunk.map_err(io::Error::other));
     match content_encoding(headers)? {
-        GZIP => Ok(Box::pin(GzipDecoder::new(reader))),
-        _ => Ok(Box::pin(reader)),
+        GZIP => Ok(Box::pin(ReaderStream::with_capacity(
+            GzipDecoder::new(StreamReader::new(chunks)),
+            DECODED_CHUNK,
+        ))),
+        _ => Ok(Box::pin(chunks)),
     }
 }
 

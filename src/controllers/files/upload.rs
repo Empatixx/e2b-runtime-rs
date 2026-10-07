@@ -1,18 +1,17 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::os::unix::fs::chown;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, chown};
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use tokio::io::{AsyncRead, AsyncWriteExt, BufWriter};
-use tokio_stream::StreamExt;
-use tokio_util::io::{ReaderStream, StreamReader};
+use bytes::Bytes;
+use tokio_stream::{Stream, StreamExt};
 
-use super::{FileEntry, FilesQuery, authorize, encoding, uploaded_entry};
+use super::encoding::{self, Chunks};
+use super::{FileEntry, FilesQuery, authorize, uploaded_entry};
 use crate::app::AppState;
 use crate::auth::WRITE;
 use crate::user::User;
@@ -94,11 +93,7 @@ struct Upload {
     content_length: Option<u64>,
 }
 
-async fn raw_upload(
-    upload: &Upload,
-    path: Option<&str>,
-    mut body: Pin<Box<dyn AsyncRead + Send>>,
-) -> Result<Vec<FileEntry>, ErrorResponse> {
+async fn raw_upload(upload: &Upload, path: Option<&str>, mut body: Chunks) -> Result<Vec<FileEntry>, ErrorResponse> {
     let Some(path) = path else {
         return Err(ErrorResponse::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -120,7 +115,7 @@ async fn multipart_upload(
     upload: &Upload,
     path: Option<&str>,
     content_type: &str,
-    body: Pin<Box<dyn AsyncRead + Send>>,
+    body: Chunks,
 ) -> Result<Vec<FileEntry>, ErrorResponse> {
     let form_error = |e: multer::Error| {
         ErrorResponse::builder()
@@ -129,7 +124,7 @@ async fn multipart_upload(
             .build()
     };
     let boundary = multer::parse_boundary(content_type).map_err(form_error)?;
-    let mut multipart = multer::Multipart::new(ReaderStream::new(body), boundary);
+    let mut multipart = multer::Multipart::new(body, boundary);
     let mut entries: Vec<FileEntry> = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -162,8 +157,8 @@ async fn multipart_upload(
                 .build());
         }
 
-        let mut reader = StreamReader::new(field.map(|chunk| chunk.map_err(io::Error::other)));
-        write_file(upload, &file_path, &mut reader).await?;
+        let mut chunks = field.map(|chunk| chunk.map_err(io::Error::other));
+        write_file(upload, &file_path, &mut chunks).await?;
         entries.push(uploaded_entry(&file_path));
     }
     Ok(entries)
@@ -187,7 +182,11 @@ fn duplicate_path_message(path: &str, entries: &[FileEntry]) -> String {
     message
 }
 
-async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead + Unpin)) -> Result<(), ErrorResponse> {
+async fn write_file(
+    upload: &Upload,
+    path: &Path,
+    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
+) -> Result<(), ErrorResponse> {
     let shown = path.display();
     let parent = dir(path);
     ensure_dirs(&parent, upload.user.uid, upload.user.gid).map_err(|e| {
@@ -214,13 +213,12 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
         _ => {}
     }
 
-    let file = tokio::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o666)
         .open(path)
-        .await
         .map_err(|e| {
             let cause = os_error("open", path, &e);
             match e.kind() {
@@ -243,29 +241,25 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
             .build()
     })?;
 
-    let mut writer = BufWriter::new(file);
-    let written = async {
-        tokio::io::copy(content, &mut writer).await?;
-        writer.flush().await
-    };
-    written.await.map_err(|e| match (e.kind(), upload.content_length) {
-        (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::builder()
-            .status(StatusCode::INSUFFICIENT_STORAGE)
-            .message(format!(
-                "attempted to write {length} bytes: not enough disk space available"
-            ))
-            .build(),
-        (io::ErrorKind::StorageFull, _) => ErrorResponse::builder()
-            .status(StatusCode::INSUFFICIENT_STORAGE)
-            .message("not enough disk space available")
-            .build(),
-        _ => ErrorResponse::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .message(format!("error writing file: {e}"))
-            .build(),
-    })?;
+    copy_to_file(content, &mut file)
+        .await
+        .map_err(|e| match (e.kind(), upload.content_length) {
+            (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message(format!(
+                    "attempted to write {length} bytes: not enough disk space available"
+                ))
+                .build(),
+            (io::ErrorKind::StorageFull, _) => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message("not enough disk space available")
+                .build(),
+            _ => ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!("error writing file: {e}"))
+                .build(),
+        })?;
 
-    let file = writer.into_inner().into_std().await;
     match write_metadata(&file, &upload.metadata) {
         Ok(()) => Ok(()),
         Err(e) if is_xattr_unsupported(&e) => {
@@ -283,4 +277,14 @@ async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead 
             .message(format!("error writing file metadata: {e}"))
             .build()),
     }
+}
+
+async fn copy_to_file(
+    content: &mut (impl Stream<Item = io::Result<Bytes>> + Unpin),
+    file: &mut std::fs::File,
+) -> io::Result<()> {
+    while let Some(chunk) = content.next().await {
+        file.write_all(&chunk?)?;
+    }
+    Ok(())
 }

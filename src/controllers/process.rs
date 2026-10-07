@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod credentials;
 mod events;
 mod output;
 mod registry;
