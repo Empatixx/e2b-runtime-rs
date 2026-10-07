@@ -231,6 +231,10 @@ mod tests {
         );
 
         assert_eq!((first, second, third), (1, 2, 3));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while fixture.server.faults_served() < 3 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert_eq!(fixture.server.faults_served(), 3);
         fixture.server.stop().await.unwrap();
     }
