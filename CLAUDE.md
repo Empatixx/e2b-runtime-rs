@@ -1,0 +1,29 @@
+# envd-rs
+
+envd-rs is a Rust drop-in replacement for the E2B `envd` daemon written in Go. A client must be able to swap the Go binary for this one and see no difference.
+
+## API parity
+
+Match the upstream Go envd exactly at the edges: routes, status codes, headers, JSON shapes and error texts. Read the Go source first, then write the same behaviour in idiomatic Rust. Keep the inside of the code shaped the Rust way, using tokio, axum and connectrpc conventions.
+
+## Code style
+
+Write simple, plain code: free functions, `match`, `?` and iterator chains. Let good names explain the code and keep source files free of comments. Use structs with named fields for every piece of data.
+
+Keep things flat and direct, adding a new layer only when the compiler asks for it. Return errors as `String`, `io::Error` or `ConnectError` holding the exact text the client sees.
+
+## Project layout
+
+Follow the crates.io style: `foo.rs` lists its submodules and they live in the `foo/` folder. The `project-structure` skill says where each kind of code belongs. Update that skill when the layout grows.
+
+## Testing
+
+Put unit tests at the bottom of the same file in `#[cfg(test)] mod tests`. Put HTTP behaviour tests in `tests/*_contract.rs`, talking to a real running server. Run Linux-only checks with `scripts/test-linux.sh`, which uses Docker.
+
+## Before a commit
+
+Run `cargo fmt`, `cargo clippy --all-targets` and `cargo test`, and commit when all three are clean. Commit locally and leave pushing to the user.
+
+## Working with the user
+
+Talk in Czech, keep answers short and explain Rust ideas with Java analogies. The user edits files in RustRover at the same time, so read a file right before editing it. Take Rust skills from `~/IdeaProjects/vm-data-plane/.claude/skills`.
