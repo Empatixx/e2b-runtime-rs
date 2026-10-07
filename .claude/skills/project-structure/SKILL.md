@@ -23,7 +23,7 @@ src/
   host.rs + host/      things done to the VM (clock, /etc/hosts, MMDS)
   user.rs              Linux users/groups
   envvars.rs           env vars for spawned processes
-  util.rs + util/      small shared helpers (fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
+  util.rs + util/      small shared helpers (error_response.rs; fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
   proto.rs             include_generated!() only
 tests/                 HTTP contract tests against a real server (tests/common: spawn_server_with_state)
 proto/                 .proto copied from upstream E2B (never edit)
@@ -46,9 +46,10 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 ## Code rules
 
 - **No comments at all** — no `//`, `///`, `//!`. Names carry the meaning.
-- **KISS**: no traits, newtypes, builders, error enums or wrapper/delegating methods unless the compiler forces them. Free functions, `match`, `?`, iterator chains.
+- **KISS**: no traits, newtypes, error enums or wrapper/delegating methods unless the compiler forces them. Free functions, `match`, `?`, iterator chains.
+- **Builders**: build values with builder chains, e.g. `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`. A struct created in several places gets its own `builder()`; use library builders (`OpenOptions`, `Response::builder`).
 - **Named fields always**: no tuple structs (`struct Foo(Bar)`), no `.0`/`.1` field access.
-- Errors are `String`, `io::Error` or `ConnectError` carrying the exact text the client sees.
+- Errors are `String`, `io::Error`, `ConnectError` or `util::error_response::ErrorResponse` (REST JSON/plain error like Go `jsonError`) carrying the exact text the client sees.
 - **API = upstream Go envd**: paths, status codes, JSON shapes, header names and error texts must match byte for byte. Check the Go source before writing; internals are plain Rust.
 - Unit tests live in `#[cfg(test)] mod tests` at the bottom of the same file; HTTP behaviour goes in `tests/*_contract.rs`.
 - `rustfmt.toml` sets `max_width = 120`; run `cargo fmt` and `cargo clippy --all-targets` before committing.

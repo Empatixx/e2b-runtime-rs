@@ -6,16 +6,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Query, Request, State};
-use axum::http::header;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tokio::io::{AsyncRead, AsyncWriteExt, BufWriter};
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use super::{ErrorResponse, FileEntry, FilesQuery, authorize, encoding, uploaded_entry};
+use super::{FileEntry, FilesQuery, authorize, encoding, uploaded_entry};
 use crate::app::AppState;
 use crate::auth::WRITE;
 use crate::user::User;
+use crate::util::error_response::ErrorResponse;
 use crate::util::fs::os_error;
 use crate::util::metadata::{is_xattr_unsupported, metadata_from_headers, validate_metadata, write_metadata};
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
@@ -27,11 +28,20 @@ pub async fn post_files(
 ) -> Result<Response, ErrorResponse> {
     let (parts, body) = request.into_parts();
     let user = authorize(&state, &query, &parts.headers, WRITE)?;
-    let body = encoding::decoded_body(&parts.headers, body)
-        .map_err(|e| ErrorResponse::bad_request(format!("error decompressing request body: {e}")))?;
+    let body = encoding::decoded_body(&parts.headers, body).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("error decompressing request body: {e}"))
+            .build()
+    })?;
 
     let metadata = metadata_from_headers(&parts.headers);
-    validate_metadata(&metadata).map_err(|e| ErrorResponse::bad_request(format!("invalid metadata: {e}")))?;
+    validate_metadata(&metadata).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("invalid metadata: {e}"))
+            .build()
+    })?;
 
     let content_type = parts
         .headers
@@ -61,13 +71,20 @@ pub async fn post_files(
     } else if media_type.starts_with("multipart/") {
         multipart_upload(&upload, query.path.as_deref(), content_type, body).await?
     } else {
-        return Err(ErrorResponse::bad_request(format!(
-            "unsupported content type: {content_type}, expected multipart/form-data or application/octet-stream"
-        )));
+        return Err(ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!(
+                "unsupported content type: {content_type}, expected multipart/form-data or application/octet-stream"
+            ))
+            .build());
     };
 
-    let json = serde_json::to_string(&entries)
-        .map_err(|e| ErrorResponse::internal(format!("error marshaling response: {e}")))?;
+    let json = serde_json::to_string(&entries).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error marshaling response: {e}"))
+            .build()
+    })?;
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], json).into_response())
 }
 
@@ -84,12 +101,17 @@ async fn raw_upload(
     mut body: Pin<Box<dyn AsyncRead + Send>>,
 ) -> Result<Vec<FileEntry>, ErrorResponse> {
     let Some(path) = path else {
-        return Err(ErrorResponse::bad_request(
-            "path query parameter is required for raw body upload",
-        ));
+        return Err(ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message("path query parameter is required for raw body upload")
+            .build());
     };
-    let path = expand_and_resolve(path, upload.user, upload.workdir)
-        .map_err(|e| ErrorResponse::bad_request(format!("error resolving path: {e}")))?;
+    let path = expand_and_resolve(path, upload.user, upload.workdir).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("error resolving path: {e}"))
+            .build()
+    })?;
 
     write_file(upload, &path, &mut body).await?;
     Ok(vec![uploaded_entry(&path)])
@@ -101,16 +123,22 @@ async fn multipart_upload(
     content_type: &str,
     body: Pin<Box<dyn AsyncRead + Send>>,
 ) -> Result<Vec<FileEntry>, ErrorResponse> {
-    let form_error = |e: multer::Error| ErrorResponse::internal(format!("error parsing multipart form: {e}"));
+    let form_error = |e: multer::Error| {
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error parsing multipart form: {e}"))
+            .build()
+    };
     let boundary = multer::parse_boundary(content_type).map_err(form_error)?;
     let mut multipart = multer::Multipart::new(ReaderStream::new(body), boundary);
     let mut entries: Vec<FileEntry> = Vec::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ErrorResponse::internal(format!("error reading form: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error reading form: {e}"))
+            .build()
+    })? {
         if field.name() != Some("file") {
             continue;
         }
@@ -118,16 +146,21 @@ async fn multipart_upload(
         let requested = match path.or(field.file_name()) {
             Some(requested) => requested.to_owned(),
             None => {
-                return Err(ErrorResponse::bad_request(
-                    "error getting multipart custom part file name: filename not found in Content-Disposition header",
-                ));
+                return Err(ErrorResponse::builder().status(StatusCode::BAD_REQUEST).message("error getting multipart custom part file name: filename not found in Content-Disposition header").build());
             }
         };
-        let file_path = expand_and_resolve(&requested, upload.user, upload.workdir)
-            .map_err(|e| ErrorResponse::bad_request(format!("error resolving path: {e}")))?;
+        let file_path = expand_and_resolve(&requested, upload.user, upload.workdir).map_err(|e| {
+            ErrorResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .message(format!("error resolving path: {e}"))
+                .build()
+        })?;
         let shown = file_path.display().to_string();
         if entries.iter().any(|entry| entry.path == shown) {
-            return Err(ErrorResponse::bad_request(duplicate_path_message(&shown, &entries)));
+            return Err(ErrorResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .message(duplicate_path_message(&shown, &entries))
+                .build());
         }
 
         let mut reader = StreamReader::new(field.map(|chunk| chunk.map_err(io::Error::other)));
@@ -162,16 +195,26 @@ async fn write_file(
 ) -> Result<(), ErrorResponse> {
     let shown = path.display();
     let parent = path.parent().unwrap_or(Path::new("/"));
-    ensure_dirs(parent, upload.user.uid, upload.user.gid)
-        .map_err(|e| ErrorResponse::internal(format!("error ensuring directories: {e}")))?;
+    ensure_dirs(parent, upload.user.uid, upload.user.gid).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error ensuring directories: {e}"))
+            .build()
+    })?;
 
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() => {
-            return Err(ErrorResponse::bad_request(format!("path is a directory: {shown}")));
+            return Err(ErrorResponse::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .message(format!("path is a directory: {shown}"))
+                .build());
         }
         Err(e) if e.kind() != io::ErrorKind::NotFound => {
             let cause = os_error("stat", path, &e);
-            return Err(ErrorResponse::internal(format!("error getting file info: {cause}")));
+            return Err(ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!("error getting file info: {cause}"))
+                .build());
         }
         _ => {}
     }
@@ -186,16 +229,23 @@ async fn write_file(
         .map_err(|e| {
             let cause = os_error("open", path, &e);
             match e.kind() {
-                io::ErrorKind::StorageFull => {
-                    ErrorResponse::insufficient_storage(format!("not enough inodes available: {cause}"))
-                }
-                _ => ErrorResponse::internal(format!("error opening file: {cause}")),
+                io::ErrorKind::StorageFull => ErrorResponse::builder()
+                    .status(StatusCode::INSUFFICIENT_STORAGE)
+                    .message(format!("not enough inodes available: {cause}"))
+                    .build(),
+                _ => ErrorResponse::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .message(format!("error opening file: {cause}"))
+                    .build(),
             }
         })?;
 
     chown(path, Some(upload.user.uid), Some(upload.user.gid)).map_err(|e| {
         let cause = os_error("chown", path, &e);
-        ErrorResponse::internal(format!("error changing file ownership: {cause}"))
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error changing file ownership: {cause}"))
+            .build()
     })?;
 
     let mut writer = BufWriter::new(file);
@@ -204,11 +254,20 @@ async fn write_file(
         writer.flush().await
     };
     written.await.map_err(|e| match (e.kind(), upload.content_length) {
-        (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::insufficient_storage(format!(
-            "attempted to write {length} bytes: not enough disk space available"
-        )),
-        (io::ErrorKind::StorageFull, _) => ErrorResponse::insufficient_storage("not enough disk space available"),
-        _ => ErrorResponse::internal(format!("error writing file: {e}")),
+        (io::ErrorKind::StorageFull, Some(length)) if length > 0 => ErrorResponse::builder()
+            .status(StatusCode::INSUFFICIENT_STORAGE)
+            .message(format!(
+                "attempted to write {length} bytes: not enough disk space available"
+            ))
+            .build(),
+        (io::ErrorKind::StorageFull, _) => ErrorResponse::builder()
+            .status(StatusCode::INSUFFICIENT_STORAGE)
+            .message("not enough disk space available")
+            .build(),
+        _ => ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error writing file: {e}"))
+            .build(),
     })?;
 
     let file = writer.into_inner().into_std().await;
@@ -218,9 +277,15 @@ async fn write_file(
             tracing::warn!(path = %shown, error = %e, "filesystem does not support xattrs; metadata not persisted");
             Ok(())
         }
-        Err(e) if matches!(e.kind(), io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded) => Err(
-            ErrorResponse::insufficient_storage(format!("not enough space for file metadata: {e}")),
-        ),
-        Err(e) => Err(ErrorResponse::internal(format!("error writing file metadata: {e}"))),
+        Err(e) if matches!(e.kind(), io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded) => {
+            Err(ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message(format!("not enough space for file metadata: {e}"))
+                .build())
+        }
+        Err(e) => Err(ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error writing file metadata: {e}"))
+            .build()),
     }
 }

@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::header;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::{ErrorResponse, file_entry, lookup_user};
+use super::{file_entry, lookup_user};
 use crate::app::AppState;
+use crate::util::error_response::ErrorResponse;
 use crate::util::fs::os_error;
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
 
@@ -25,50 +26,82 @@ pub struct ComposeRequest {
 }
 
 pub async fn post_files_compose(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, ErrorResponse> {
-    let request: ComposeRequest =
-        serde_json::from_slice(&body).map_err(|e| ErrorResponse::bad_request(format!("invalid request body: {e}")))?;
+    let request: ComposeRequest = serde_json::from_slice(&body).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("invalid request body: {e}"))
+            .build()
+    })?;
     if request.source_paths.is_empty() {
-        return Err(ErrorResponse::bad_request("source_paths must not be empty".to_owned()));
+        return Err(ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message("source_paths must not be empty")
+            .build());
     }
     if request.destination.is_empty() {
-        return Err(ErrorResponse::bad_request("destination is required".to_owned()));
+        return Err(ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message("destination is required")
+            .build());
     }
 
     let defaults = state.defaults();
     let user = lookup_user(request.username.as_deref(), &defaults.user)?;
     let workdir = defaults.workdir.as_deref();
-    let destination = expand_and_resolve(&request.destination, &user, workdir)
-        .map_err(|e| ErrorResponse::bad_request(format!("error resolving destination path: {e}")))?;
+    let destination = expand_and_resolve(&request.destination, &user, workdir).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .message(format!("error resolving destination path: {e}"))
+            .build()
+    })?;
 
     let sources = request
         .source_paths
         .iter()
         .map(|source| {
-            let resolved = expand_and_resolve(source, &user, workdir)
-                .map_err(|e| ErrorResponse::bad_request(format!("error resolving source path {source:?}: {e}")))?;
+            let resolved = expand_and_resolve(source, &user, workdir).map_err(|e| {
+                ErrorResponse::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .message(format!("error resolving source path {source:?}: {e}"))
+                    .build()
+            })?;
             if resolved == destination {
-                return Err(ErrorResponse::bad_request(format!(
-                    "source path {source:?} cannot be the same as destination"
-                )));
+                return Err(ErrorResponse::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .message(format!("source path {source:?} cannot be the same as destination"))
+                    .build());
             }
             match std::fs::metadata(&resolved) {
-                Err(_) => Err(ErrorResponse::not_found(format!("source file not found: {source}"))),
-                Ok(meta) if !meta.is_file() => Err(ErrorResponse::bad_request(format!(
-                    "source path is not a regular file: {source}"
-                ))),
+                Err(_) => Err(ErrorResponse::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .message(format!("source file not found: {source}"))
+                    .build()),
+                Ok(meta) if !meta.is_file() => Err(ErrorResponse::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .message(format!("source path is not a regular file: {source}"))
+                    .build()),
                 Ok(_) => Ok(resolved),
             }
         })
         .collect::<Result<Vec<PathBuf>, ErrorResponse>>()?;
 
     let parent = destination.parent().unwrap_or(Path::new("/"));
-    ensure_dirs(parent, user.uid, user.gid)
-        .map_err(|e| ErrorResponse::internal(format!("error ensuring directories: {e}")))?;
+    ensure_dirs(parent, user.uid, user.gid).map_err(|e| {
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!("error ensuring directories: {e}"))
+            .build()
+    })?;
 
     let target = destination.clone();
     tokio::task::spawn_blocking(move || compose(&sources, &target, user.uid, user.gid))
         .await
-        .map_err(ErrorResponse::internal)??;
+        .map_err(|e| {
+            ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(e)
+                .build()
+        })??;
 
     let body = serde_json::to_string(&file_entry(&destination, Default::default())).unwrap_or_default();
     Ok(([(header::CONTENT_TYPE, "application/json")], format!("{body}\n")).into_response())
@@ -83,10 +116,13 @@ fn compose(sources: &[PathBuf], destination: &Path, uid: u32, gid: u32) -> Resul
 
     let composed = concatenate(sources, &temporary, uid, gid).and_then(|()| {
         std::fs::rename(&temporary, destination).map_err(|e| {
-            ErrorResponse::internal(format!(
-                "error finalizing compose: {}",
-                rename_error(&temporary, destination, &e)
-            ))
+            ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!(
+                    "error finalizing compose: {}",
+                    rename_error(&temporary, destination, &e)
+                ))
+                .build()
         })
     });
     if composed.is_err() {
@@ -108,31 +144,49 @@ fn concatenate(sources: &[PathBuf], temporary: &Path, uid: u32, gid: u32) -> Res
         .mode(0o666)
         .open(temporary)
         .map_err(|e| match e.kind() {
-            io::ErrorKind::StorageFull => ErrorResponse::insufficient_storage("not enough disk space available"),
-            _ => ErrorResponse::internal(format!(
-                "error creating destination file: {}",
-                os_error("open", temporary, &e)
-            )),
+            io::ErrorKind::StorageFull => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message("not enough disk space available")
+                .build(),
+            _ => ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!(
+                    "error creating destination file: {}",
+                    os_error("open", temporary, &e)
+                ))
+                .build(),
         })?;
 
     chown(temporary, Some(uid), Some(gid)).map_err(|e| {
-        ErrorResponse::internal(format!(
-            "error changing file ownership: {}",
-            os_error("chown", temporary, &e)
-        ))
+        ErrorResponse::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .message(format!(
+                "error changing file ownership: {}",
+                os_error("chown", temporary, &e)
+            ))
+            .build()
     })?;
 
     for source in sources {
         let mut input = File::open(source).map_err(|e| {
-            ErrorResponse::internal(format!(
-                "error opening source file {}: {}",
-                source.display(),
-                os_error("open", source, &e)
-            ))
+            ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!(
+                    "error opening source file {}: {}",
+                    source.display(),
+                    os_error("open", source, &e)
+                ))
+                .build()
         })?;
         io::copy(&mut input, &mut output).map_err(|e| match e.kind() {
-            io::ErrorKind::StorageFull => ErrorResponse::insufficient_storage("not enough disk space available"),
-            _ => ErrorResponse::internal(format!("error composing source {}: {e}", source.display())),
+            io::ErrorKind::StorageFull => ErrorResponse::builder()
+                .status(StatusCode::INSUFFICIENT_STORAGE)
+                .message("not enough disk space available")
+                .build(),
+            _ => ErrorResponse::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .message(format!("error composing source {}: {e}", source.display()))
+                .build(),
         })?;
     }
     Ok(())

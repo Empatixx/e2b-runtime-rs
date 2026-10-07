@@ -10,7 +10,9 @@ Match the upstream Go envd exactly at the edges: routes, status codes, headers, 
 
 Write simple, plain code: free functions, `match`, `?` and iterator chains. Let good names explain the code and keep source files free of comments. Use structs with named fields for every piece of data.
 
-Keep things flat and direct, adding a new layer only when the compiler asks for it. Return errors as `String`, `io::Error` or `ConnectError` holding the exact text the client sees.
+Keep things flat and direct, adding a new layer only when the compiler asks for it. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` holding the exact text the client sees.
+
+Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`. Give a struct its own `builder()` when it is created in several places, and use the builders libraries offer (`OpenOptions`, `Response::builder`, `reqwest::Client::builder`).
 
 ## Project layout
 

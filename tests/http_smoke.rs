@@ -72,6 +72,8 @@ async fn token_required_except_excluded_paths() {
 
     let res = c.get(format!("http://{addr}/envs")).send().await.unwrap();
     assert_eq!(res.status(), 401);
+    assert_eq!(res.headers()["content-type"], "application/json; charset=utf-8");
+    assert_eq!(res.headers()["x-content-type-options"], "nosniff");
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(
         body["message"],
