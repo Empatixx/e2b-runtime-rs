@@ -84,11 +84,18 @@ impl NbdDevice {
     }
 
     pub async fn wait(self) -> io::Result<()> {
-        let Self { claim, worker, .. } = self;
+        let Self {
+            claim,
+            control,
+            _kernel_socket: kernel_socket,
+            worker,
+        } = self;
         let served = tokio::task::spawn_blocking(move || worker.join())
             .await
             .map_err(io::Error::other)?
             .map_err(|_| io::Error::other("nbd worker panicked"))?;
+        drop(kernel_socket);
+        drop(control);
         drop(claim);
         served
     }
