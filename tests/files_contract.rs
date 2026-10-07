@@ -227,7 +227,7 @@ async fn download_requires_signature_when_token_set() {
     let (_tmp, root) = temp_root();
     let target = root.join("secret.txt");
     std::fs::write(&target, b"s").unwrap();
-    *state.access_token.write().unwrap() = Some("t".into());
+    *state.access_token.write() = Some("t".into());
     let me = current_user();
     let path = target.to_str().unwrap();
     let url = format!("http://{addr}/files?path={path}&username={me}");

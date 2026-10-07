@@ -1,6 +1,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use connectrpc::{ConnectError, ErrorCode, ServiceStream};
@@ -107,7 +109,7 @@ pub fn watch(
 
 pub fn record_events(pending: &Mutex<PendingEvents>, result: notify::Result<Event>, root: &Path, include_entry: bool) {
     let events = result.map(|event| filesystem_events(&event, root, include_entry));
-    let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut pending = pending.lock();
     if pending.error.is_some() {
         return;
     }

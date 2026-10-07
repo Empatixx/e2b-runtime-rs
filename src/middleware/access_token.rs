@@ -7,9 +7,8 @@ use axum::response::{IntoResponse, Response};
 use subtle::ConstantTimeEq;
 
 use crate::app::AppState;
+use crate::auth::ACCESS_TOKEN_HEADER;
 use crate::util::error_response::ErrorResponse;
-
-const ACCESS_TOKEN_HEADER: &str = "x-access-token";
 
 pub async fn require_token(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let provided = request

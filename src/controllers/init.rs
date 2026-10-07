@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, PoisonError};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -110,8 +110,7 @@ fn apply(state: &AppState, request: InitRequest) {
         state.env_vars.replace_user_vars(vars);
     }
 
-    *state.access_token.write().unwrap_or_else(PoisonError::into_inner) =
-        request.access_token.filter(|t| !t.is_empty());
+    *state.access_token.write() = request.access_token.filter(|t| !t.is_empty());
 
     if let Some(ip) = request.hyperloop_ip {
         std::thread::spawn(move || {
@@ -122,7 +121,7 @@ fn apply(state: &AppState, request: InitRequest) {
     }
 
     {
-        let mut defaults = state.defaults.write().unwrap_or_else(PoisonError::into_inner);
+        let mut defaults = state.defaults.write();
         if let Some(user) = request.default_user.filter(|u| !u.is_empty()) {
             defaults.user = user;
         }

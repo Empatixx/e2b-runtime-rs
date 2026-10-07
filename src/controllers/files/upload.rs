@@ -58,11 +58,10 @@ pub async fn post_files(
         .headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
-    let workdir = state.defaults().workdir;
     let upload = Upload {
-        user: &user,
-        workdir: workdir.as_deref(),
-        metadata: &metadata,
+        user,
+        workdir: state.defaults().workdir,
+        metadata,
         content_length,
     };
 
@@ -88,15 +87,15 @@ pub async fn post_files(
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], json).into_response())
 }
 
-struct Upload<'a> {
-    user: &'a User,
-    workdir: Option<&'a str>,
-    metadata: &'a BTreeMap<String, String>,
+struct Upload {
+    user: User,
+    workdir: Option<String>,
+    metadata: BTreeMap<String, String>,
     content_length: Option<u64>,
 }
 
 async fn raw_upload(
-    upload: &Upload<'_>,
+    upload: &Upload,
     path: Option<&str>,
     mut body: Pin<Box<dyn AsyncRead + Send>>,
 ) -> Result<Vec<FileEntry>, ErrorResponse> {
@@ -106,7 +105,7 @@ async fn raw_upload(
             .message("path query parameter is required for raw body upload")
             .build());
     };
-    let path = expand_and_resolve(path, upload.user, upload.workdir).map_err(|e| {
+    let path = expand_and_resolve(path, &upload.user, upload.workdir.as_deref()).map_err(|e| {
         ErrorResponse::builder()
             .status(StatusCode::BAD_REQUEST)
             .message(format!("error resolving path: {e}"))
@@ -118,7 +117,7 @@ async fn raw_upload(
 }
 
 async fn multipart_upload(
-    upload: &Upload<'_>,
+    upload: &Upload,
     path: Option<&str>,
     content_type: &str,
     body: Pin<Box<dyn AsyncRead + Send>>,
@@ -149,7 +148,7 @@ async fn multipart_upload(
                 return Err(ErrorResponse::builder().status(StatusCode::BAD_REQUEST).message("error getting multipart custom part file name: filename not found in Content-Disposition header").build());
             }
         };
-        let file_path = expand_and_resolve(&requested, upload.user, upload.workdir).map_err(|e| {
+        let file_path = expand_and_resolve(&requested, &upload.user, upload.workdir.as_deref()).map_err(|e| {
             ErrorResponse::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .message(format!("error resolving path: {e}"))
@@ -188,11 +187,7 @@ fn duplicate_path_message(path: &str, entries: &[FileEntry]) -> String {
     message
 }
 
-async fn write_file(
-    upload: &Upload<'_>,
-    path: &Path,
-    content: &mut (impl AsyncRead + Unpin),
-) -> Result<(), ErrorResponse> {
+async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead + Unpin)) -> Result<(), ErrorResponse> {
     let shown = path.display();
     let parent = path.parent().unwrap_or(Path::new("/"));
     ensure_dirs(parent, upload.user.uid, upload.user.gid).map_err(|e| {
@@ -271,7 +266,7 @@ async fn write_file(
     })?;
 
     let file = writer.into_inner().into_std().await;
-    match write_metadata(&file, upload.metadata) {
+    match write_metadata(&file, &upload.metadata) {
         Ok(()) => Ok(()),
         Err(e) if is_xattr_unsupported(&e) => {
             tracing::warn!(path = %shown, error = %e, "filesystem does not support xattrs; metadata not persisted");

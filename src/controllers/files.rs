@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
-use crate::auth::validate_signing;
+use crate::auth::{ACCESS_TOKEN_HEADER, validate_signing};
 use crate::user::User;
 use crate::util::error_response::ErrorResponse;
 use crate::util::metadata::read_metadata;
@@ -60,7 +60,7 @@ pub fn authorize(
         .map(parse_expiration)
         .transpose()?;
     let token = state.access_token();
-    let header_token = headers.get("x-access-token").and_then(|value| value.to_str().ok());
+    let header_token = headers.get(ACCESS_TOKEN_HEADER).and_then(|value| value.to_str().ok());
 
     validate_signing(
         token.as_deref(),
