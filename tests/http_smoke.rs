@@ -100,3 +100,21 @@ async fn no_token_set_means_open() {
         .unwrap();
     assert_ne!(res.status(), 401);
 }
+
+#[tokio::test]
+async fn token_check_runs_before_basic_user_lookup() {
+    let (addr, state) = spawn_server_with_state().await;
+    *state.access_token.write() = Some("t".into());
+    let res = reqwest::Client::new()
+        .get(format!("http://{addr}/envs"))
+        .basic_auth("definitely-missing-user", Some(""))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({ "code": 401, "message": "unauthorized access, please provide a valid access token or method signing if supported" })
+    );
+}

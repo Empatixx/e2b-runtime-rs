@@ -36,7 +36,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/files",
             get(files::download::get_files).post(files::upload::post_files),
-        );
+        )
+        .layer(from_fn(authenticate_user));
 
     let protected = Router::new()
         .route("/envs", get(envs::get_envs))
@@ -48,11 +49,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/fsthaw", post(health::not_implemented))
         .route("/collapse", post(health::not_implemented))
         .fallback_service(connect.into_axum_service())
+        .layer(from_fn(authenticate_user))
         .layer(from_fn_with_state(state.clone(), require_token));
 
-    public
-        .merge(protected)
-        .with_state(state)
-        .layer(from_fn(authenticate_user))
-        .layer(cors)
+    public.merge(protected).with_state(state).layer(cors)
 }
