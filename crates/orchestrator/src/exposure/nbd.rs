@@ -32,8 +32,13 @@ mod linux {
         server_socket.set_nonblocking(true)?;
         let size = overlay.size();
         let server = tokio::spawn(serve(overlay, tokio::net::UnixStream::from_std(server_socket)?));
-        let device = NbdDevice::attach(kernel_socket, size, PAGE_SIZE)?;
-        Ok(Exposure { device, server })
+        match NbdDevice::attach(kernel_socket, size, PAGE_SIZE).await {
+            Ok(device) => Ok(Exposure { device, server }),
+            Err(e) => {
+                server.abort();
+                Err(e)
+            }
+        }
     }
 
     impl Exposure {
@@ -42,10 +47,16 @@ mod linux {
         }
 
         pub async fn close(self) -> Result<(), String> {
-            self.device
-                .disconnect()
-                .map_err(|e| format!("disconnect nbd device: {e}"))?;
-            self.server.await.map_err(|e| format!("nbd server task: {e}"))?
+            if let Err(e) = self.device.request_disconnect() {
+                self.server.abort();
+                let _ = self.device.wait().await;
+                return Err(format!("disconnect nbd device: {e}"));
+            }
+            let served = self.server.await.map_err(|e| format!("nbd server task: {e}"))?;
+            if let Err(e) = self.device.wait().await {
+                tracing::debug!(error = %e, "nbd worker ended with an error after disconnect");
+            }
+            served
         }
     }
 }
