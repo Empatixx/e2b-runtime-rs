@@ -87,14 +87,78 @@ async fn unknown_basic_user_is_rejected_on_every_route() {
 }
 
 #[tokio::test]
-async fn not_yet_ported_methods_are_unimplemented() {
+async fn unknown_watcher_is_not_found() {
     let (addr, _) = spawn_server_with_state().await;
-    let (status, body) = call(addr, "CreateWatcher", &current_user(), json!({ "path": "/" })).await;
-    assert_eq!(status, 501);
+    for method in ["GetWatcherEvents", "RemoveWatcher"] {
+        let (status, body) = call(addr, method, &current_user(), json!({ "watcherId": "wmissing" })).await;
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(body["message"], "watcher with id wmissing not found");
+    }
+}
+
+#[tokio::test]
+async fn create_watcher_rejects_missing_path_and_files() {
+    let (addr, _) = spawn_server_with_state().await;
+    let (status, body) = call(
+        addr,
+        "CreateWatcher",
+        &current_user(),
+        json!({ "path": "/definitely/not/here" }),
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
     assert_eq!(
         body["message"],
-        "filesystem.Filesystem.CreateWatcher is not implemented"
+        "path /definitely/not/here not found: stat /definitely/not/here: no such file or directory"
     );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let file = std::fs::canonicalize(tmp.path()).unwrap().join("file.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let (status, body) = call(addr, "CreateWatcher", &current_user(), json!({ "path": file })).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["message"],
+        format!("path {} not a directory: %!w(<nil>)", file.display())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn watcher_collects_events_until_removed() {
+    let (addr, _) = spawn_server_with_state().await;
+    let me = current_user();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let (status, body) = call(
+        addr,
+        "CreateWatcher",
+        &me,
+        json!({ "path": root, "includeEntry": true }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["watcherId"].as_str().unwrap().to_owned();
+    assert!(id.starts_with('w') && id.len() == 21, "{id}");
+
+    std::fs::write(root.join("a.txt"), b"hello").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (status, body) = call(addr, "GetWatcherEvents", &me, json!({ "watcherId": id })).await;
+    assert_eq!(status, 200, "{body}");
+    let first = &body["events"][0];
+    assert_eq!(first["name"], "a.txt");
+    assert_eq!(first["type"], "EVENT_TYPE_CREATE");
+    assert_eq!(first["entry"]["name"], "a.txt");
+
+    let (_, body) = call(addr, "GetWatcherEvents", &me, json!({ "watcherId": id })).await;
+    assert_eq!(body, json!({}));
+
+    let (status, _) = call(addr, "RemoveWatcher", &me, json!({ "watcherId": id })).await;
+    assert_eq!(status, 200);
+    let (status, _) = call(addr, "GetWatcherEvents", &me, json!({ "watcherId": id })).await;
+    assert_eq!(status, 404);
 }
 
 #[tokio::test]
@@ -138,4 +202,67 @@ async fn make_dir_list_move_remove_roundtrip() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body, json!({}));
     assert!(!moved.exists());
+}
+
+async fn next_message(res: &mut reqwest::Response, buffer: &mut Vec<u8>) -> Value {
+    loop {
+        if buffer.len() >= 5 {
+            let len = u32::from_be_bytes(buffer[1..5].try_into().unwrap()) as usize;
+            if buffer.len() >= 5 + len {
+                let message: Vec<u8> = buffer.drain(..5 + len).skip(5).collect();
+                return serde_json::from_slice(&message).unwrap();
+            }
+        }
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), res.chunk())
+            .await
+            .expect("stream message in time")
+            .unwrap()
+            .expect("stream still open");
+        buffer.extend_from_slice(&chunk);
+    }
+}
+
+fn envelope(body: Value) -> Vec<u8> {
+    let json = serde_json::to_vec(&body).unwrap();
+    let mut framed = vec![0];
+    framed.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&json);
+    framed
+}
+
+#[tokio::test]
+async fn watch_dir_streams_start_events_and_keepalives() {
+    let (addr, _) = spawn_server_with_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    let mut res = reqwest::Client::new()
+        .post(format!("http://{addr}/filesystem.Filesystem/WatchDir"))
+        .header("content-type", "application/connect+json")
+        .header("keepalive-ping-interval", "1")
+        .basic_auth(current_user(), Some(""))
+        .body(envelope(json!({ "path": root })))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let mut buffer = Vec::new();
+    assert_eq!(next_message(&mut res, &mut buffer).await, json!({ "start": {} }));
+
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::write(root.join("a.txt"), b"hello").unwrap();
+        let event = next_message(&mut res, &mut buffer).await;
+        assert_eq!(event["filesystem"]["name"], "a.txt", "{event}");
+        assert_eq!(event["filesystem"]["type"], "EVENT_TYPE_CREATE", "{event}");
+    }
+
+    let keepalive = loop {
+        let message = next_message(&mut res, &mut buffer).await;
+        if message.get("keepalive").is_some() {
+            break message;
+        }
+    };
+    assert_eq!(keepalive, json!({ "keepalive": {} }));
 }
