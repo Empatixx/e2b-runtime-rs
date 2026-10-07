@@ -29,6 +29,9 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 nix = { version = "0.29", features = ["user", "signal", "fs", "time"] }
 xattr = "1"
+notify = "8"
+tokio-stream = "0.1"
+rand = "0.10"
 
 [build-dependencies]
 connectrpc-build = "0.9"

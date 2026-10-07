@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
@@ -13,7 +13,11 @@ use crate::middleware::basic_auth::authenticate_user;
 use crate::proto::filesystem::FilesystemExt;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let connect = Arc::new(FilesystemService { state: state.clone() }).register(connectrpc::Router::new());
+    let filesystem = FilesystemService {
+        state: state.clone(),
+        watchers: Mutex::default(),
+    };
+    let connect = Arc::new(filesystem).register(connectrpc::Router::new());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
