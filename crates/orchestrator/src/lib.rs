@@ -4,6 +4,7 @@ pub mod cgroup;
 pub mod envd;
 pub mod exposure;
 pub mod firecracker;
+pub mod memory;
 pub mod network;
 #[cfg(target_os = "linux")]
 pub mod sandbox;

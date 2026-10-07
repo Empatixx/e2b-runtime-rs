@@ -10,7 +10,7 @@ futures = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-nix = { version = "0.29", features = ["fs", "ioctl", "user"] }
+nix = { version = "0.29", features = ["fs", "ioctl", "mman", "socket", "uio", "user"] }
 object_store = { version = "0.14", features = ["aws"] }
 parking_lot = "0.12"
 roaring = "0.11"
@@ -22,5 +22,5 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 tempfile = "3"
