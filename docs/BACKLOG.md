@@ -53,7 +53,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Host `ip_forward` sysctl is set on every slot create; make it a startup check | M8 |
-| `tap0` MAC is not set (upstream `02:FC:00:00:00:06`), needed so a resumed guest's ARP cache stays valid | M6 |
 | Cgroup silently reuses stale directories and enables no controllers (cpu/memory limits, `memory.peak`) | M8 |
 | Firecracker joins the cgroup after spawn instead of `CLONE_INTO_CGROUP` | M8 |
 | The Firecracker console file grows without bound; send it to a logger | M8 |
@@ -65,9 +64,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| envd `/init` attempt can overshoot the deadline by up to 1 s; per-attempt timeout 1 s vs upstream ~50 ms (bound each attempt by `min(attempt, deadline - now)`, use 100–200 ms) | M6 |
-| A guest that dies during `/init` is waited for the full envd timeout; race init against the Firecracker process exiting (upstream `ErrFcProcessExited`) | M6 |
-| MMDS is written after `InstanceStart`; upstream writes it before start and only with a token | M6 |
 | `put_file` does not `abort()` a failed multipart upload (orphaned S3 parts); its test stays under `BufWriter`'s 10 MiB so multipart is untested | M7 |
 | `sandbox_contract::any_nbd_connected` looks at every nbd device on the host; compare to a snapshot or check only our index | any |
 | Teardown leaves `firecracker.sock` and `console.log` in the work dir | M8 |

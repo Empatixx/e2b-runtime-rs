@@ -46,6 +46,15 @@ impl FirecrackerProcess {
         Ok(process)
     }
 
+    pub async fn exited(&mut self) -> String {
+        let status = self
+            .child
+            .wait()
+            .await
+            .map_or_else(|e| format!("wait failed: {e}"), |status| status.to_string());
+        format!("firecracker exited: {status}: {}", self.console_tail())
+    }
+
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }

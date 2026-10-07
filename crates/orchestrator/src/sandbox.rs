@@ -118,8 +118,7 @@ impl Sandbox {
             .memory_mib(self.config.memory_mib)
             .extra_boot_args(&format!("init={}", self.config.init_path))
             .build()?;
-        client.boot(&vm_config).await?;
-        client.set_mmds(&self.mmds_metadata()).await
+        client.boot(&vm_config, &self.mmds_metadata()).await
     }
 
     fn mmds_metadata(&self) -> MmdsMetadata {
@@ -131,11 +130,15 @@ impl Sandbox {
         }
     }
 
-    async fn init_envd(&self) -> Result<(), String> {
+    async fn init_envd(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + self.config.envd_timeout;
-        envd::init(self.envd_address(), &self.config.envd, deadline)
-            .await
-            .map_err(|e| format!("{e}; console: {}", self.console_tail()))
+        let address = self.envd_address();
+        let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;
+        let initialised = tokio::select! {
+            initialised = envd::init(address, &self.config.envd, deadline) => initialised,
+            exited = vm.exited() => return Err(exited),
+        };
+        initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))
     }
 
     fn console_tail(&self) -> String {

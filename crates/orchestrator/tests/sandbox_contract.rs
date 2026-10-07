@@ -39,6 +39,17 @@ fn guest_rootfs() -> Option<PathBuf> {
     rootfs
 }
 
+async fn guest_template(dir: &Path, rootfs: &Path) -> (Storage, Uuid, u64) {
+    let storage = Storage::local(&dir.join("store")).unwrap();
+    let template_id = Uuid::new_v4();
+    storage
+        .put_file(&Artifact::Rootfs.object(template_id), rootfs)
+        .await
+        .unwrap();
+    let size = std::fs::metadata(rootfs).unwrap().len();
+    (storage, template_id, size)
+}
+
 async fn overlay(storage: Storage, dir: &Path, template_id: Uuid, size: u64) -> Arc<Overlay> {
     let header = Header::new(Metadata::template(template_id, 4096, size), Vec::new()).unwrap();
     let store = Arc::new(DiffStore::new(storage, dir.join("cache")));
@@ -139,6 +150,41 @@ async fn cleaned_up_within(within: Duration, slot: &Slot, id: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancelled_cold_boot_tears_everything_down() {
+    let rootfs = guest_rootfs();
+    let (Some(host), Some(rootfs)) = (host(), rootfs) else {
+        eprintln!("skipping: needs root, /dev/kvm, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, template_id, size) = guest_template(dir.path(), &rootfs).await;
+    let slot = Slot::new(4013).unwrap();
+    let _ = slot.destroy().await;
+
+    let boot = Sandbox::builder()
+        .id("sbx-cancel")
+        .template_id(&template_id.to_string())
+        .rootfs(overlay(storage, dir.path(), template_id, size).await)
+        .slot(slot)
+        .firecracker(&host.firecracker)
+        .kernel(&host.kernel)
+        .init_path("/bin/sleep -- 3600")
+        .work_dir(dir.path().join("sbx-cancel"))
+        .envd_timeout(Duration::from_secs(120))
+        .cold_boot();
+    let cancelled = tokio::time::timeout(Duration::from_secs(3), boot).await;
+
+    assert!(
+        cancelled.is_err(),
+        "a guest without envd must still be waiting for envd"
+    );
+    assert!(
+        cleaned_up_within(Duration::from_secs(15), &slot, "sbx-cancel").await,
+        "a cancelled cold boot left its slot or cgroup behind"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_that_dies_is_reported_quickly() {
     let Some(host) = host() else {
         eprintln!("skipping: needs root, /dev/kvm, nbd and E2B_FIRECRACKER / E2B_KERNEL");
         return;
@@ -154,29 +200,27 @@ async fn a_cancelled_cold_boot_tears_everything_down() {
         )
         .await
         .unwrap();
-    let slot = Slot::new(4013).unwrap();
+    let slot = Slot::new(4014).unwrap();
     let _ = slot.destroy().await;
+    let started = tokio::time::Instant::now();
 
-    let boot = Sandbox::builder()
-        .id("sbx-cancel")
+    let error = Sandbox::builder()
+        .id("sbx-dies")
         .template_id(&template_id.to_string())
         .rootfs(overlay(storage, dir.path(), template_id, size).await)
         .slot(slot)
         .firecracker(&host.firecracker)
         .kernel(&host.kernel)
-        .work_dir(dir.path().join("sbx-cancel"))
+        .work_dir(dir.path().join("sbx-dies"))
         .envd_timeout(Duration::from_secs(120))
-        .cold_boot();
-    let cancelled = tokio::time::timeout(Duration::from_secs(3), boot).await;
+        .cold_boot()
+        .await
+        .err()
+        .unwrap();
 
-    assert!(
-        cancelled.is_err(),
-        "cold boot of an empty disk must still be waiting for envd"
-    );
-    assert!(
-        cleaned_up_within(Duration::from_secs(15), &slot, "sbx-cancel").await,
-        "a cancelled cold boot left its slot or cgroup behind"
-    );
+    assert!(error.contains("firecracker exited"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(!namespace_exists(&slot), "slot namespace left behind");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -187,13 +231,7 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::local(&dir.path().join("store")).unwrap();
-    let template_id = Uuid::new_v4();
-    storage
-        .put_file(&Artifact::Rootfs.object(template_id), &rootfs)
-        .await
-        .unwrap();
-    let size = std::fs::metadata(&rootfs).unwrap().len();
+    let (storage, template_id, size) = guest_template(dir.path(), &rootfs).await;
     let slot = Slot::new(4012).unwrap();
     let _ = slot.destroy().await;
 

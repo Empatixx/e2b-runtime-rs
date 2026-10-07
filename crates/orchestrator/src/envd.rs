@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 pub const ENVD_PORT: u16 = 49983;
 const RETRY_DELAY: Duration = Duration::from_millis(5);
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
+const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Default)]
 pub struct EnvdInit {
@@ -43,7 +43,7 @@ pub fn hash_access_token(token: &str) -> String {
 
 pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<(), String> {
     loop {
-        match attempt(address, settings).await {
+        match attempt(address, settings, deadline).await {
             Ok(204) => return Ok(()),
             Ok(status) => return Err(format!("unexpected status code: {status}")),
             Err(error) if Instant::now() + RETRY_DELAY >= deadline => {
@@ -54,10 +54,11 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
     }
 }
 
-async fn attempt(address: SocketAddr, settings: &EnvdInit) -> Result<u16, String> {
-    tokio::time::timeout(ATTEMPT_TIMEOUT, post_init(address, settings))
+async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<u16, String> {
+    let budget = ATTEMPT_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+    tokio::time::timeout(budget, post_init(address, settings))
         .await
-        .unwrap_or_else(|_| Err(format!("attempt timed out after {ATTEMPT_TIMEOUT:?}")))
+        .unwrap_or_else(|_| Err(format!("attempt timed out after {budget:?}")))
 }
 
 async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<u16, String> {
@@ -255,5 +256,28 @@ mod tests {
 
         assert!(error.starts_with("failed to init envd: "), "{error}");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn init_never_overshoots_the_deadline() {
+        let (listener, address) = listener().await;
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let started = Instant::now();
+
+        let error = init(address, &settings(), soon(Duration::from_millis(250)))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("failed to init envd: "), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_millis(290),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

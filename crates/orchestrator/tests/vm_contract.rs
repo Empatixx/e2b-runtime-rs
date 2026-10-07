@@ -12,6 +12,7 @@ use orchestrator::cgroup::Cgroup;
 use orchestrator::exposure::nbd::expose;
 use orchestrator::firecracker::config::VmConfig;
 use orchestrator::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
+use orchestrator::firecracker::mmds::MmdsMetadata;
 use orchestrator::firecracker::process::FirecrackerProcess;
 use orchestrator::network::slot::Slot;
 use orchestrator::storage::backend::Storage;
@@ -115,7 +116,13 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
         .extra_boot_args("init=/bin/sleep -- 3600")
         .build()
         .unwrap();
-    vm.client().boot(&config).await.unwrap();
+    let metadata = MmdsMetadata {
+        sandbox_id: "vm-contract".to_owned(),
+        template_id: template_id.to_string(),
+        logs_collector_address: String::new(),
+        access_token_hash: None,
+    };
+    vm.client().boot(&config, &metadata).await.unwrap();
 
     let reachable = pings(&slot.host_ip().to_string(), Duration::from_secs(30)).await;
     let console_log = std::fs::read_to_string(&console).unwrap_or_default();

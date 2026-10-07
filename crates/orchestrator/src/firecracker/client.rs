@@ -35,7 +35,7 @@ impl FirecrackerClient {
         self
     }
 
-    pub async fn boot(&self, config: &VmConfig) -> Result<(), String> {
+    pub async fn boot(&self, config: &VmConfig, metadata: &MmdsMetadata) -> Result<(), String> {
         self.put(
             "/machine-config",
             json!({ "vcpu_count": config.vcpus, "mem_size_mib": config.memory_mib }),
@@ -61,6 +61,7 @@ impl FirecrackerClient {
             json!({ "version": "V2", "network_interfaces": ["eth0"] }),
         )
         .await?;
+        self.set_mmds(metadata).await?;
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
     }
 
@@ -246,6 +247,15 @@ mod tests {
         calls
     }
 
+    fn metadata() -> MmdsMetadata {
+        MmdsMetadata {
+            sandbox_id: "sbx".into(),
+            template_id: "tpl".into(),
+            logs_collector_address: String::new(),
+            access_token_hash: None,
+        }
+    }
+
     fn config() -> VmConfig {
         VmConfig::builder()
             .kernel("/opt/vmlinux")
@@ -261,7 +271,10 @@ mod tests {
         let socket = dir.path().join("fc.sock");
         let calls = fake_firecracker(socket.clone(), Faults::default()).await;
 
-        FirecrackerClient::new(socket).boot(&config()).await.unwrap();
+        FirecrackerClient::new(socket)
+            .boot(&config(), &metadata())
+            .await
+            .unwrap();
 
         let calls = calls.lock().clone();
         let paths: Vec<&str> = calls.iter().map(|call| call.path.as_str()).collect();
@@ -273,6 +286,7 @@ mod tests {
                 "/drives/rootfs",
                 "/network-interfaces/eth0",
                 "/mmds/config",
+                "/mmds",
                 "/actions"
             ]
         );
@@ -290,7 +304,8 @@ mod tests {
             calls[4].body,
             json!({ "version": "V2", "network_interfaces": ["eth0"] })
         );
-        assert_eq!(calls[5].body, json!({ "action_type": "InstanceStart" }));
+        assert_eq!(calls[5].body, metadata().to_json());
+        assert_eq!(calls[6].body, json!({ "action_type": "InstanceStart" }));
     }
 
     #[tokio::test]
@@ -303,7 +318,10 @@ mod tests {
         };
         let _calls = fake_firecracker(socket.clone(), faults).await;
 
-        let error = FirecrackerClient::new(socket).boot(&config()).await.unwrap_err();
+        let error = FirecrackerClient::new(socket)
+            .boot(&config(), &metadata())
+            .await
+            .unwrap_err();
         assert_eq!(
             error,
             "PUT /boot-source: 400 Bad Request: {\"fault_message\":\"bad cfg\"}"
