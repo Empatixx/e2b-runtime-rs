@@ -383,3 +383,25 @@ async fn control_errors_match_go() {
     assert_eq!(status, 500);
     assert_eq!(body["message"], "error resizing tty: tty not assigned to process");
 }
+
+#[tokio::test]
+async fn disconnected_subscriber_does_not_stop_others() {
+    let (addr, _) = spawn_server_with_state().await;
+    let script = "for i in $(seq 1 200); do echo $i; sleep 0.005; done";
+    let (started, pid) = started(addr, start_body("/bin/sh", &["-c", script])).await;
+    let mut leaving = open(addr, "Connect", json!({ "process": { "pid": pid } })).await;
+    let staying = open(addr, "Connect", json!({ "process": { "pid": pid } })).await;
+
+    for _ in 0..5 {
+        next_frame(&mut leaving).await.unwrap();
+    }
+    drop(leaving);
+    drop(started);
+
+    let (events, _) = collect(staying).await;
+    let expected: String = (1..=200).map(|i| format!("{i}\n")).collect();
+    let received = output(&events, "stdout");
+    assert!(expected.ends_with(&received), "missing tail of output");
+    assert!(received.len() > expected.len() / 2, "{received}");
+    assert_eq!(events.last().unwrap()["end"]["status"], "exit status 0");
+}
