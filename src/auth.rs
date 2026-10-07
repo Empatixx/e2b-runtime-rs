@@ -3,6 +3,8 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use connectrpc::ConnectError;
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use subtle::ConstantTimeEq;
 
 use crate::user::User;
@@ -43,7 +45,6 @@ pub fn generate_signature(path: &str, username: &str, operation: &str, token: &s
     format!("v1_{}", STANDARD_NO_PAD.encode(Sha256::digest(input)))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn validate_signing(
     token: Option<&str>,
     header_token: Option<&str>,
@@ -52,7 +53,6 @@ pub fn validate_signing(
     username: &str,
     path: &str,
     operation: &str,
-    now_unix: i64,
 ) -> Result<(), &'static str> {
     let Some(token) = token else {
         return Ok(());
@@ -72,7 +72,10 @@ pub fn validate_signing(
     if !bool::from(signature.as_bytes().ct_eq(expected.as_bytes())) {
         return Err("invalid signature");
     }
-    if expiration.is_some_and(|expiration| expiration < now_unix) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    if expiration.is_some_and(|expiration| expiration < now) {
         return Err("signature is already expired");
     }
     Ok(())
@@ -137,28 +140,31 @@ mod tests {
 
     #[test]
     fn signing_rules() {
-        let sig = generate_signature("/p", "user", READ, "t", Some(100));
-        let validate = |token, header, signature, operation, now| {
-            validate_signing(token, header, signature, Some(100), "user", "/p", operation, now)
+        let future = Some(i64::MAX);
+        let past = Some(100);
+        let sig = generate_signature("/p", "user", READ, "t", future);
+        let expired_sig = generate_signature("/p", "user", READ, "t", past);
+        let validate = |token, header, signature, expiration, operation| {
+            validate_signing(token, header, signature, expiration, "user", "/p", operation)
         };
 
-        assert_eq!(validate(None, None, None, READ, 0), Ok(()));
-        assert_eq!(validate(Some("t"), Some("t"), None, READ, 0), Ok(()));
+        assert_eq!(validate(None, None, None, future, READ), Ok(()));
+        assert_eq!(validate(Some("t"), Some("t"), None, future, READ), Ok(()));
         assert_eq!(
-            validate(Some("t"), Some("x"), None, READ, 0),
+            validate(Some("t"), Some("x"), None, future, READ),
             Err("access token present in header but does not match")
         );
         assert_eq!(
-            validate(Some("t"), None, None, READ, 0),
+            validate(Some("t"), None, None, future, READ),
             Err("missing signature query parameter")
         );
-        assert_eq!(validate(Some("t"), None, Some(&sig), READ, 50), Ok(()));
+        assert_eq!(validate(Some("t"), None, Some(&sig), future, READ), Ok(()));
         assert_eq!(
-            validate(Some("t"), None, Some(&sig), READ, 101),
+            validate(Some("t"), None, Some(&expired_sig), past, READ),
             Err("signature is already expired")
         );
         assert_eq!(
-            validate(Some("t"), None, Some(&sig), WRITE, 50),
+            validate(Some("t"), None, Some(&sig), future, WRITE),
             Err("invalid signature")
         );
     }
