@@ -3,12 +3,38 @@ use std::ops::Range;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawRegion")]
 pub struct Region {
     pub base_host_virt_addr: u64,
     pub size: u64,
     pub offset: u64,
-    #[serde(rename = "page_size_kib", alias = "page_size")]
     pub page_size: u64,
+}
+
+#[derive(Deserialize)]
+struct RawRegion {
+    base_host_virt_addr: u64,
+    size: u64,
+    offset: u64,
+    page_size: Option<u64>,
+    page_size_kib: Option<u64>,
+}
+
+impl TryFrom<RawRegion> for Region {
+    type Error = String;
+
+    fn try_from(raw: RawRegion) -> Result<Self, String> {
+        let page_size = raw
+            .page_size
+            .or(raw.page_size_kib)
+            .ok_or("uffd region has no page size")?;
+        Ok(Self {
+            base_host_virt_addr: raw.base_host_virt_addr,
+            size: raw.size,
+            offset: raw.offset,
+            page_size,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +127,10 @@ mod tests {
         let current = Regions::parse(br#"[{"base_host_virt_addr":0,"size":4096,"offset":0,"page_size":2097152}]"#);
         assert_eq!(legacy.unwrap().page_size(), PAGE);
         assert_eq!(current.unwrap().page_size(), 2 << 20);
+        let both = Regions::parse(
+            br#"[{"base_host_virt_addr":0,"size":4096,"offset":0,"page_size":4096,"page_size_kib":4096}]"#,
+        );
+        assert_eq!(both.unwrap().page_size(), PAGE);
     }
 
     #[test]

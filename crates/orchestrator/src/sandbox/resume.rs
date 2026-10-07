@@ -9,6 +9,7 @@ use crate::memory::handshake::UffdListener;
 use crate::memory::server::MemoryServer;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
+use crate::system::all_ok;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,7 +42,7 @@ impl Sandbox {
             self.resources.memory = Some(server);
         });
         let resumed = async {
-            loaded.and(started)?;
+            all_ok([started, loaded])?;
             client.resume().await
         }
         .await;
