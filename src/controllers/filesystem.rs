@@ -3,7 +3,9 @@ mod ops;
 mod watch;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 
@@ -146,7 +148,6 @@ impl Filesystem for FilesystemService {
         let watcher_id = watch::watcher_id();
         self.watchers
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .insert(watcher_id.clone(), FileWatcher { watcher, pending });
         Response::ok(CreateWatcherResponse {
             watcher_id,
@@ -159,12 +160,12 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         request: ServiceRequest<'_, GetWatcherEventsRequest>,
     ) -> ServiceResult<GetWatcherEventsResponse> {
-        let watchers = self.watchers.lock().unwrap_or_else(PoisonError::into_inner);
+        let watchers = self.watchers.lock();
         let watcher = watchers
             .get(request.watcher_id)
             .ok_or_else(|| watcher_not_found(request.watcher_id))?;
 
-        let mut pending = watcher.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = watcher.pending.lock();
         match pending.error.clone() {
             Some(error) => Err(ConnectError::internal(error)),
             None => Response::ok(GetWatcherEventsResponse {
@@ -181,7 +182,6 @@ impl Filesystem for FilesystemService {
     ) -> ServiceResult<RemoveWatcherResponse> {
         self.watchers
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .remove(request.watcher_id)
             .ok_or_else(|| watcher_not_found(request.watcher_id))?;
         Response::ok(RemoveWatcherResponse::default())

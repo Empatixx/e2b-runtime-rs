@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
-use std::sync::{Arc, PoisonError, RwLock};
+
+use parking_lot::RwLock;
 
 use crate::config::Config;
 use crate::envvars::EnvVars;
@@ -43,10 +45,10 @@ impl AppState {
     }
 
     pub fn defaults(&self) -> Defaults {
-        self.defaults.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.defaults.read().clone()
     }
 
     pub fn access_token(&self) -> Option<String> {
-        self.access_token.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.access_token.read().clone()
     }
 }

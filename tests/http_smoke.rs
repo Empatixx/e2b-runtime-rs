@@ -62,7 +62,7 @@ fn config_rejects_unknown_and_bad_values() {
 #[tokio::test]
 async fn token_required_except_excluded_paths() {
     let (addr, state) = spawn_server_with_state().await;
-    *state.access_token.write().unwrap() = Some("t".into());
+    *state.access_token.write() = Some("t".into());
     let c = reqwest::Client::new();
 
     assert_eq!(

@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 
 use crate::user::User;
 
+pub const ACCESS_TOKEN_HEADER: &str = "x-access-token";
 pub const READ: &str = "read";
 pub const WRITE: &str = "write";
 

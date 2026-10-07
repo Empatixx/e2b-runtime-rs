@@ -1,4 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
