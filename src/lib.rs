@@ -5,5 +5,6 @@ pub mod host;
 pub mod permissions;
 pub mod proto;
 pub mod server;
+pub mod services;
 pub mod state;
 pub mod utils;
