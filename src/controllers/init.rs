@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::app::AppState;
@@ -89,10 +89,30 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
     }
     state.initialized.store(true, Ordering::SeqCst);
 
-    let state = state.clone();
-    tokio::spawn(async move { host::mmds::poll_for_opts(&state.env_vars).await });
+    let poller = state.clone();
+    tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars).await });
 
-    (StatusCode::NO_CONTENT, version, [(header::CACHE_CONTROL, "no-store")]).into_response()
+    let defaults = state.defaults();
+    let effective = EffectiveDefaults {
+        user: defaults.user,
+        workdir: defaults.workdir,
+        fallback: !defaults.user_delivered,
+    };
+    let reported = serde_json::to_string(&effective).unwrap_or_default();
+    (
+        StatusCode::NO_CONTENT,
+        version,
+        [("cache-control", "no-store"), ("X-Envd-Defaults", reported.as_str())],
+    )
+        .into_response()
+}
+
+#[derive(Serialize)]
+struct EffectiveDefaults {
+    user: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workdir: Option<String>,
+    fallback: bool,
 }
 
 fn is_newest(state: &AppState, timestamp: Option<DateTime<Utc>>) -> bool {
@@ -124,6 +144,7 @@ fn apply(state: &AppState, request: InitRequest) {
         let mut defaults = state.defaults.write();
         if let Some(user) = request.default_user.filter(|u| !u.is_empty()) {
             defaults.user = user;
+            defaults.user_delivered = true;
         }
         if let Some(workdir) = request.default_workdir.filter(|w| !w.is_empty()) {
             defaults.workdir = Some(workdir);

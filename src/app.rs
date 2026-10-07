@@ -10,6 +10,7 @@ use crate::envvars::EnvVars;
 pub struct Defaults {
     pub user: String,
     pub workdir: Option<String>,
+    pub user_delivered: bool,
 }
 
 impl Default for Defaults {
@@ -17,6 +18,7 @@ impl Default for Defaults {
         Self {
             user: "root".into(),
             workdir: None,
+            user_delivered: false,
         }
     }
 }

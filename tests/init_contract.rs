@@ -68,3 +68,21 @@ async fn init_rejects_bad_json_and_older_timestamp_keeps_data() {
     assert_eq!(init("2026-10-05T09:00:00Z", "older").await.unwrap().status(), 204);
     assert_eq!(state.defaults().user, "newer");
 }
+
+#[tokio::test]
+async fn init_reports_effective_defaults() {
+    let (addr, _) = spawn_server_with_state().await;
+    let c = reqwest::Client::new();
+    let init = |body: serde_json::Value| c.post(format!("http://{addr}/init")).json(&body).send();
+
+    let res = init(serde_json::json!({})).await.unwrap();
+    assert_eq!(res.headers()["x-envd-defaults"], r#"{"user":"root","fallback":true}"#);
+
+    let res = init(serde_json::json!({ "defaultUser": "root", "defaultWorkdir": "/tmp" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.headers()["x-envd-defaults"],
+        r#"{"user":"root","workdir":"/tmp","fallback":false}"#
+    );
+}
