@@ -21,9 +21,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .allow_headers(Any)
         .expose_headers(Any);
 
-    Router::new()
+    let public = Router::new()
         .route("/health", get(health::health))
-        .route("/init", post(init::post_init))
+        .route("/init", post(init::post_init));
+
+    let protected = Router::new()
         .route("/envs", get(envs::get_envs))
         .route("/metrics", get(health::not_implemented))
         .route("/freeze", post(health::not_implemented))
@@ -31,9 +33,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/fsfreeze", post(health::not_implemented))
         .route("/fsthaw", post(health::not_implemented))
         .route("/collapse", post(health::not_implemented))
-        .with_state(state.clone())
         .fallback_service(connect.into_axum_service())
+        .layer(from_fn_with_state(state.clone(), require_token));
+
+    public
+        .merge(protected)
+        .with_state(state)
         .layer(from_fn(authenticate_user))
-        .layer(from_fn_with_state(state, require_token))
         .layer(cors)
 }
