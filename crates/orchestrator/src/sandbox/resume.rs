@@ -30,6 +30,9 @@ impl Sandbox {
         let listener = UffdListener::bind(&socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
         let rootfs = self.attach_disk_and_slot().await?;
         let client = self.spawn_firecracker(rootfs).await?;
+        let log = self.config.work_dir.join("firecracker.log");
+        std::fs::File::create(&log).map_err(|e| format!("create {}: {e}", log.display()))?;
+        client.set_logger(&log).await?;
         let (loaded, served) = tokio::join!(
             client.load_snapshot(&snapfile, &socket),
             serve_memory(listener, memfile)
@@ -37,10 +40,29 @@ impl Sandbox {
         let started = served.map(|server| {
             self.resources.memory = Some(server);
         });
-        loaded.and(started)?;
-        client.resume().await?;
+        let resumed = async {
+            loaded.and(started)?;
+            client.resume().await
+        }
+        .await;
+        resumed.map_err(|e| format!("{e}; {}", self.resume_diagnostics(&log)))?;
         client.set_mmds(&self.mmds_metadata()).await?;
         self.init_envd().await
+    }
+
+    fn resume_diagnostics(&self, log: &std::path::Path) -> String {
+        let firecracker_log = std::fs::read_to_string(log).unwrap_or_default();
+        let start = firecracker_log.len().saturating_sub(4000);
+        format!(
+            "faults served: {}; memory server running: {}; firecracker log: {}; console: {}",
+            self.faults_served(),
+            self.resources
+                .memory
+                .as_ref()
+                .is_some_and(|memory| !memory.is_finished()),
+            firecracker_log.get(start..).unwrap_or_default(),
+            self.console_tail()
+        )
     }
 
     async fn download_snapfile(&self, build: &Build, storage: &Storage) -> Result<PathBuf, String> {

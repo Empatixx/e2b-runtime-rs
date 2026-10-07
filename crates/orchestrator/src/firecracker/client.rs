@@ -65,6 +65,14 @@ impl FirecrackerClient {
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
     }
 
+    pub async fn set_logger(&self, log: &Path) -> Result<(), String> {
+        self.put(
+            "/logger",
+            json!({ "log_path": log, "level": "Debug", "show_level": true, "show_log_origin": true }),
+        )
+        .await
+    }
+
     pub async fn set_mmds(&self, metadata: &MmdsMetadata) -> Result<(), String> {
         self.put("/mmds", metadata.to_json()).await
     }
@@ -488,5 +496,22 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.resident.iter().collect::<Vec<_>>(), vec![0, 2, 64]);
         assert_eq!(info.empty.iter().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn set_logger_points_firecracker_at_a_debug_log() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client.set_logger(Path::new("/run/sbx/firecracker.log")).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![call(
+                "PUT",
+                "/logger",
+                json!({ "log_path": "/run/sbx/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true })
+            )]
+        );
     }
 }
