@@ -10,6 +10,18 @@ Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `f
 ```
 Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
+  src/storage/         object_store backends, build paths, header V3
+  src/block/           sparse cache + tracker, chunker, build file, overlay
+  src/exposure/nbd/    NBD server, ioctls, device claim
+  src/network/slot.rs  netns, veth, tap, iptables per slot
+  src/cgroup.rs        cgroup v2 per sandbox
+  src/firecracker/     config (VmConfig builder), client (API over unix socket), mmds.rs, process
+  src/envd.rs          envd POST /init client (upstream retry semantics)
+  src/sandbox.rs       Sandbox lifecycle: cold_boot, stop, teardown; sandbox/config.rs builder
+  examples/cold_boot.rs dev runner: one sandbox, 127.0.0.1:49983 forwarded to envd in the VM
+  tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
+docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
+scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh
 proto/envd/            envd .proto copied from upstream E2B (never edit)
 crates/envd/build.rs   codegen from ../../proto/envd
 crates/envd/reference/ upstream envd OpenAPI + pinned commit

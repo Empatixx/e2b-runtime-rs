@@ -59,9 +59,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `tap0` MAC is not set (upstream `02:FC:00:00:00:06`), needed so a resumed guest's ARP cache stays valid | M6 |
 | Cgroup silently reuses stale directories and enables no controllers (cpu/memory limits, `memory.peak`) | M8 |
 | Firecracker joins the cgroup after spawn instead of `CLONE_INTO_CGROUP` | M8 |
-| Firecracker API calls have no request timeout | M5 |
 | The Firecracker console file grows without bound; send it to a logger | M8 |
 | Firecracker does not get its own session (`setsid`) | M8 |
 | `vm_contract` has no cleanup guard when it panics | any |
 | `MAX_SLOT` is 16383 vs upstream 32766 (deliberate; revisit for large nodes) | M8 |
-| Guest egress firewall is only checked by rule presence; add a behavioural test (guest cannot reach 169.254.169.254 or private ranges) | M5 |

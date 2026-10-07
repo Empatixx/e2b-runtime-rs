@@ -77,6 +77,20 @@ scripts/sdk-tests.sh
 - `scripts/test-linux.sh` runs the full suite in a Linux container (PTY, inotify, setuid).
 - `scripts/sdk-tests.sh` runs the official E2B JS SDK tests against envd in Docker.
 
+### SDK against a microVM (Linux, KVM)
+
+On a Linux host with `/dev/kvm`, Docker and the `nbd` module loaded, run as a user with sudo:
+
+```bash
+sudo modprobe nbd nbds_max=16
+scripts/ci/vm-assets.sh                    # Firecracker fork + guest kernel into /opt/e2b
+scripts/ci/guest-rootfs.sh                 # Debian guest with envd under systemd -> /opt/e2b/rootfs.ext4
+export E2B_FIRECRACKER=/opt/e2b/firecracker E2B_KERNEL=/opt/e2b/vmlinux E2B_ROOTFS=/opt/e2b/rootfs.ext4
+scripts/ci/vm-sdk-tests.sh                 # cold-boots a sandbox, runs the egress check and the SDK tests
+```
+
+`cargo run -p orchestrator --example cold_boot` (as root) boots one sandbox and forwards `127.0.0.1:49983` to envd in the VM until Ctrl-C, so `examples/sdk-playground` works against it.
+
 **Firecracker needs Linux with `/dev/kvm`, so it does not run on macOS.** Everything that boots VMs is tested in GitHub Actions (`.github/workflows/ci.yml`, job `kvm-spike` and later integration jobs) and on bare-metal nodes with host kernel 6.12+.
 
 Repository layout:
@@ -86,7 +100,7 @@ Cargo.toml             workspace (members = crates/*)
 crates/envd/           envd: src/, tests/, build.rs, reference/ (upstream OpenAPI)
 crates/orchestrator/   orchestrator
 proto/envd/            envd protobuf contracts (from upstream E2B)
-docker/                envd image
+docker/                envd image; guest.Dockerfile + envd.service for the test microVM rootfs
 deploy/k8s/            kustomize base
 docs/superpowers/      specs and implementation plans
 ```
