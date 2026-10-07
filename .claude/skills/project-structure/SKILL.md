@@ -19,7 +19,7 @@ src/
   middleware/          one file per tower middleware (access_token.rs, basic_auth.rs)
   controllers.rs       pub mod list
   controllers/         one file per area: health.rs, envs.rs, init.rs, filesystem.rs, ...
-  controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs; files/download.rs, upload.rs, compose.rs, encoding.rs)
+  controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs; files/download.rs, upload.rs, compose.rs, encoding.rs; process/spawn.rs, output.rs, events.rs, registry.rs)
   host.rs + host/      things done to the VM (clock, /etc/hosts, MMDS)
   user.rs              Linux users/groups
   envvars.rs           env vars for spawned processes

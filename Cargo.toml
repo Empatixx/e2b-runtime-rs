@@ -36,6 +36,8 @@ async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 multer = "3"
 mime_guess = "2"
 parking_lot = "0.12"
+pty-process = { version = "0.5", features = ["async"] }
+rustix = { version = "1", features = ["process"] }
 
 [build-dependencies]
 connectrpc-build = "0.9"
