@@ -134,34 +134,37 @@ pub async fn stream_events(
 
     let mut keepalive = interval_at(Instant::now() + keepalive_interval, keepalive_interval);
     loop {
-        let response = tokio::select! {
+        tokio::select! {
             _ = responses.closed() => return,
-            _ = keepalive.tick() => Ok(WatchDirResponse {
-                event: KeepAlive::default().into(),
-                ..Default::default()
-            }),
-            event = events.recv() => match event {
-                Some(Ok(event)) => {
-                    for filesystem_event in filesystem_events(&event, &root, include_entry) {
-                        let response = WatchDirResponse {
-                            event: filesystem_event.into(),
-                            ..Default::default()
-                        };
-                        if responses.send(Ok(response)).await.is_err() {
-                            return;
-                        }
-                        keepalive.reset();
-                    }
-                    continue;
+            _ = keepalive.tick() => {
+                let response = WatchDirResponse {
+                    event: KeepAlive::default().into(),
+                    ..Default::default()
+                };
+                if responses.send(Ok(response)).await.is_err() {
+                    return;
                 }
-                Some(Err(e)) => Err(ConnectError::internal(format!("watcher error: {e}"))),
-                None => Err(ConnectError::internal("watcher event channel closed")),
-            },
-        };
-
-        let failed = response.is_err();
-        if responses.send(response).await.is_err() || failed {
-            return;
+            }
+            event = events.recv() => {
+                let event = match event {
+                    Some(Ok(event)) => event,
+                    Some(Err(e)) => {
+                        let _ = responses.send(Err(ConnectError::internal(format!("watcher error: {e}")))).await;
+                        return;
+                    }
+                    None => return,
+                };
+                for filesystem_event in filesystem_events(&event, &root, include_entry) {
+                    let response = WatchDirResponse {
+                        event: filesystem_event.into(),
+                        ..Default::default()
+                    };
+                    if responses.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                    keepalive.reset();
+                }
+            }
         }
     }
 }
