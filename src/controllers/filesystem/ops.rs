@@ -6,7 +6,7 @@ use connectrpc::{ConnectError, ErrorCode};
 use super::entry::entry_info;
 use crate::proto::filesystem::EntryInfo;
 use crate::user::User;
-use crate::util::fs::{eval_symlinks, os_error, reason};
+use crate::util::fs::{dir, eval_symlinks, os_error, reason};
 use crate::util::paths::ensure_dirs;
 
 pub fn make_dir(path: &Path, user: &User) -> Result<EntryInfo, ConnectError> {
@@ -31,8 +31,8 @@ pub fn make_dir(path: &Path, user: &User) -> Result<EntryInfo, ConnectError> {
 }
 
 pub fn rename(source: &Path, destination: &Path, user: &User) -> Result<EntryInfo, ConnectError> {
-    let parent = destination.parent().unwrap_or(Path::new("/"));
-    ensure_dirs(parent, user.uid, user.gid).map_err(ConnectError::internal)?;
+    let parent = dir(destination);
+    ensure_dirs(&parent, user.uid, user.gid).map_err(ConnectError::internal)?;
 
     if let Err(e) = std::fs::rename(source, destination) {
         let text = format!("rename {} {}: {}", source.display(), destination.display(), reason(&e));

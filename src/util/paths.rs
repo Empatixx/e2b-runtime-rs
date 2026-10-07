@@ -17,7 +17,7 @@ pub fn expand_and_resolve(path: &str, user: &User, default_workdir: Option<&str>
     let expanded = match path.strip_prefix('~') {
         None => PathBuf::from(path),
         Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-            user.home.join(rest.trim_start_matches(['/', '\\']))
+            clean(&user.home.join(rest.trim_start_matches(['/', '\\'])))
         }
         Some(_) => {
             return Err(format!(
@@ -27,6 +27,9 @@ pub fn expand_and_resolve(path: &str, user: &User, default_workdir: Option<&str>
         }
     };
 
+    if expanded.is_absolute() {
+        return Ok(expanded);
+    }
     Ok(clean(&user.home.join(expanded)))
 }
 
@@ -78,7 +81,9 @@ mod tests {
         let resolve = |p: &str, default: Option<&str>| expand_and_resolve(p, &u, default).unwrap();
         assert_eq!(resolve("", None), Path::new("/home/user"));
         assert_eq!(resolve("", Some("/work")), Path::new("/work"));
-        assert_eq!(resolve("/abs/../x", None), Path::new("/x"));
+        assert_eq!(resolve("/abs/../x", None).as_os_str(), "/abs/../x");
+        assert_eq!(resolve("/home/user/d/", None).as_os_str(), "/home/user/d/");
+        assert_eq!(resolve("~/a/../b", None).as_os_str(), "/home/user/b");
         assert_eq!(resolve("rel/a", None), Path::new("/home/user/rel/a"));
         assert_eq!(resolve("../other", None), Path::new("/home/other"));
         assert_eq!(resolve("~", None), Path::new("/home/user"));

@@ -17,7 +17,7 @@ use crate::app::AppState;
 use crate::auth::WRITE;
 use crate::user::User;
 use crate::util::error_response::ErrorResponse;
-use crate::util::fs::os_error;
+use crate::util::fs::{dir, os_error};
 use crate::util::metadata::{is_xattr_unsupported, metadata_from_headers, validate_metadata, write_metadata};
 use crate::util::paths::{ensure_dirs, expand_and_resolve};
 
@@ -189,8 +189,8 @@ fn duplicate_path_message(path: &str, entries: &[FileEntry]) -> String {
 
 async fn write_file(upload: &Upload, path: &Path, content: &mut (impl AsyncRead + Unpin)) -> Result<(), ErrorResponse> {
     let shown = path.display();
-    let parent = path.parent().unwrap_or(Path::new("/"));
-    ensure_dirs(parent, upload.user.uid, upload.user.gid).map_err(|e| {
+    let parent = dir(path);
+    ensure_dirs(&parent, upload.user.uid, upload.user.gid).map_err(|e| {
         ErrorResponse::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .message(format!("error ensuring directories: {e}"))
