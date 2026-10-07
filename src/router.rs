@@ -7,7 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::app::AppState;
 use crate::controllers::filesystem::FilesystemService;
-use crate::controllers::{envs, health, init};
+use crate::controllers::{envs, files, health, init};
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
 use crate::proto::filesystem::FilesystemExt;
@@ -27,10 +27,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let public = Router::new()
         .route("/health", get(health::health))
-        .route("/init", post(init::post_init));
+        .route("/init", post(init::post_init))
+        .route(
+            "/files",
+            get(files::download::get_files).post(files::upload::post_files),
+        );
 
     let protected = Router::new()
         .route("/envs", get(envs::get_envs))
+        .route("/files/compose", post(files::compose::post_files_compose))
         .route("/metrics", get(health::not_implemented))
         .route("/freeze", post(health::not_implemented))
         .route("/unfreeze", post(health::not_implemented))

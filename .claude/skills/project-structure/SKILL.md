@@ -19,11 +19,11 @@ src/
   middleware/          one file per tower middleware (access_token.rs, basic_auth.rs)
   controllers.rs       pub mod list
   controllers/         one file per area: health.rs, envs.rs, init.rs, filesystem.rs, ...
-  controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs)
+  controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs; files/download.rs, upload.rs, compose.rs, encoding.rs)
   host.rs + host/      things done to the VM (clock, /etc/hosts, MMDS)
   user.rs              Linux users/groups
   envvars.rs           env vars for spawned processes
-  util.rs + util/      small shared helpers (fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs)
+  util.rs + util/      small shared helpers (fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
   proto.rs             include_generated!() only
 tests/                 HTTP contract tests against a real server (tests/common: spawn_server_with_state)
 proto/                 .proto copied from upstream E2B (never edit)

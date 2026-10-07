@@ -13,8 +13,8 @@ buffa-types = { version = "0.9.2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.8", features = ["http1", "http2", "multipart", "tokio"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 http = "1"
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
@@ -32,6 +32,9 @@ xattr = "1"
 notify = "8"
 tokio-stream = "0.1"
 rand = "0.10"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+multer = "3"
+mime_guess = "2"
 
 [build-dependencies]
 connectrpc-build = "0.9"
