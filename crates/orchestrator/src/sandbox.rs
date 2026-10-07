@@ -1,5 +1,7 @@
 pub mod config;
 pub mod resources;
+pub mod resume;
+pub mod snapshot;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -24,7 +26,9 @@ pub struct Sandbox {
 
 impl SandboxBuilder {
     pub async fn cold_boot(self) -> Result<Sandbox, String> {
-        let mut sandbox = Sandbox::new(self.build()?);
+        let config = self.build()?;
+        config.kernel.as_ref().ok_or("kernel is required")?;
+        let mut sandbox = Sandbox::new(config);
         match sandbox.start().await {
             Ok(()) => Ok(sandbox),
             Err(e) => Err(sandbox.fail(e).await),
@@ -53,6 +57,13 @@ impl Sandbox {
 
     pub fn envd_address(&self) -> SocketAddr {
         SocketAddr::from((self.config.slot.host_ip(), ENVD_PORT))
+    }
+
+    pub fn faults_served(&self) -> u64 {
+        self.resources
+            .memory
+            .as_ref()
+            .map_or(0, |memory| memory.faults_served())
     }
 
     pub async fn stop(mut self) -> Result<(), String> {
@@ -100,7 +111,7 @@ impl Sandbox {
             .namespace(&self.config.slot.namespace())
             .console(self.config.work_dir.join("console.log"))
             .rootfs(rootfs)
-            .kernel(&self.config.kernel)
+            .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
             .build()?;
         let vm = FirecrackerProcess::spawn(&launch).await?;
         let vm = self.resources.vm.insert(vm);

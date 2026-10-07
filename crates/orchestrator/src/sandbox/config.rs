@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
 use crate::network::slot::Slot;
@@ -17,7 +18,8 @@ pub struct SandboxConfig {
     pub rootfs: Arc<Overlay>,
     pub slot: Slot,
     pub firecracker: PathBuf,
-    pub kernel: PathBuf,
+    pub kernel: Option<PathBuf>,
+    pub memfile: Option<Arc<BuildFile>>,
     pub init_path: String,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -34,6 +36,7 @@ pub struct SandboxBuilder {
     slot: Option<Slot>,
     firecracker: Option<PathBuf>,
     kernel: Option<PathBuf>,
+    memfile: Option<Arc<BuildFile>>,
     init_path: Option<String>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
@@ -70,6 +73,11 @@ impl SandboxBuilder {
 
     pub fn kernel(mut self, kernel: impl Into<PathBuf>) -> Self {
         self.kernel = Some(kernel.into());
+        self
+    }
+
+    pub fn memfile(mut self, memfile: Arc<BuildFile>) -> Self {
+        self.memfile = Some(memfile);
         self
     }
 
@@ -110,7 +118,8 @@ impl SandboxBuilder {
             rootfs: self.rootfs.ok_or("rootfs is required")?,
             slot: self.slot.ok_or("slot is required")?,
             firecracker: self.firecracker.ok_or("firecracker is required")?,
-            kernel: self.kernel.ok_or("kernel is required")?,
+            kernel: self.kernel,
+            memfile: self.memfile,
             init_path: self.init_path.unwrap_or_else(|| DEFAULT_INIT_PATH.to_owned()),
             vcpus: self.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),

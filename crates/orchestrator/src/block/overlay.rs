@@ -22,6 +22,10 @@ impl Overlay {
         self.cache.size()
     }
 
+    pub fn base(&self) -> &Arc<BuildFile> {
+        &self.base
+    }
+
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         self.check_aligned(offset, buf.len() as u64)?;
         let block_size = self.cache.block_size();

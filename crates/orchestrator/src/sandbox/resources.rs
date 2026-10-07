@@ -3,6 +3,7 @@ use futures::future::OptionFuture;
 use crate::cgroup::Cgroup;
 use crate::exposure::nbd::Exposure;
 use crate::firecracker::process::FirecrackerProcess;
+use crate::memory::server::MemoryServer;
 use crate::network::slot::Slot;
 use crate::system::all_ok;
 
@@ -12,20 +13,32 @@ pub struct Resources {
     pub slot: Option<Slot>,
     pub cgroup: Option<Cgroup>,
     pub vm: Option<FirecrackerProcess>,
+    pub memory: Option<MemoryServer>,
 }
 
 impl Resources {
     pub fn is_empty(&self) -> bool {
-        self.disk.is_none() && self.slot.is_none() && self.cgroup.is_none() && self.vm.is_none()
+        self.disk.is_none()
+            && self.slot.is_none()
+            && self.cgroup.is_none()
+            && self.vm.is_none()
+            && self.memory.is_none()
     }
 
     pub async fn release(self) -> Result<(), String> {
-        let Self { disk, slot, cgroup, vm } = self;
+        let Self {
+            disk,
+            slot,
+            cgroup,
+            vm,
+            memory,
+        } = self;
         let killed = OptionFuture::from(vm.map(FirecrackerProcess::kill)).await;
+        let served = OptionFuture::from(memory.map(MemoryServer::stop)).await;
         let closed = OptionFuture::from(disk.map(Exposure::close)).await;
         let removed = cgroup.map(|cgroup| cgroup.remove().map_err(|e| format!("remove cgroup: {e}")));
         let destroyed = OptionFuture::from(slot.as_ref().map(Slot::destroy)).await;
-        all_ok([killed, closed, removed, destroyed].into_iter().flatten())
+        all_ok([killed, served, closed, removed, destroyed].into_iter().flatten())
     }
 
     pub fn release_in_background(self, sandbox_id: String) {

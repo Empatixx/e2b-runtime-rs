@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SDK_COMMIT=3221e8ec21f093613d104d92c6149cbbcc03d755
-SDK_DIR=target/e2b-sdk
+SDK_DIR=${E2B_SDK_DIR:-target/e2b-sdk}
 
 [ -d "$SDK_DIR" ] || git clone -q https://github.com/e2b-dev/E2B.git "$SDK_DIR"
 git -C "$SDK_DIR" fetch -q --depth 1 origin "$SDK_COMMIT"

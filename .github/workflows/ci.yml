@@ -32,6 +32,8 @@ jobs:
           version: "10.34.5"
       - run: sudo chown -R "$(id -u):$(id -g)" target
       - run: scripts/ci/vm-sdk-tests.sh
+        env:
+          E2B_SDK_DIR: ${{ runner.temp }}/e2b-sdk
 
   kvm-spike:
     runs-on: ubuntu-24.04
