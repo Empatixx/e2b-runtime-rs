@@ -47,16 +47,22 @@ mod linux {
         }
 
         pub async fn close(self) -> Result<(), String> {
-            if let Err(e) = self.device.request_disconnect() {
+            let disconnected = self
+                .device
+                .request_disconnect()
+                .map_err(|e| format!("disconnect nbd device: {e}"));
+            if disconnected.is_err() {
                 self.server.abort();
-                let _ = self.device.wait().await;
-                return Err(format!("disconnect nbd device: {e}"));
             }
-            let served = self.server.await.map_err(|e| format!("nbd server task: {e}"))?;
+            let served = self
+                .server
+                .await
+                .map_err(|e| format!("nbd server task: {e}"))
+                .and_then(|served| served);
             if let Err(e) = self.device.wait().await {
                 tracing::debug!(error = %e, "nbd worker ended with an error after disconnect");
             }
-            served
+            disconnected.and(served)
         }
     }
 }

@@ -1,7 +1,10 @@
 use std::net::Ipv4Addr;
 
 #[cfg(target_os = "linux")]
-use crate::system::{output, run};
+use futures::StreamExt;
+
+#[cfg(target_os = "linux")]
+use crate::system::{all_ok, output, run};
 
 pub const MAX_SLOT: u32 = 16383;
 pub const TAP_NAME: &str = "tap0";
@@ -72,15 +75,26 @@ impl Slot {
     }
 
     pub async fn destroy(&self) -> Result<(), String> {
+        all_ok([
+            self.delete_host_rules().await,
+            ignore_missing(
+                run("ip", &["link", "delete", &self.host_veth()]).await,
+                &["Cannot find device"],
+            ),
+            ignore_missing(
+                run("ip", &["netns", "delete", &self.namespace()]).await,
+                &["No such file or directory"],
+            ),
+        ])
+    }
+
+    async fn delete_host_rules(&self) -> Result<(), String> {
         let gateway = default_interface().await?;
-        for rule in self.host_rules(&gateway) {
-            delete_rule(&rule).await?;
-        }
-        ignore_missing(
-            run("ip", &["link", "delete", &self.host_veth()]).await,
-            &["Cannot find device"],
-        )?;
-        run("ip", &["netns", "delete", &self.namespace()]).await
+        let results: Vec<Result<(), String>> = futures::stream::iter(self.host_rules(&gateway))
+            .then(|rule| async move { delete_rule(&rule).await })
+            .collect()
+            .await;
+        all_ok(results)
     }
 
     async fn configure(&self) -> Result<(), String> {

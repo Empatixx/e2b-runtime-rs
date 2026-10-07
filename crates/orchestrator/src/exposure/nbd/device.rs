@@ -41,10 +41,10 @@ impl Drop for Claim {
 }
 
 pub struct NbdDevice {
-    claim: Claim,
     control: File,
     _kernel_socket: UnixStream,
     worker: JoinHandle<io::Result<()>>,
+    claim: Claim,
 }
 
 impl NbdDevice {
@@ -60,10 +60,10 @@ impl NbdDevice {
         }
         let worker = spawn_worker(control.try_clone()?);
         let device = Self {
-            claim,
             control,
             _kernel_socket: kernel_socket,
             worker,
+            claim,
         };
         match device.wait_until_connected().await {
             Ok(()) => Ok(device),
@@ -85,10 +85,10 @@ impl NbdDevice {
 
     pub async fn wait(self) -> io::Result<()> {
         let Self {
-            claim,
             control,
             _kernel_socket: kernel_socket,
             worker,
+            claim,
         } = self;
         let served = tokio::task::spawn_blocking(move || worker.join())
             .await
