@@ -41,10 +41,11 @@ impl Header {
         if !(1..=3).contains(&metadata.format_version()) {
             return Err(format!("unsupported header version {}", metadata.version));
         }
-        if entries.len() % MAPPING_SIZE != 0 {
+        let (entries, partial) = entries.as_chunks::<MAPPING_SIZE>();
+        if !partial.is_empty() {
             return Err("failed to read block mapping: unexpected EOF".to_owned());
         }
-        let mappings = entries.chunks_exact(MAPPING_SIZE).map(BuildMapping::decode).collect();
+        let mappings = entries.iter().map(BuildMapping::decode).collect();
         Self::new(metadata, mappings)
     }
 }

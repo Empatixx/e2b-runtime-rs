@@ -26,7 +26,7 @@ impl BuildMapping {
             .collect()
     }
 
-    pub fn decode(bytes: &[u8]) -> Self {
+    pub fn decode(bytes: &[u8; MAPPING_SIZE]) -> Self {
         Self {
             offset: u64_at(bytes, 0),
             length: u64_at(bytes, 8),
