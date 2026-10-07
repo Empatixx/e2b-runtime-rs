@@ -40,11 +40,13 @@ pub fn group_name(gid: u32) -> String {
 
 #[cfg(target_os = "linux")]
 fn supplementary_groups(user: &nix::unistd::User) -> Vec<u32> {
-    let Ok(name) = std::ffi::CString::new(user.name.as_str()) else {
-        return Vec::new();
-    };
-    nix::unistd::getgrouplist(&name, user.gid)
-        .inspect_err(|e| tracing::warn!(user = %user.name, error = %e, "failed to get supplementary groups"))
+    std::ffi::CString::new(user.name.as_str())
+        .ok()
+        .and_then(|name| {
+            nix::unistd::getgrouplist(&name, user.gid)
+                .inspect_err(|e| tracing::warn!(user = %user.name, error = %e, "failed to get supplementary groups"))
+                .ok()
+        })
         .map(|gids| gids.into_iter().filter(|g| *g != user.gid).map(Gid::as_raw).collect())
         .unwrap_or_default()
 }

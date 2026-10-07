@@ -60,12 +60,11 @@ fn flag_value(name: &str, inline: Option<String>, args: &mut impl Iterator<Item 
 }
 
 fn bool_flag(name: &str, inline: Option<String>) -> Result<bool, String> {
-    let Some(value) = inline else { return Ok(true) };
-    match value.as_str() {
+    inline.map_or(Ok(true), |value| match value.as_str() {
         "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
         "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
         _ => Err(format!("invalid boolean value {value:?} for -{name}: parse error")),
-    }
+    })
 }
 
 #[cfg(test)]
