@@ -1,3 +1,4 @@
+pub mod build_file;
 pub mod cache;
 pub mod chunker;
 pub mod sparse_file;
