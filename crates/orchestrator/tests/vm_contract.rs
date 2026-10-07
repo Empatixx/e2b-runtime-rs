@@ -91,8 +91,8 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     let disk = expose(overlay).await.unwrap();
 
     let slot = Slot::new(4002).unwrap();
-    let _ = slot.destroy();
-    slot.create().unwrap();
+    let _ = slot.destroy().await;
+    slot.create().await.unwrap();
     let cgroup = Cgroup::create("vm-contract").unwrap();
 
     let socket = dir.path().join("fc.sock");
@@ -100,7 +100,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     let vm = FirecrackerProcess::spawn(&assets.firecracker, &socket, &slot.namespace(), &console)
         .await
         .unwrap();
-    cgroup.add(vm.pid()).unwrap();
+    cgroup.add(vm.pid().unwrap()).unwrap();
     let config = VmConfig::builder()
         .kernel(&assets.kernel)
         .rootfs(disk.path())
@@ -115,7 +115,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     vm.kill().await.unwrap();
     disk.close().await.unwrap();
     cgroup.remove().unwrap();
-    slot.destroy().unwrap();
+    slot.destroy().await.unwrap();
 
     assert!(reachable, "guest did not answer ping; console:\n{console_log}");
     assert!(console_log.contains("Linux version"), "{console_log}");

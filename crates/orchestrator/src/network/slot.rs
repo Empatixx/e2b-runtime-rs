@@ -1,5 +1,8 @@
 use std::net::Ipv4Addr;
 
+#[cfg(target_os = "linux")]
+use crate::system::{output, run};
+
 pub const MAX_SLOT: u32 = 16383;
 pub const TAP_NAME: &str = "tap0";
 pub const TAP_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 22);
@@ -48,62 +51,79 @@ fn offset(base: Ipv4Addr, by: u32) -> Ipv4Addr {
 }
 
 #[cfg(target_os = "linux")]
+struct Rule {
+    table: &'static str,
+    chain: &'static str,
+    spec: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+const BLOCKED_GUEST_DESTINATIONS: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"];
+
+#[cfg(target_os = "linux")]
 impl Slot {
-    pub fn create(&self) -> Result<(), String> {
-        crate::system::run("ip", &["netns", "add", &self.namespace()])?;
-        self.configure().inspect_err(|_| {
-            let _ = self.destroy();
-        })
+    pub async fn create(&self) -> Result<(), String> {
+        run("ip", &["netns", "add", &self.namespace()]).await?;
+        if let Err(e) = self.configure().await {
+            let _ = self.destroy().await;
+            return Err(e);
+        }
+        Ok(())
     }
 
-    pub fn destroy(&self) -> Result<(), String> {
-        let veth = self.host_veth();
-        let _ = crate::system::run("iptables", &["-D", "FORWARD", "-i", &veth, "-j", "ACCEPT"]);
-        let _ = crate::system::run("iptables", &["-D", "FORWARD", "-o", &veth, "-j", "ACCEPT"]);
-        crate::system::run("ip", &["netns", "delete", &self.namespace()])
+    pub async fn destroy(&self) -> Result<(), String> {
+        let gateway = default_interface().await?;
+        for rule in self.host_rules(&gateway) {
+            delete_rule(&rule).await?;
+        }
+        ignore_missing(
+            run("ip", &["link", "delete", &self.host_veth()]).await,
+            &["Cannot find device"],
+        )?;
+        run("ip", &["netns", "delete", &self.namespace()]).await
     }
 
-    fn configure(&self) -> Result<(), String> {
-        self.create_veth()?;
-        self.create_tap()?;
-        self.route_and_nat()
+    async fn configure(&self) -> Result<(), String> {
+        self.create_veth().await?;
+        self.create_tap().await?;
+        self.guest_nat_and_firewall().await?;
+        self.host_route_and_rules().await
     }
 
-    fn create_veth(&self) -> Result<(), String> {
+    async fn create_veth(&self) -> Result<(), String> {
         let veth = self.host_veth();
         let namespace = self.namespace();
         let host_cidr = format!("{}/31", self.host_veth_ip());
         let peer_cidr = format!("{}/31", self.peer_veth_ip());
-        crate::system::run(
+        run(
             "ip",
             &[
                 "link", "add", &veth, "type", "veth", "peer", "name", "eth0", "netns", &namespace,
             ],
-        )?;
-        crate::system::run("ip", &["addr", "add", &host_cidr, "dev", &veth])?;
-        crate::system::run("ip", &["link", "set", &veth, "up"])?;
-        self.inside(&["ip", "addr", "add", &peer_cidr, "dev", "eth0"])?;
-        self.inside(&["ip", "link", "set", "eth0", "up"])?;
-        self.inside(&["ip", "link", "set", "lo", "up"])
+        )
+        .await?;
+        run("ip", &["addr", "add", &host_cidr, "dev", &veth]).await?;
+        run("ip", &["link", "set", &veth, "up"]).await?;
+        self.inside(&["ip", "addr", "add", &peer_cidr, "dev", "eth0"]).await?;
+        self.inside(&["ip", "link", "set", "eth0", "up"]).await?;
+        self.inside(&["ip", "link", "set", "lo", "up"]).await
     }
 
-    fn create_tap(&self) -> Result<(), String> {
+    async fn create_tap(&self) -> Result<(), String> {
         let tap_cidr = format!("{TAP_IP}/30");
-        self.inside(&["ip", "tuntap", "add", TAP_NAME, "mode", "tap"])?;
-        self.inside(&["ip", "addr", "add", &tap_cidr, "dev", TAP_NAME])?;
-        self.inside(&["ip", "link", "set", TAP_NAME, "up"])
+        self.inside(&["ip", "tuntap", "add", TAP_NAME, "mode", "tap"]).await?;
+        self.inside(&["ip", "addr", "add", &tap_cidr, "dev", TAP_NAME]).await?;
+        self.inside(&["ip", "link", "set", TAP_NAME, "up"]).await
     }
 
-    fn route_and_nat(&self) -> Result<(), String> {
-        let veth = self.host_veth();
+    async fn guest_nat_and_firewall(&self) -> Result<(), String> {
         let host_ip = self.host_ip().to_string();
         let guest_ip = GUEST_IP.to_string();
         let host_veth_ip = self.host_veth_ip().to_string();
-        let peer_veth_ip = self.peer_veth_ip().to_string();
-        self.inside(&["sysctl", "-qw", "net.ipv4.ip_forward=1"])?;
-        self.inside(&["ip", "route", "add", "default", "via", &host_veth_ip])?;
-        self.inside(&[
-            "iptables",
+        self.inside(&["sysctl", "-qw", "net.ipv4.ip_forward=1"]).await?;
+        self.inside(&["ip", "route", "add", "default", "via", &host_veth_ip])
+            .await?;
+        self.iptables_inside(&[
             "-t",
             "nat",
             "-A",
@@ -116,9 +136,9 @@ impl Slot {
             "SNAT",
             "--to",
             &host_ip,
-        ])?;
-        self.inside(&[
-            "iptables",
+        ])
+        .await?;
+        self.iptables_inside(&[
             "-t",
             "nat",
             "-A",
@@ -131,20 +151,138 @@ impl Slot {
             "DNAT",
             "--to",
             &guest_ip,
-        ])?;
-        crate::system::run("sysctl", &["-qw", "net.ipv4.ip_forward=1"])?;
-        crate::system::run("ip", &["route", "add", &host_ip, "via", &peer_veth_ip, "dev", &veth])?;
-        crate::system::run("iptables", &["-I", "FORWARD", "-i", &veth, "-j", "ACCEPT"])?;
-        crate::system::run("iptables", &["-I", "FORWARD", "-o", &veth, "-j", "ACCEPT"])
+        ])
+        .await?;
+        self.iptables_inside(&[
+            "-A",
+            "FORWARD",
+            "-i",
+            TAP_NAME,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ])
+        .await?;
+        self.iptables_inside(&["-A", "FORWARD", "-i", TAP_NAME, "!", "-s", &guest_ip, "-j", "DROP"])
+            .await?;
+        for destination in BLOCKED_GUEST_DESTINATIONS {
+            self.iptables_inside(&["-A", "FORWARD", "-i", TAP_NAME, "-d", destination, "-j", "DROP"])
+                .await?;
+        }
+        Ok(())
     }
 
-    fn inside(&self, command: &[&str]) -> Result<(), String> {
+    async fn host_route_and_rules(&self) -> Result<(), String> {
+        let host_ip = self.host_ip().to_string();
+        let peer_veth_ip = self.peer_veth_ip().to_string();
+        run("sysctl", &["-qw", "net.ipv4.ip_forward=1"]).await?;
+        run(
+            "ip",
+            &["route", "add", &host_ip, "via", &peer_veth_ip, "dev", &self.host_veth()],
+        )
+        .await?;
+        let gateway = default_interface().await?;
+        for rule in self.host_rules(&gateway) {
+            append_rule(&rule).await?;
+        }
+        Ok(())
+    }
+
+    fn host_rules(&self, gateway: &str) -> Vec<Rule> {
+        let veth = self.host_veth();
+        let source = format!("{}/32", self.host_ip());
+        let rule = |table: &'static str, chain: &'static str, spec: &[&str]| Rule {
+            table,
+            chain,
+            spec: spec.iter().map(|part| part.to_string()).collect(),
+        };
+        vec![
+            rule("filter", "FORWARD", &["-i", &veth, "-o", gateway, "-j", "ACCEPT"]),
+            rule(
+                "filter",
+                "FORWARD",
+                &[
+                    "-i",
+                    gateway,
+                    "-o",
+                    &veth,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "ESTABLISHED,RELATED",
+                    "-j",
+                    "ACCEPT",
+                ],
+            ),
+            rule(
+                "filter",
+                "INPUT",
+                &["-i", &veth, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"],
+            ),
+            rule(
+                "nat",
+                "POSTROUTING",
+                &["-s", &source, "-o", gateway, "-j", "MASQUERADE"],
+            ),
+        ]
+    }
+
+    async fn inside(&self, command: &[&str]) -> Result<(), String> {
         let namespace = self.namespace();
         let args: Vec<&str> = ["netns", "exec", namespace.as_str()]
             .into_iter()
             .chain(command.iter().copied())
             .collect();
-        crate::system::run("ip", &args)
+        run("ip", &args).await
+    }
+
+    async fn iptables_inside(&self, rule: &[&str]) -> Result<(), String> {
+        let command: Vec<&str> = ["iptables", "-w"].into_iter().chain(rule.iter().copied()).collect();
+        self.inside(&command).await
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn append_rule(rule: &Rule) -> Result<(), String> {
+    iptables(rule, "-A").await
+}
+
+#[cfg(target_os = "linux")]
+async fn delete_rule(rule: &Rule) -> Result<(), String> {
+    ignore_missing(
+        iptables(rule, "-D").await,
+        &["does a matching rule exist", "Bad rule", "No chain/target/match"],
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn iptables(rule: &Rule, action: &str) -> Result<(), String> {
+    let args: Vec<&str> = ["-w", "-t", rule.table, action, rule.chain]
+        .into_iter()
+        .chain(rule.spec.iter().map(String::as_str))
+        .collect();
+    run("iptables", &args).await
+}
+
+#[cfg(target_os = "linux")]
+async fn default_interface() -> Result<String, String> {
+    let routes = output("ip", &["route", "show", "default"]).await?;
+    routes
+        .split_whitespace()
+        .skip_while(|word| *word != "dev")
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("no default route to masquerade through: {routes:?}"))
+}
+
+#[cfg(target_os = "linux")]
+fn ignore_missing(result: Result<(), String>, markers: &[&str]) -> Result<(), String> {
+    match result {
+        Err(e) if markers.iter().any(|marker| e.contains(marker)) => Ok(()),
+        other => other,
     }
 }
 

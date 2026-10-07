@@ -1,6 +1,10 @@
-use std::process::Command;
+use tokio::process::Command;
 
-pub fn run(program: &str, args: &[&str]) -> Result<(), String> {
+pub async fn run(program: &str, args: &[&str]) -> Result<(), String> {
+    output(program, args).await.map(|_| ())
+}
+
+pub async fn output(program: &str, args: &[&str]) -> Result<String, String> {
     let command_line = std::iter::once(program)
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
@@ -8,9 +12,10 @@ pub fn run(program: &str, args: &[&str]) -> Result<(), String> {
     let output = Command::new(program)
         .args(args)
         .output()
+        .await
         .map_err(|e| format!("{command_line}: {e}"))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     let code = output
         .status
@@ -24,15 +29,13 @@ pub fn run(program: &str, args: &[&str]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn success_and_failure_with_stderr() {
-        assert_eq!(run("true", &[]), Ok(()));
-        let error = run("sh", &["-c", "echo boom >&2; exit 3"]).unwrap_err();
+    #[tokio::test]
+    async fn success_and_failure_with_stderr() {
+        assert_eq!(run("true", &[]).await, Ok(()));
+        assert_eq!(output("echo", &["hi"]).await, Ok("hi\n".to_owned()));
+        let error = run("sh", &["-c", "echo boom >&2; exit 3"]).await.unwrap_err();
         assert_eq!(error, "sh -c echo boom >&2; exit 3: exit 3: boom");
-        assert!(
-            run("definitely-not-a-program", &[])
-                .unwrap_err()
-                .starts_with("definitely-not-a-program: ")
-        );
+        let missing = run("definitely-not-a-program", &[]).await.unwrap_err();
+        assert!(missing.starts_with("definitely-not-a-program: "));
     }
 }
