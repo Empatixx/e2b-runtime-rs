@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::app::AppState;
 use crate::auth::request_user;
@@ -120,21 +119,9 @@ impl Filesystem for FilesystemService {
             .map_err(ConnectError::invalid_argument)?;
         watch::check_watch_path(&path, request.allow_network_mounts)?;
 
-        let (event_sender, events) = tokio::sync::mpsc::unbounded_channel();
-        let watcher = watch::watch(&path, request.recursive, move |result| {
-            let _ = event_sender.send(result);
-        })?;
-
-        let (responses, stream) = tokio::sync::mpsc::channel(16);
-        tokio::spawn(watch::stream_events(
-            watcher,
-            path,
-            request.include_entry,
-            keepalive_interval(ctx.headers()),
-            events,
-            responses,
-        ));
-        Response::ok(Box::pin(ReceiverStream::new(stream)) as ServiceStream<WatchDirResponse>)
+        let interval = keepalive_interval(ctx.headers());
+        let stream = watch::stream_events(path, request.recursive, request.include_entry, interval)?;
+        Response::ok(stream)
     }
 
     async fn create_watcher(
