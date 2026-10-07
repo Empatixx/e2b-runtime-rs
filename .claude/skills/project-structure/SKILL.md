@@ -47,6 +47,7 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 
 - **No comments at all** — no `//`, `///`, `//!`. Names carry the meaning.
 - **KISS**: no traits, newtypes, builders, error enums or wrapper/delegating methods unless the compiler forces them. Free functions, `match`, `?`, iterator chains.
+- **Named fields always**: no tuple structs (`struct Foo(Bar)`), no `.0`/`.1` field access.
 - Errors are `String`, `io::Error` or `ConnectError` carrying the exact text the client sees.
 - **API = upstream Go envd**: paths, status codes, JSON shapes, header names and error texts must match byte for byte. Check the Go source before writing; internals are plain Rust.
 - Unit tests live in `#[cfg(test)] mod tests` at the bottom of the same file; HTTP behaviour goes in `tests/*_contract.rs`.
