@@ -102,10 +102,11 @@ impl AsRawFd for Uffd {
 }
 
 fn parse_events(bytes: &[u8]) -> io::Result<Vec<Event>> {
-    bytes.chunks_exact(UFFD_MSG_SIZE).map(parse_event).collect()
+    let (messages, _) = bytes.as_chunks::<UFFD_MSG_SIZE>();
+    messages.iter().map(parse_event).collect()
 }
 
-fn parse_event(message: &[u8]) -> io::Result<Event> {
+fn parse_event(message: &[u8; UFFD_MSG_SIZE]) -> io::Result<Event> {
     let word = |index: usize| u64::from_ne_bytes(message[8 + index * 8..16 + index * 8].try_into().unwrap_or_default());
     match message[0] {
         UFFD_EVENT_PAGEFAULT => Ok(Event::PageFault {
