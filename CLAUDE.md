@@ -24,6 +24,10 @@ Follow the crates.io style: `foo.rs` lists its submodules and they live in the `
 
 Put unit tests at the bottom of the same file in `#[cfg(test)] mod tests`. Put HTTP behaviour tests in `crates/<crate>/tests/*_contract.rs`, talking to a real running server. Run Linux-only checks with `scripts/test-linux.sh`, which uses Docker.
 
+## Backlog
+
+Deferred review findings live in `docs/BACKLOG.md`, each with the milestone where it starts to matter. Add every deferred minor there when a review ends, and delete the line when it is fixed.
+
 ## Before a commit
 
 Run `cargo fmt`, `cargo clippy --all-targets` and `cargo test`, and commit when all three are clean. Commit locally and leave pushing to the user.
