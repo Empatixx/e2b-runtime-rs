@@ -8,9 +8,12 @@ description: Use when adding or moving code in envd-rs — new endpoint, Connect
 Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `foo/`. Never create `mod.rs`.
 
 ```
-Cargo.toml             root package (envd) + [workspace] members [".", "crates/orchestrator"]
-crates/orchestrator/   orchestrator crate (same style and layout rules as src/)
-src/
+Cargo.toml             workspace only: members = ["crates/*"], release profile
+crates/orchestrator/   orchestrator crate (same layout rules as envd below)
+proto/envd/            envd .proto copied from upstream E2B (never edit)
+crates/envd/build.rs   codegen from ../../proto/envd
+crates/envd/reference/ upstream envd OpenAPI + pinned commit
+crates/envd/src/
   main.rs              parse config, init tracing, bind, serve. Nothing else.
   lib.rs               pub mod list only
   config.rs            CLI flags (Go `flag` compatible)
@@ -27,8 +30,7 @@ src/
   envvars.rs           env vars for spawned processes
   util.rs + util/      small shared helpers (error_response.rs; fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
   proto.rs             include_generated!() only
-tests/                 HTTP contract tests against a real server (tests/common: spawn_server_with_state)
-proto/                 .proto copied from upstream E2B (never edit)
+crates/envd/tests/     HTTP contract tests against a real server (tests/common: spawn_server_with_state)
 ```
 
 ## Where does new code go
@@ -41,7 +43,7 @@ proto/                 .proto copied from upstream E2B (never edit)
 | Middleware for every request | `middleware/<name>.rs`, `.layer(...)` in `router.rs` |
 | Shared state | field on `AppState` in `app.rs` |
 | Helper used by 2+ areas | `util/<topic>.rs` |
-| New top-level concern (processes, cgroups) | `<concern>.rs` + `<concern>/` at `src/` root |
+| New top-level concern (processes, cgroups) | `<concern>.rs` + `<concern>/` at the crate `src/` root |
 
 Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the generated names.
 
@@ -54,7 +56,7 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 - **Named fields always**: no tuple structs (`struct Foo(Bar)`), no `.0`/`.1` field access.
 - Errors are `String`, `io::Error`, `ConnectError` or `util::error_response::ErrorResponse` (REST JSON/plain error like Go `jsonError`) carrying the exact text the client sees.
 - **API = upstream Go envd**: paths, status codes, JSON shapes, header names and error texts must match byte for byte. Check the Go source before writing; internals are plain Rust.
-- Unit tests live in `#[cfg(test)] mod tests` at the bottom of the same file; HTTP behaviour goes in `tests/*_contract.rs`.
+- Unit tests live in `#[cfg(test)] mod tests` at the bottom of the same file; HTTP behaviour goes in `crates/<crate>/tests/*_contract.rs`.
 - `rustfmt.toml` sets `max_width = 120`; run `cargo fmt` and `cargo clippy --all-targets` before committing.
 
 ## Request flow

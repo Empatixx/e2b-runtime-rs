@@ -2,7 +2,7 @@ FROM rust:1.98 AS build
 RUN apt-get update -qq && apt-get install -y -qq protobuf-compiler
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked
+RUN cargo build --release --locked -p envd
 
 FROM debian:trixie
 ARG DEBIAN_FRONTEND=noninteractive

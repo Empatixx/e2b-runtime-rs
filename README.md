@@ -82,9 +82,10 @@ scripts/sdk-tests.sh
 Repository layout:
 
 ```
-src/                   envd (root package)
+Cargo.toml             workspace (members = crates/*)
+crates/envd/           envd: src/, tests/, build.rs, reference/ (upstream OpenAPI)
 crates/orchestrator/   orchestrator
-proto/                 envd and orchestrator protobuf contracts (from upstream E2B)
+proto/envd/            envd protobuf contracts (from upstream E2B)
 docker/                envd image
 deploy/k8s/            kustomize base
 docs/superpowers/      specs and implementation plans
