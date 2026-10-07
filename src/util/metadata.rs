@@ -70,23 +70,20 @@ fn printable_ascii(label: &str, text: &str) -> Result<(), String> {
 }
 
 pub fn write_metadata(file: &File, metadata: &BTreeMap<String, String>) -> io::Result<()> {
-    for name in file.list_xattr()? {
-        let Some(key) = name.to_str().and_then(|name| name.strip_prefix(XATTR_PREFIX)) else {
-            continue;
-        };
-        if metadata.contains_key(key) {
-            continue;
-        }
-        match file.remove_xattr(&name) {
-            Err(e) if e.raw_os_error() != Some(Errno::ENODATA as i32) => return Err(e),
-            _ => {}
-        }
-    }
+    file.list_xattr()?
+        .filter(|name| {
+            name.to_str()
+                .and_then(|name| name.strip_prefix(XATTR_PREFIX))
+                .is_some_and(|key| !metadata.contains_key(key))
+        })
+        .try_for_each(|name| match file.remove_xattr(&name) {
+            Err(e) if e.raw_os_error() != Some(Errno::ENODATA as i32) => Err(e),
+            _ => Ok(()),
+        })?;
 
-    for (key, value) in metadata {
-        file.set_xattr(format!("{XATTR_PREFIX}{key}"), value.as_bytes())?;
-    }
-    Ok(())
+    metadata
+        .iter()
+        .try_for_each(|(key, value)| file.set_xattr(format!("{XATTR_PREFIX}{key}"), value.as_bytes()))
 }
 
 pub fn is_xattr_unsupported(err: &io::Error) -> bool {

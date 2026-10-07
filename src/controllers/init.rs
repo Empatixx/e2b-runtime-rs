@@ -96,11 +96,9 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
 }
 
 fn is_newest(state: &AppState, timestamp: Option<DateTime<Utc>>) -> bool {
-    let Some(timestamp) = timestamp else {
-        return true;
-    };
-    let nanos = timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX);
-    state.last_set_time.fetch_max(nanos, Ordering::SeqCst) < nanos
+    timestamp
+        .map(|timestamp| timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX))
+        .is_none_or(|nanos| state.last_set_time.fetch_max(nanos, Ordering::SeqCst) < nanos)
 }
 
 fn apply(state: &AppState, request: InitRequest) {

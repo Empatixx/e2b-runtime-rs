@@ -27,14 +27,12 @@ pub fn basic_username(headers: &HeaderMap) -> Option<String> {
 }
 
 pub fn request_user(basic_user: Option<&User>, default_user: &str) -> Result<User, ConnectError> {
-    if let Some(user) = basic_user {
-        return Ok(user.clone());
+    match basic_user {
+        Some(user) => Ok(user.clone()),
+        None if default_user.is_empty() => Err(ConnectError::unauthenticated("no user specified")),
+        None => User::lookup(default_user)
+            .ok_or_else(|| ConnectError::unauthenticated(format!("invalid default user: '{default_user}'"))),
     }
-    if default_user.is_empty() {
-        return Err(ConnectError::unauthenticated("no user specified"));
-    }
-    User::lookup(default_user)
-        .ok_or_else(|| ConnectError::unauthenticated(format!("invalid default user: '{default_user}'")))
 }
 
 pub fn generate_signature(path: &str, username: &str, operation: &str, token: &str, expiration: Option<i64>) -> String {

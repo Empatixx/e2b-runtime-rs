@@ -12,7 +12,7 @@ Write simple, plain code: free functions, `match`, `?` and iterator chains. Let 
 
 Keep things flat and direct, adding a new layer only when the compiler asks for it. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` holding the exact text the client sees.
 
-Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`. Give a struct its own `builder()` when it is created in several places, and use the builders libraries offer (`OpenOptions`, `Response::builder`, `reqwest::Client::builder`).
+Write code as method chains. Transform `Option`, `Result` and iterators with combinators like `map`, `and_then`, `filter`, `map_or`, `is_none_or` and `try_for_each`, the way `keepalive_interval` reads a header in one chain. Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`, give a struct its own `builder()` when it is created in several places, and use library builders like `OpenOptions` and `Response::builder`.
 
 ## Project layout
 
