@@ -47,6 +47,7 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 
 - **No comments at all** — no `//`, `///`, `//!`. Names carry the meaning.
 - **KISS**: no traits, newtypes, error enums or wrapper/delegating methods unless the compiler forces them. Free functions, `match`, `?`, iterator chains.
+- **Chaining**: write code as method chains — `Option`/`Result`/iterator combinators (`map`, `and_then`, `filter`, `map_or`, `is_none_or`, `try_for_each`) rather than `if let`/`let else` with early returns, e.g. `headers.get(..).and_then(..).filter(..).map_or(DEFAULT, ..)`.
 - **Builders**: build values with builder chains, e.g. `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`. A struct created in several places gets its own `builder()`; use library builders (`OpenOptions`, `Response::builder`).
 - **Named fields always**: no tuple structs (`struct Foo(Bar)`), no `.0`/`.1` field access.
 - Errors are `String`, `io::Error`, `ConnectError` or `util::error_response::ErrorResponse` (REST JSON/plain error like Go `jsonError`) carrying the exact text the client sees.

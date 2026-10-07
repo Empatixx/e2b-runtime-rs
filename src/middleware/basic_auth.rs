@@ -8,16 +8,13 @@ use crate::auth::basic_username;
 use crate::user::User;
 
 pub async fn authenticate_user(mut request: Request, next: Next) -> Response {
-    let Some(name) = basic_username(request.headers()) else {
-        return next.run(request).await;
-    };
-
-    match User::lookup(&name) {
-        Some(user) => {
+    match basic_username(request.headers()).map(|name| User::lookup(&name).ok_or(name)) {
+        None => next.run(request).await,
+        Some(Ok(user)) => {
             request.extensions_mut().insert(user);
             next.run(request).await
         }
-        None => ConnectError::unauthenticated(format!("invalid username: '{name}'"))
+        Some(Err(name)) => ConnectError::unauthenticated(format!("invalid username: '{name}'"))
             .into_http_response(request.headers())
             .map(Body::new),
     }
