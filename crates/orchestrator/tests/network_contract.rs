@@ -209,7 +209,7 @@ async fn slot_has_upstream_nat_redirects_and_nftables_firewall() {
         "{ruleset}"
     );
     assert!(ruleset.contains("10.0.0.0/8"), "{ruleset}");
-    assert!(restricted.contains("0.0.0.0-255.255.255.255"), "{restricted}");
+    assert!(restricted.contains("elements = { 0.0.0.0/0 }"), "{restricted}");
     assert!(
         !succeeds("iptables", &masquerade),
         "MASQUERADE left behind after destroy"
