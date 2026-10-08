@@ -359,7 +359,6 @@ async fn an_expired_sandbox_is_removed() {
     let mut client = cluster.client.clone();
 
     client
-        .client
         .create(create_request(
             "grpc-expiring",
             cluster.template_build,
