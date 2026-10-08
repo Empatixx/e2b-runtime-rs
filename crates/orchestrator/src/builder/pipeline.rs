@@ -126,6 +126,11 @@ impl TemplateBuilder for PhasePipeline {
                 .wait()
                 .await
                 .map_err(|e| BuildError::Internal(format!("error waiting for layers upload: {e}")))?;
+            if info.cancel.is_cancelled() {
+                return Err(BuildError::Internal(
+                    "error getting rootfs size: error opening rootfs header object: context canceled".to_owned(),
+                ));
+            }
             let rootfs_size = rootfs_size(&env, &last).await?;
             let scheduling = scheduling_metadata(&env, &last).await;
             Ok(result_metadata(&env, rootfs_size, envd_version, scheduling))

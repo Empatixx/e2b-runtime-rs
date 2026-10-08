@@ -12,7 +12,7 @@
 **Rulings (Go wins, except where Go is nondeterministic):**
 - `ensurefreedisk` is behind `build-ensure-free-disk-space=false`, so it does not run by default. It goes to the backlog with the digest's section 1.
 - **Go's random `select` on build cancel during the ready loop** always picks `waiting for start command failed: context canceled`. This is recorded in PARITY.
-- **The optimize/finalize metadata race:** optimize rewrites the local `metadata.json` that the finalize upload reads before it puts the object. The prefetch then survives in either order, which is Go's intent. This is recorded in PARITY.
+- **The optimize/finalize metadata race:** optimize waits for the finalize upload of that build (Go's unused `Upload.Wait`) before it puts the object, so the prefetch always lands, which is Go's intent. This is recorded in PARITY.
 
 ## Global Constraints
 - **Finalize user errors** use step `finalize`, with the exact Go texts.

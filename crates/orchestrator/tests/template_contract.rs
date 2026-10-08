@@ -88,8 +88,11 @@ impl Built {
         self.logs.iter().any(|log| log.starts_with(prefix))
     }
 
-    fn last(&self, prefix: &str) -> Option<usize> {
-        self.logs.iter().rposition(|log| log.starts_with(prefix))
+    fn last(&self, prefix: &str) -> usize {
+        self.logs
+            .iter()
+            .rposition(|log| log.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing {prefix:?}"))
     }
 }
 

@@ -14,6 +14,7 @@ use super::index::layer_files_path;
 use super::logs::LogQuery;
 use super::phase::{BuildError, CANCELLED};
 use super::uploads::LayerUploads;
+use crate::go_time;
 use crate::proto::template_service_server::TemplateService;
 use crate::proto::{
     InitLayerFileUploadRequest, InitLayerFileUploadResponse, LogLevel, LogsDirection, TemplateBuildDeleteRequest,
@@ -163,7 +164,7 @@ fn outcome_line(built: &Result<TemplateBuildMetadata, BuildError>, took: Duratio
     match built {
         Ok(_) => format!(
             "Build finished, took {}",
-            crate::go_time::duration(Duration::from_secs(took.as_secs()))
+            go_time::duration(Duration::from_secs(took.as_secs()))
         ),
         Err(e) => format!("Build failed: {}", e.reason().message),
     }

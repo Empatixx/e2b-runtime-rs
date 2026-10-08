@@ -4,6 +4,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use super::steps::StepsBuild;
+use crate::builder::commands::REQUEST_CANCELLED;
 use crate::builder::hash::optimize_hash;
 use crate::builder::layer::{BUILD_ORIGIN, LayerExecutor};
 use crate::builder::logs::ScopedLog;
@@ -36,7 +37,7 @@ impl OptimizePhase {
             .await
             .map_err(|e| BuildError::Internal(format!("failed to get template from cache: {e}")))?;
         let executor = self.build.executor(log);
-        let metadata = match collect_prefetch(|_| prefetch_run(&executor, &layer)).await {
+        let metadata = match self.collect(&executor, &layer).await {
             Ok(mapping) => self.with_prefetch(&executor, &layer, &source.metadata, mapping).await,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to collect prefetch mapping, continuing without prefetch");
@@ -44,6 +45,18 @@ impl OptimizePhase {
             }
         };
         Ok(LayerResult { metadata, ..current })
+    }
+
+    async fn collect(
+        &self,
+        executor: &LayerExecutor<'_>,
+        layer: &LayerSource,
+    ) -> Result<Option<MemoryPrefetch>, String> {
+        tokio::select! {
+            biased;
+            () = self.build.cancel.cancelled() => Err(REQUEST_CANCELLED.to_owned()),
+            collected = collect_prefetch(|_| prefetch_run(executor, layer)) => collected,
+        }
     }
 
     async fn with_prefetch(

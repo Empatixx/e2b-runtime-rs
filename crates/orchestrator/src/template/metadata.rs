@@ -58,7 +58,9 @@ pub struct Start {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Balloon {
+    #[serde(default)]
     pub reporting: bool,
+    #[serde(default)]
     pub hinting: bool,
 }
 
@@ -304,6 +306,19 @@ mod tests {
         assert_eq!(
             (next.prefetch, next.filesystem_only, next.fs_quiesced),
             (None, false, false)
+        );
+    }
+
+    #[test]
+    fn a_partial_balloon_reads_like_go() {
+        let metadata = TemplateMetadata::from_json(br#"{"version":2,"balloon":{"reporting":true}}"#).unwrap();
+
+        assert_eq!(
+            metadata.balloon,
+            Some(Balloon {
+                reporting: true,
+                hinting: false
+            })
         );
     }
 

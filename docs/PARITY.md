@@ -59,7 +59,7 @@ Not ported yet: the `ensurefreedisk` template phase (`build-ensure-free-disk-spa
 ## Deliberate rulings where Go is nondeterministic
 
 - A build cancelled during the finalize ready loop: Go's `select` picks randomly between `waiting for start command failed: context canceled` and a cert bundle run on a cancelled context. We always give the first.
-- The prefetch `metadata.json`: Go's optimize puts it while the finalize upload may still write the local file without the prefetch, so the last writer wins. We rewrite the local file before the put, so the prefetch survives whichever write lands last.
+- The prefetch `metadata.json`: Go's optimize puts it while the finalize upload may still be writing `metadata.json` without the prefetch, so the last writer wins (Go has `Upload.Wait` for this but never calls it). We wait for that build's upload before the put, so the prefetch always lands.
 
 ## Same as upstream (checked)
 

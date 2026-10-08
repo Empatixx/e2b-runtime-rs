@@ -15,8 +15,6 @@ use crate::storage::build::Build;
 use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
 
-const METADATA_FILE: &str = "metadata.json";
-
 pub struct LayerSource {
     pub template: Arc<Template>,
     pub build: Build,
@@ -52,13 +50,13 @@ impl Node {
         metadata: &TemplateMetadata,
         object_metadata: &ObjectMetadata,
     ) -> Result<(), String> {
-        let json = metadata.to_json();
-        let local = source.snapfile.with_file_name(METADATA_FILE);
-        tokio::fs::write(&local, &json)
-            .await
-            .map_err(|e| format!("failed to write local metadata {}: {e}", local.display()))?;
+        self.uploads.wait(source.build.build_id).await;
         self.storage
-            .put_with(&source.build.paths().metadata(), Bytes::from(json), object_metadata)
+            .put_with(
+                &source.build.paths().metadata(),
+                Bytes::from(metadata.to_json()),
+                object_metadata,
+            )
             .await
             .map_err(|e| format!("failed to write metadata: {e}"))?;
         source.template.update_metadata(metadata.clone());
