@@ -283,19 +283,28 @@ async fn check_node_services(cluster: &Cluster) {
 
 async fn running_envd(pool: Pool) -> String {
     let client = reqwest::Client::new();
-    for index in pool.indices() {
-        let base = envd(index);
-        let answered = client
-            .get(format!("{base}/health"))
-            .timeout(Duration::from_millis(500))
-            .send()
-            .await
-            .is_ok_and(|response| response.status() == 204);
-        if answered {
-            return base;
+    let mut failures = Vec::new();
+    for _ in 0..10 {
+        for index in pool.indices() {
+            let base = envd(index);
+            let answered = client
+                .get(format!("{base}/health"))
+                .timeout(Duration::from_millis(500))
+                .send()
+                .await;
+            match answered {
+                Ok(response) if response.status() == 204 => return base,
+                Ok(response) => failures.push(format!("{base}: {}", response.status())),
+                Err(e) => failures.push(format!("{base}: {e}")),
+            }
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    panic!("no envd answers in slots {:?}", pool.indices())
+    panic!(
+        "no envd answers in slots {:?}: {:?}",
+        pool.indices(),
+        &failures[failures.len().saturating_sub(4)..]
+    )
 }
 
 async fn put_note(base: &str, text: &str) {
