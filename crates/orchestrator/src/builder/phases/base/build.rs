@@ -124,9 +124,8 @@ impl BaseBuild<'_> {
             .executor()
             .lease_slot(&sandbox_id, "error creating sandbox")
             .await?;
-        let sandbox = self
-            .sandbox_builder(&sandbox_id)
-            .pooled_slot(slot.slot())
+        let sandbox = slot
+            .attach(self.sandbox_builder(&sandbox_id))
             .rootfs_file(rootfs)
             .init_path(BUSYBOX_INIT_PATH)
             .kernel_logs(true)
@@ -149,7 +148,6 @@ impl BaseBuild<'_> {
             .shut_down()
             .await
             .map_err(|e| BuildError::Internal(format!("error shutting down provisioned sandbox: {e}")))?;
-        slot.release();
         self.remove_result(rootfs).await
     }
 
@@ -279,7 +277,7 @@ impl BaseBuild<'_> {
             .node
             .build_sandbox(&sandbox_id, &self.phase.request.template_id);
         let mut sandbox = executor
-            .boot_options(builder, &self.shape(), slot.slot())
+            .boot_options(slot.attach(builder), &self.shape())
             .memory_base(base_build)
             .rootfs_file(&ext4.file)
             .kvm_clock(kvm_clock)
@@ -294,7 +292,7 @@ impl BaseBuild<'_> {
             let _ = sandbox.stop().await;
             return Err(BuildError::Internal(format!("error running sync command: {e}")));
         }
-        executor.pause_and_upload(sandbox, slot, hash, metadata).await
+        executor.pause_and_upload(sandbox, hash, metadata).await
     }
 }
 

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use super::script::{ADMIN_GROUP_SCRIPT, render};
-use super::{CommandRun, root_only, root_with_env};
+use super::script::{ADMIN_GROUP_SCRIPT, Script};
+use super::{CommandRun, PROCESS_CANCELLED, root_only, root_with_env};
 use crate::builder::sandbox_command::run_quiet;
 use crate::envd::process::{CommandContext, run_command};
 use crate::proto::{LogLevel, TemplateStep};
@@ -12,7 +12,13 @@ const ADD_TO_SUDOERS: &str = "true";
 pub async fn execute(run: &CommandRun<'_>, step: &TemplateStep, context: Context) -> Result<Context, String> {
     let user = step.args.first().ok_or("USER requires a username argument")?;
     let as_root = root_with_env(&context);
-    if run_quiet(run.envd, &format!("id -u {user}"), &as_root).await.is_err() {
+    let exists = run
+        .until_cancelled(
+            run_quiet(run.envd, &format!("id -u {user}"), &as_root),
+            PROCESS_CANCELLED,
+        )
+        .await;
+    if exists.is_err() {
         run.logged(&format!("useradd --create-home --shell /bin/bash {user}"), &as_root)
             .await
             .map_err(|e| format!("failed to create user: {e}"))?;
@@ -20,7 +26,8 @@ pub async fn execute(run: &CommandRun<'_>, step: &TemplateStep, context: Context
     if step.args.get(1).is_some_and(|sudo| sudo == ADD_TO_SUDOERS) {
         add_to_sudoers(run, user, &as_root).await?;
     }
-    save_user(run.envd, context, user).await
+    run.until_cancelled(save_user(run.envd, context, user), PROCESS_CANCELLED)
+        .await
 }
 
 async fn add_to_sudoers(run: &CommandRun<'_>, user: &str, as_root: &CommandContext) -> Result<(), String> {
@@ -28,7 +35,7 @@ async fn add_to_sudoers(run: &CommandRun<'_>, user: &str, as_root: &CommandConte
         level: LogLevel::Debug,
         ..*run
     };
-    let admin_group = render(ADMIN_GROUP_SCRIPT, &[("User", user)])?;
+    let admin_group = Script::new(ADMIN_GROUP_SCRIPT).value("User", user).render()?;
     debug
         .logged(&admin_group, as_root)
         .await
@@ -65,7 +72,7 @@ mod tests {
 
     #[test]
     fn the_scripts_name_the_user_everywhere() {
-        let admin_group = render(ADMIN_GROUP_SCRIPT, &[("User", "dev")]).unwrap();
+        let admin_group = Script::new(ADMIN_GROUP_SCRIPT).value("User", "dev").render().unwrap();
 
         assert_eq!(admin_group.matches("usermod -aG ").count(), 3);
         assert!(admin_group.contains("usermod -aG \"$E2B_ADMIN_GROUP\" dev\n"));

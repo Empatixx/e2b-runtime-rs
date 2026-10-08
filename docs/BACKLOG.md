@@ -177,7 +177,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | ECR tokens use static env credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, `AWS_REGION`); upstream's default AWS config also reads profiles and instance roles | template build |
 | Our envd is a glibc binary, so it only runs in images with a new enough glibc (CI builds from `debian:trixie-slim`); upstream's envd is static. Build envd for `x86_64-unknown-linux-musl` for template builds | template build |
 | Kernel and Firecracker binaries come from `E2B_KERNEL`/`E2B_FIRECRACKER`, not from `HOST_KERNELS_DIR/<version>` and `FIRECRACKER_VERSIONS_DIR/<version>` as upstream; the recorded versions are only labels | template build |
-| The base layer is uploaded before the phase returns; upstream uploads in the background and waits for all uploads at the end of the build | template build |
 
 | Feature flags read through LaunchDarkly upstream are fixed at their defaults: `build-provision-version` (0), `build-envd-memory-protection` (false), `build-reserved-disk-space-mb` (256), `build-base-rootfs-size-limit-mb` (25000), `build-kernel-version`/`build-firecracker-version` (env defaults) | template build |
+| A rate-limited layer index write (GCS `ResourceExhausted`) fails the build with `error saving UUID to hash mapping`; upstream logs a warning, skips the index entry and still logs `Saved:`. object_store retries 429 itself and hides the status, so the storage layer must expose a rate-limited error first | template build |
 | The injected files and symlink layers are gzipped with flate2, so their logged `sha256:` digests differ from Go's compress/gzip output for the same tar | template build |

@@ -8,6 +8,7 @@ use tokio_util::io::ReaderStream;
 use crate::go_os::path_error;
 use crate::go_url::escape::{Mode, escape};
 
+const OCTET_STREAM: &str = "application/octet-stream";
 const FILE_COPY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const FILE_FIELD: &str = "file";
 
@@ -19,7 +20,10 @@ pub async fn copy_file(envd: SocketAddr, user: &str, source: &Path, target: &str
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let part = Part::stream(reqwest::Body::wrap_stream(ReaderStream::new(file))).file_name(name);
+    let part = Part::stream(reqwest::Body::wrap_stream(ReaderStream::new(file)))
+        .file_name(name)
+        .mime_str(OCTET_STREAM)
+        .map_err(|e| format!("file upload failed: failed to create form file: {e}"))?;
     let url = format!(
         "http://{envd}/files?path={}&username={}",
         escape(target, Mode::QueryComponent),
@@ -69,8 +73,9 @@ mod tests {
                     let field = multipart.next_field().await.unwrap().unwrap();
                     let name = field.name().map(str::to_owned);
                     let file_name = field.file_name().map(str::to_owned);
+                    let content_type = field.content_type().map(str::to_owned);
                     let body = field.bytes().await.unwrap();
-                    *seen.lock() = Some((query, name, file_name, body.to_vec()));
+                    *seen.lock() = Some((query, name, file_name, content_type, body.to_vec()));
                     StatusCode::OK
                 }
             }),
@@ -84,9 +89,10 @@ mod tests {
 
         copy_file(address, "root", &source, "/tmp/envd updated").await.unwrap();
 
-        let (query, name, file_name, body) = received.lock().clone().unwrap();
+        let (query, name, file_name, content_type, body) = received.lock().clone().unwrap();
         assert_eq!(query.as_deref(), Some("path=%2Ftmp%2Fenvd+updated&username=root"));
         assert_eq!((name.as_deref(), file_name.as_deref()), (Some("file"), Some("envd")));
+        assert_eq!(content_type.as_deref(), Some("application/octet-stream"));
         assert_eq!(body, b"binary");
         let missing = copy_file(address, "root", &dir.path().join("missing"), "/x").await;
         assert!(missing.unwrap_err().starts_with("failed to open source file: open "));

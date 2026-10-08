@@ -18,6 +18,8 @@ const DEFAULT_VCPUS: u32 = 2;
 const DEFAULT_MEMORY_MIB: u32 = 1024;
 const DEFAULT_ENVD_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub type Held = Box<dyn std::any::Any + Send + Sync>;
+
 pub type PreBoot = Box<dyn FnOnce(PathBuf) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 #[derive(Clone)]
@@ -42,6 +44,7 @@ pub struct SandboxConfig {
     pub wait_for_envd: bool,
     pub memory_base: Option<Uuid>,
     pub pre_boot: Option<PreBoot>,
+    pub held: Vec<Held>,
     pub vcpus: u32,
     pub memory_mib: u32,
     pub work_dir: PathBuf,
@@ -81,6 +84,7 @@ pub struct SandboxBuilder {
     skip_envd: bool,
     memory_base: Option<Uuid>,
     pre_boot: Option<PreBoot>,
+    held: Vec<Held>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     work_dir: Option<PathBuf>,
@@ -139,6 +143,11 @@ impl SandboxBuilder {
 
     pub fn pre_boot(mut self, hook: PreBoot) -> Self {
         self.pre_boot = Some(hook);
+        self
+    }
+
+    pub fn hold(mut self, value: impl std::any::Any + Send + Sync) -> Self {
+        self.held.push(Box::new(value));
         self
     }
 
@@ -246,6 +255,7 @@ impl SandboxBuilder {
             wait_for_envd: !self.skip_envd,
             memory_base: self.memory_base,
             pre_boot: self.pre_boot,
+            held: self.held,
             vcpus: self.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             work_dir: self.work_dir.ok_or("work dir is required")?,

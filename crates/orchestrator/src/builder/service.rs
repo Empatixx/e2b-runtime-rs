@@ -13,6 +13,7 @@ use super::builds::{BuildCache, BuildInfo, BuildResult};
 use super::index::layer_files_path;
 use super::logs::LogQuery;
 use super::phase::{BuildError, CANCELLED};
+use super::uploads::LayerUploads;
 use crate::proto::template_service_server::TemplateService;
 use crate::proto::{
     InitLayerFileUploadRequest, InitLayerFileUploadResponse, LogLevel, LogsDirection, TemplateBuildDeleteRequest,
@@ -24,13 +25,20 @@ use crate::storage::backend::Storage;
 pub const DEFAULT_VERSION: &str = "v2.0.0";
 const SIGNED_URL_EXPIRATION: Duration = Duration::from_secs(30 * 60);
 const PANIC_MESSAGE: &str = "fatal error occurred during template build, please contact us";
+const CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 pub trait TemplateBuilder: Send + Sync + 'static {
     fn build(
         &self,
         request: TemplateCreateRequest,
         info: Arc<BuildInfo>,
+        uploads: Arc<LayerUploads>,
     ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>>;
+}
+
+struct Settled {
+    built: Result<TemplateBuildMetadata, BuildError>,
+    remove_files: bool,
 }
 
 #[derive(Clone)]
@@ -78,22 +86,24 @@ impl<B: TemplateBuilder> TemplateServer<B> {
             let started = Instant::now();
             info.log
                 .push(LogLevel::Info, format!("Building template {template_id}/{build_id}"));
-            let build = AssertUnwindSafe(builder.build(request, info.clone())).catch_unwind();
-            let finished = tokio::select! {
-                built = build => built.map_err(|_| BuildError::Internal(PANIC_MESSAGE.to_owned())),
-                () = info.cancel.cancelled() => Ok(Err(BuildError::cancelled())),
-            };
-            match &finished {
-                Ok(Err(e)) => {
-                    tracing::error!(build = %build_id, error = ?e, "template build failed");
-                    if let Err(e) = storage.delete_prefix(&build_id).await {
-                        tracing::warn!(build = %build_id, error = %e, "could not remove the failed build's files");
-                    }
-                }
-                Err(_) => tracing::error!(build = %build_id, "recovered from panic in template build"),
-                Ok(Ok(_)) => {}
+            let uploads = Arc::new(LayerUploads::new(info.clone()));
+            let build = builder.build(request, info.clone(), uploads.clone());
+            let finished = AssertUnwindSafe(until_cancelled(build, &info))
+                .catch_unwind()
+                .await
+                .ok();
+            let landed = uploads.wait().await;
+            if let Err(e) = &landed {
+                tracing::error!(build = %build_id, error = %e, "template layer upload wait failed");
             }
-            let built = finished.and_then(|built| built);
+            let Settled { built, remove_files } = settle(finished, landed);
+            if remove_files && let Err(e) = storage.delete_prefix(&build_id).await {
+                tracing::warn!(build = %build_id, error = %e, "could not remove the failed build's files");
+            }
+            let built = cancelled_as_user_error(built, info.cancel.is_cancelled());
+            if let Err(e) = &built {
+                tracing::error!(build = %build_id, error = ?e, "template build failed");
+            }
             info.log.push(
                 match built {
                     Ok(_) => LogLevel::Info,
@@ -104,6 +114,49 @@ impl<B: TemplateBuilder> TemplateServer<B> {
             info.finish(result_of(built));
         });
     }
+}
+
+async fn until_cancelled(
+    build: BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>>,
+    info: &BuildInfo,
+) -> Result<TemplateBuildMetadata, BuildError> {
+    let abandoned = async {
+        info.cancel.cancelled().await;
+        tokio::time::sleep(CANCEL_GRACE).await;
+    };
+    tokio::select! {
+        built = build => built,
+        () = abandoned => Err(BuildError::cancelled()),
+    }
+}
+
+fn settle(finished: Option<Result<TemplateBuildMetadata, BuildError>>, landed: Result<(), String>) -> Settled {
+    match (finished, landed) {
+        (None, landed) => Settled {
+            built: Err(BuildError::Internal(PANIC_MESSAGE.to_owned())),
+            remove_files: landed.is_err(),
+        },
+        (Some(Ok(_)), Err(upload)) => Settled {
+            built: Err(BuildError::Internal(format!(
+                "error uploading template layers: {upload}"
+            ))),
+            remove_files: true,
+        },
+        (Some(built), _) => Settled {
+            remove_files: built.is_err(),
+            built,
+        },
+    }
+}
+
+fn cancelled_as_user_error(
+    built: Result<TemplateBuildMetadata, BuildError>,
+    cancelled: bool,
+) -> Result<TemplateBuildMetadata, BuildError> {
+    built.map_err(|e| match (e, cancelled) {
+        (BuildError::Internal(message), true) if message != PANIC_MESSAGE => BuildError::cancelled(),
+        (e, _) => e,
+    })
 }
 
 fn outcome_line(built: &Result<TemplateBuildMetadata, BuildError>, took: Duration) -> String {
@@ -283,6 +336,7 @@ mod tests {
             &self,
             request: TemplateCreateRequest,
             info: Arc<BuildInfo>,
+            _uploads: Arc<LayerUploads>,
         ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>> {
             async move {
                 info.log.push(LogLevel::Info, "building");
@@ -399,6 +453,47 @@ mod tests {
             format!("Build failed: {INTERNAL_ERROR_MESSAGE}")
         );
         assert!(fixture.storage.exists("bp/rootfs.ext4").await.unwrap());
+    }
+
+    #[test]
+    fn the_outcome_settles_like_the_go_defers() {
+        let failed = || Err(BuildError::Internal("disk".to_owned()));
+        let built = || Ok(TemplateBuildMetadata::default());
+        let lost = || Err("storage down".to_owned());
+
+        let panicked = settle(None, Ok(()));
+        assert!(!panicked.remove_files);
+        assert_eq!(panicked.built, Err(BuildError::Internal(PANIC_MESSAGE.to_owned())));
+        assert!(settle(None, lost()).remove_files);
+        let upload_failed = settle(Some(built()), lost());
+        assert!(upload_failed.remove_files);
+        assert_eq!(
+            upload_failed.built,
+            Err(BuildError::Internal(
+                "error uploading template layers: storage down".to_owned()
+            ))
+        );
+        assert!(settle(Some(failed()), Ok(())).remove_files);
+        assert!(!settle(Some(built()), Ok(())).remove_files);
+    }
+
+    #[test]
+    fn only_internal_errors_of_a_cancelled_build_read_as_cancelled() {
+        let user = BuildError::User {
+            phase: "steps".to_owned(),
+            step: "2".to_owned(),
+            message: "failed to run command 'sleep 60': context: context canceled".to_owned(),
+        };
+
+        assert_eq!(
+            cancelled_as_user_error(Err(BuildError::Internal("create sandbox: x".to_owned())), true),
+            Err(BuildError::cancelled())
+        );
+        assert_eq!(cancelled_as_user_error(Err(user.clone()), true), Err(user));
+        assert_eq!(
+            cancelled_as_user_error(Err(BuildError::Internal("x".to_owned())), false),
+            Err(BuildError::Internal("x".to_owned()))
+        );
     }
 
     #[tokio::test]

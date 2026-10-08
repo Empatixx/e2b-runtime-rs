@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::BuildEnv;
@@ -32,6 +33,7 @@ pub struct StepsBuild {
     pub vcpus: i64,
     pub memory_mb: i64,
     pub envd_version: String,
+    pub cancel: CancellationToken,
 }
 
 pub enum StepRole {
@@ -178,6 +180,7 @@ impl StepPhase {
             prefix: &prefix,
             files: &self.build.env.build_storage,
             cache_scope: &self.build.cache_scope,
+            cancel: &self.build.cancel,
         };
         let context = std::mem::take(&mut metadata.context);
         let context = commands::execute(&run, &self.step, context)

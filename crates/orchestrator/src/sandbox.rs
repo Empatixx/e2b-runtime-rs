@@ -102,10 +102,13 @@ impl Sandbox {
         std::mem::take(&mut self.resources).release().await
     }
 
-    fn new(config: SandboxConfig) -> Self {
+    fn new(mut config: SandboxConfig) -> Self {
         Self {
+            resources: Resources {
+                held: std::mem::take(&mut config.held),
+                ..Resources::default()
+            },
             config,
-            resources: Resources::default(),
             phases: PhaseTimer::start(),
             prefetch_stats: Arc::default(),
         }

@@ -1,7 +1,7 @@
 use tempfile::NamedTempFile;
 
-use super::script::{COPY_SCRIPT, render};
-use super::{CommandRun, as_root, user_of};
+use super::script::{COPY_SCRIPT, Script};
+use super::{CommandRun, PROCESS_CANCELLED, REQUEST_CANCELLED, as_root, user_of};
 use crate::builder::index::{join_path, layer_files_path};
 use crate::builder::sandbox_command::{ROOT, run_quiet};
 use crate::envd::files::copy_file;
@@ -28,12 +28,15 @@ pub async fn execute(run: &CommandRun<'_>, step: &TemplateStep, context: Context
         .ok_or_else(|| format!("{} requires files hash to be set", step.r#type.to_uppercase()))?;
     let local = download(run, hash).await?;
     let tar = join_path(&["/tmp", &format!("{hash}.tar")]);
-    copy_file(run.envd, ROOT, local.path(), &tar)
-        .await
-        .map_err(|e| format!("failed to copy layer tar data to sandbox: {e}"))?;
+    run.until_cancelled(
+        copy_file(run.envd, ROOT, local.path(), &tar),
+        &format!("failed to send request: {REQUEST_CANCELLED}"),
+    )
+    .await
+    .map_err(|e| format!("failed to copy layer tar data to sandbox: {e}"))?;
     let unpack = join_path(&["/tmp", hash, "unpack"]);
     let extract = format!("mkdir -p \"{unpack}\" && tar -xzvf \"{tar}\" -C \"{unpack}\"");
-    run_quiet(run.envd, &extract, &as_root(&context))
+    run.until_cancelled(run_quiet(run.envd, &extract, &as_root(&context)), PROCESS_CANCELLED)
         .await
         .map_err(|e| format!("failed to extract files: {e}"))?;
     move_files(run, &context, &args, &unpack).await?;
@@ -47,8 +50,7 @@ async fn download(run: &CommandRun<'_>, hash: &str) -> Result<NamedTempFile, Str
         .map_err(|e| format!("failed to open files object from storage: {e}"))?;
     let local = crate::go_os::create_temp("layer-file-", ".tar")
         .map_err(|e| format!("failed to create temporary file for layer tar: {e}"))?;
-    run.files
-        .write_to(&path, local.path())
+    run.until_cancelled(run.files.write_to(&path, local.path()), REQUEST_CANCELLED)
         .await
         .map_err(|e| format!("failed to copy layer tar data to temporary file: {e}"))?;
     Ok(local)
@@ -58,18 +60,15 @@ async fn move_files(run: &CommandRun<'_>, context: &Context, args: &CopyArgs, un
     let workdir = context.workdir.clone().unwrap_or_default();
     let user = user_of(context);
     let source_path = join_path(&[unpack, &args.source_path]);
-    let script = render(
-        COPY_SCRIPT,
-        &[
-            ("TargetPath", &args.target_path),
-            ("SourcePath", &source_path),
-            ("Owner", &args.owner),
-            ("Permissions", &args.permissions),
-            ("Workdir", &workdir),
-            ("User", &user),
-        ],
-    )
-    .map_err(|e| format!("failed to execute copy script template: {e}"))?;
+    let script = Script::new(COPY_SCRIPT)
+        .value("TargetPath", &args.target_path)
+        .value("SourcePath", &source_path)
+        .value("Owner", &args.owner)
+        .value("Permissions", &args.permissions)
+        .value("Workdir", &workdir)
+        .value("User", &user)
+        .render()
+        .map_err(|e| format!("failed to execute copy script template: {e}"))?;
     let unpack_log = CommandRun {
         level: LogLevel::Debug,
         prefix: UNPACK_LOG_ID,
@@ -399,18 +398,15 @@ mod script_behaviour {
         let owner = format!("{}:{}", nix::unistd::getuid(), nix::unistd::getgid());
         let source_path = join_path(&[&unpack.display().to_string(), case.from]);
         let workdir = target.display().to_string();
-        let script = render(
-            COPY_SCRIPT,
-            &[
-                ("TargetPath", &target_path),
-                ("SourcePath", &source_path),
-                ("Owner", &owner),
-                ("Permissions", case.permissions),
-                ("Workdir", &workdir),
-                ("User", ""),
-            ],
-        )
-        .unwrap();
+        let script = Script::new(COPY_SCRIPT)
+            .value("TargetPath", &target_path)
+            .value("SourcePath", &source_path)
+            .value("Owner", &owner)
+            .value("Permissions", case.permissions)
+            .value("Workdir", &workdir)
+            .value("User", "")
+            .render()
+            .unwrap();
 
         let output = std::process::Command::new("/bin/bash")
             .arg("-c")

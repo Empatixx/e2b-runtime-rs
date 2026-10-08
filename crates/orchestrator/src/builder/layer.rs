@@ -125,26 +125,15 @@ pub struct BuildSlot {
 }
 
 impl BuildSlot {
-    pub fn slot(&self) -> Slot {
-        self.slot
-    }
-
-    pub fn release(self) {
-        drop(self.network);
-        drop(self.lease);
+    pub fn attach(self, builder: SandboxBuilder) -> SandboxBuilder {
+        let BuildSlot { slot, network, lease } = self;
+        builder.pooled_slot(slot).hold(network).hold(lease)
     }
 }
 
-struct LayerVm {
-    sandbox: Sandbox,
-    slot: BuildSlot,
-}
-
-impl LayerVm {
-    async fn fail(self, error: BuildError) -> BuildError {
-        let _ = self.sandbox.stop().await;
-        error
-    }
+async fn fail(sandbox: Sandbox, error: BuildError) -> BuildError {
+    let _ = sandbox.stop().await;
+    error
 }
 
 impl LayerExecutor<'_> {
@@ -159,19 +148,19 @@ impl LayerExecutor<'_> {
             .layer_source(build.source_build_id)
             .await
             .map_err(BuildError::Internal)?;
-        let mut vm = self.create_sandbox(&build, &source).await?;
+        let mut sandbox = self.create_sandbox(&build, &source).await?;
         if build.update_envd
-            && let Err(e) = update_envd(self.log, &mut vm.sandbox, &self.env.config.envd).await
+            && let Err(e) = update_envd(self.log, &mut sandbox, &self.env.config.envd).await
         {
             tracing::error!(error = %e, "error updating envd");
-            return Err(vm.fail(BuildError::Internal(format!("update envd: {e}"))).await);
+            return Err(fail(sandbox, BuildError::Internal(format!("update envd: {e}"))).await);
         }
         let build_id = build.current.template.build_id.clone();
-        let metadata = match action(vm.sandbox.envd_address(), build.current).await {
+        let metadata = match action(sandbox.envd_address(), build.current).await {
             Ok(metadata) => metadata,
             Err(e) => {
                 tracing::error!(error = ?e, "error executing action");
-                return Err(vm.fail(e).await);
+                return Err(fail(sandbox, e).await);
             }
         };
         let metadata = metadata.new_version(TemplateVersions {
@@ -179,10 +168,10 @@ impl LayerExecutor<'_> {
             kernel_version: self.env.config.kernel_version.clone(),
             firecracker_version: self.env.config.firecracker_version.clone(),
         });
-        self.pause_and_upload(vm.sandbox, vm.slot, build.hash, metadata).await
+        self.pause_and_upload(sandbox, build.hash, metadata).await
     }
 
-    async fn create_sandbox(&self, build: &LayerBuild<'_>, source: &LayerSource) -> Result<LayerVm, BuildError> {
+    async fn create_sandbox(&self, build: &LayerBuild<'_>, source: &LayerSource) -> Result<Sandbox, BuildError> {
         let sandbox_id = new_sandbox_id();
         let layer = LayerSandbox {
             source,
@@ -196,46 +185,37 @@ impl LayerExecutor<'_> {
         }
     }
 
-    async fn resume(&self, layer: &LayerSandbox<'_>) -> Result<LayerVm, BuildError> {
+    async fn resume(&self, layer: &LayerSandbox<'_>) -> Result<Sandbox, BuildError> {
         let resumed = |e: String| BuildError::Internal(format!("resume sandbox: {e}"));
         let slot = self.lease_slot(layer.sandbox_id, "resume sandbox").await?;
-        let sandbox = self
-            .env
-            .node
-            .resume_layer(layer)
-            .map_err(resumed)?
-            .pooled_slot(slot.slot())
+        slot.attach(self.env.node.resume_layer(layer).map_err(resumed)?)
             .envd_timeout(ENVD_WAIT)
             .resume(&layer.source.snapfile)
             .await
-            .map_err(resumed)?;
-        Ok(LayerVm { sandbox, slot })
+            .map_err(resumed)
     }
 
-    async fn cold_boot(&self, layer: &LayerSandbox<'_>, shape: &SandboxShape<'_>) -> Result<LayerVm, BuildError> {
+    async fn cold_boot(&self, layer: &LayerSandbox<'_>, shape: &SandboxShape<'_>) -> Result<Sandbox, BuildError> {
         let created = |e: String| BuildError::Internal(format!("create sandbox: {e}"));
         let kvm_clock = is_at_least(shape.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
             .map_err(|e| BuildError::Internal(format!("error comparing envd version: {e}")))?;
         let slot = self.lease_slot(layer.sandbox_id, "create sandbox").await?;
         let builder = self.env.node.cold_boot_layer(layer).map_err(created)?;
         let mut sandbox = self
-            .boot_options(builder, shape, slot.slot())
+            .boot_options(slot.attach(builder), shape)
             .kvm_clock(kvm_clock)
             .pre_boot(reserved_blocks())
             .cold_boot()
             .await
             .map_err(created)?;
         match sandbox.wait_for_envd().await {
-            Ok(()) => Ok(LayerVm { sandbox, slot }),
-            Err(e) => Err(LayerVm { sandbox, slot }
-                .fail(BuildError::Internal(format!("wait for envd: {e}")))
-                .await),
+            Ok(()) => Ok(sandbox),
+            Err(e) => Err(fail(sandbox, BuildError::Internal(format!("wait for envd: {e}"))).await),
         }
     }
 
-    pub fn boot_options(&self, builder: SandboxBuilder, shape: &SandboxShape<'_>, slot: Slot) -> SandboxBuilder {
+    pub fn boot_options(&self, builder: SandboxBuilder, shape: &SandboxShape<'_>) -> SandboxBuilder {
         builder
-            .pooled_slot(slot)
             .vcpus(shape.vcpus as u32)
             .memory_mib(shape.memory_mb as u32)
             .io_engine(IO_ENGINE)
@@ -266,7 +246,6 @@ impl LayerExecutor<'_> {
     pub async fn pause_and_upload(
         &self,
         sandbox: Sandbox,
-        slot: BuildSlot,
         hash: &str,
         metadata: TemplateMetadata,
     ) -> Result<TemplateMetadata, BuildError> {
@@ -278,7 +257,6 @@ impl LayerExecutor<'_> {
             .pause_into(&dir, build_id)
             .await
             .map_err(|e| paused(format!("error processing vm: {e}")))?;
-        slot.release();
         self.upload(local, dir, &metadata, hash).map_err(paused)?;
         Ok(metadata)
     }

@@ -5,7 +5,10 @@ pub mod script;
 pub mod user;
 pub mod workdir;
 
+use std::future::Future;
 use std::net::SocketAddr;
+
+use tokio_util::sync::CancellationToken;
 
 use super::logs::ScopedLog;
 use super::sandbox_command::{CommandLog, ROOT, run_logged};
@@ -13,6 +16,9 @@ use crate::envd::process::CommandContext;
 use crate::proto::{LogLevel, TemplateStep};
 use crate::storage::backend::Storage;
 use crate::template::metadata::Context;
+
+pub const PROCESS_CANCELLED: &str = "context: context canceled";
+pub const REQUEST_CANCELLED: &str = "context canceled";
 
 #[derive(Clone, Copy)]
 pub struct CommandRun<'a> {
@@ -22,6 +28,7 @@ pub struct CommandRun<'a> {
     pub prefix: &'a str,
     pub files: &'a Storage,
     pub cache_scope: &'a str,
+    pub cancel: &'a CancellationToken,
 }
 
 impl CommandRun<'_> {
@@ -31,7 +38,20 @@ impl CommandRun<'_> {
             level: self.level,
             id: self.prefix,
         };
-        run_logged(self.envd, command, context, &output).await
+        self.until_cancelled(run_logged(self.envd, command, context, &output), PROCESS_CANCELLED)
+            .await
+    }
+
+    pub async fn until_cancelled<T>(
+        &self,
+        work: impl Future<Output = Result<T, String>>,
+        cancelled: &str,
+    ) -> Result<T, String> {
+        tokio::select! {
+            biased;
+            done = work => done,
+            () = self.cancel.cancelled() => Err(cancelled.to_owned()),
+        }
     }
 }
 
@@ -104,6 +124,7 @@ mod tests {
             prefix: "builder 1/1",
             files: &files,
             cache_scope: "scope",
+            cancel: &CancellationToken::new(),
         };
         let step = TemplateStep {
             r#type: "healthcheck".to_owned(),
@@ -113,6 +134,36 @@ mod tests {
         assert_eq!(
             execute(&run, &step, Context::default()).await,
             Err("failed to get command for step healthcheck: command type HEALTHCHECK is not implemented".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_command_fails_with_the_go_context_text() {
+        let log = BuildLog::default();
+        let fields = BTreeMap::new();
+        let scoped = log.scoped(&fields);
+        let dir = tempfile::tempdir().unwrap();
+        let files = Storage::local(dir.path()).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let run = CommandRun {
+            envd: "127.0.0.1:1".parse().unwrap(),
+            log: &scoped,
+            level: LogLevel::Info,
+            prefix: "builder 1/1",
+            files: &files,
+            cache_scope: "scope",
+            cancel: &cancel,
+        };
+        let step = TemplateStep {
+            r#type: "RUN".to_owned(),
+            args: vec!["sleep 60".to_owned()],
+            ..TemplateStep::default()
+        };
+
+        assert_eq!(
+            execute(&run, &step, Context::default()).await,
+            Err("failed to run command 'sleep 60': context: context canceled".to_owned())
         );
     }
 }

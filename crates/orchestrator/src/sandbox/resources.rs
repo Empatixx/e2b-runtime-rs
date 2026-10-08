@@ -6,6 +6,7 @@ use crate::exposure::nbd::Exposure;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::server::MemoryServer;
 use crate::network::slot::Slot;
+use crate::sandbox::config::Held;
 use crate::system::all_ok;
 
 #[derive(Default)]
@@ -16,6 +17,7 @@ pub struct Resources {
     pub vm: Option<FirecrackerProcess>,
     pub memory: Option<MemoryServer>,
     pub prefetch: Option<JoinHandle<Result<(), String>>>,
+    pub held: Vec<Held>,
 }
 
 impl Resources {
@@ -26,6 +28,7 @@ impl Resources {
             && self.vm.is_none()
             && self.memory.is_none()
             && self.prefetch.is_none()
+            && self.held.is_empty()
     }
 
     pub async fn release(self) -> Result<(), String> {
@@ -36,6 +39,7 @@ impl Resources {
             vm,
             memory,
             prefetch,
+            held,
         } = self;
         if let Some(prefetch) = prefetch {
             prefetch.abort();
@@ -45,6 +49,7 @@ impl Resources {
         let closed = OptionFuture::from(disk.map(Exposure::close)).await;
         let removed = cgroup.map(|cgroup| cgroup.remove().map_err(|e| format!("remove cgroup: {e}")));
         let destroyed = OptionFuture::from(slot.as_ref().map(Slot::destroy)).await;
+        drop(held);
         all_ok([killed, served, closed, removed, destroyed].into_iter().flatten())
     }
 

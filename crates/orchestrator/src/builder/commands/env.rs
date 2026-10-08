@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use super::{CommandRun, root_only};
+use super::{CommandRun, PROCESS_CANCELLED, root_only};
 use crate::builder::sandbox_command::run_with_output;
 use crate::proto::TemplateStep;
 use crate::template::metadata::Context;
@@ -11,7 +11,8 @@ pub async fn execute(run: &CommandRun<'_>, step: &TemplateStep, mut context: Con
     validate(step)?;
     let mut env_vars = context.env_vars.clone();
     for [key, value] in step.args.as_chunks::<2>().0 {
-        let evaluated = evaluate(run.envd, value)
+        let evaluated = run
+            .until_cancelled(evaluate(run.envd, value), PROCESS_CANCELLED)
             .await
             .map_err(|e| format!("failed to evaluate environment variable {key}: {e}"))?;
         env_vars.as_mut().expect(NIL_MAP_PANIC).insert(key.clone(), evaluated);

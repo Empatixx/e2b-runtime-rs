@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use super::script::{WORKDIR_SCRIPT, render};
-use super::{CommandRun, root_only, root_with_env, user_of};
+use super::script::{Script, WORKDIR_SCRIPT};
+use super::{CommandRun, PROCESS_CANCELLED, root_only, root_with_env, user_of};
 use crate::builder::index::join_path;
 use crate::envd::process::run_command;
 use crate::proto::TemplateStep;
@@ -13,11 +13,17 @@ pub async fn execute(run: &CommandRun<'_>, step: &TemplateStep, mut context: Con
     let path = step.args.first().ok_or("WORKDIR requires a path argument")?;
     let target = target(context.workdir.as_deref(), path);
     let user = user_of(&context);
-    let script = render(WORKDIR_SCRIPT, &[("Target", &target), ("User", &user)])?;
+    let script = Script::new(WORKDIR_SCRIPT)
+        .value("Target", &target)
+        .value("User", &user)
+        .render()?;
     run.logged(&script, &root_with_env(&context))
         .await
         .map_err(|e| format!("failed to create workdir: {e}"))?;
-    context.workdir = Some(absolute_path(run.envd, target).await?);
+    context.workdir = Some(
+        run.until_cancelled(absolute_path(run.envd, target), PROCESS_CANCELLED)
+            .await?,
+    );
     Ok(context)
 }
 
@@ -58,7 +64,11 @@ mod tests {
 
     #[test]
     fn the_script_matches_upstream_bytes() {
-        let script = render(WORKDIR_SCRIPT, &[("Target", "/app"), ("User", "user")]).unwrap();
+        let script = Script::new(WORKDIR_SCRIPT)
+            .value("Target", "/app")
+            .value("User", "user")
+            .render()
+            .unwrap();
 
         assert_eq!(
             script,

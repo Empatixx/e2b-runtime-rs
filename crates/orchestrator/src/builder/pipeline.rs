@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use tokio_util::sync::CancellationToken;
 
 use super::builds::BuildInfo;
 use super::index::LayerIndex;
@@ -32,6 +33,7 @@ impl PhasePipeline {
         request: &TemplateCreateRequest,
         envd_version: &str,
         uploads: &Arc<LayerUploads>,
+        cancel: &CancellationToken,
     ) -> Result<Vec<Box<dyn Phase>>, BuildError> {
         let config = request.template.clone().unwrap_or_default();
         let scope = request
@@ -59,29 +61,33 @@ impl PhasePipeline {
             vcpus: config.v_cpu_count.into(),
             memory_mb: config.memory_mb.into(),
             envd_version: envd_version.to_owned(),
+            cancel: cancel.clone(),
         });
         let mut phases: Vec<Box<dyn Phase>> = vec![Box::new(base)];
         if with_default_user(request.version.as_deref().unwrap_or_default())? {
             phases.push(Box::new(StepPhase::default_user(steps.clone(), config.force)));
         }
-        let total = config.steps.len();
-        phases.extend(
-            force_steps(config.force.unwrap_or(false), &config.steps)
-                .into_iter()
-                .enumerate()
-                .map(|(index, step)| {
-                    Box::new(StepPhase {
-                        build: steps.clone(),
-                        step,
-                        role: StepRole::Step {
-                            number: index + 1,
-                            total,
-                        },
-                    }) as Box<dyn Phase>
-                }),
-        );
+        phases.extend(step_phases(&steps, &config));
         Ok(phases)
     }
+}
+
+fn step_phases(build: &Arc<StepsBuild>, config: &TemplateConfig) -> Vec<Box<dyn Phase>> {
+    let total = config.steps.len();
+    force_steps(config.force.unwrap_or(false), &config.steps)
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| {
+            Box::new(StepPhase {
+                build: build.clone(),
+                step,
+                role: StepRole::Step {
+                    number: index + 1,
+                    total,
+                },
+            }) as Box<dyn Phase>
+        })
+        .collect()
 }
 
 fn with_default_user(version: &str) -> Result<bool, BuildError> {
@@ -94,6 +100,7 @@ impl TemplateBuilder for PhasePipeline {
         &self,
         request: TemplateCreateRequest,
         info: Arc<BuildInfo>,
+        uploads: Arc<LayerUploads>,
     ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>> {
         let env = self.env.clone();
         let pipeline = PhasePipeline { env: env.clone() };
@@ -101,23 +108,12 @@ impl TemplateBuilder for PhasePipeline {
             let envd_version = envd_version(&env.config.envd)
                 .await
                 .map_err(|e| BuildError::Internal(format!("error getting envd version: {e}")))?;
-            let uploads = Arc::new(LayerUploads::new(info.clone()));
-            let phases = pipeline.phases(&request, &envd_version, &uploads)?;
-            let built = run_phases(&info.log, &phases).await;
-            let landed = uploads.wait().await;
-            let last = match (built, landed) {
-                (Err(e), Err(upload)) => {
-                    tracing::error!(error = %upload, "template layer upload wait failed");
-                    return Err(e);
-                }
-                (Err(e), Ok(())) => return Err(e),
-                (Ok(_), Err(upload)) => {
-                    return Err(BuildError::Internal(format!(
-                        "error waiting for layers upload: {upload}"
-                    )));
-                }
-                (Ok(last), Ok(())) => last,
-            };
+            let phases = pipeline.phases(&request, &envd_version, &uploads, &info.cancel)?;
+            let last = run_phases(&info.log, &phases).await?;
+            uploads
+                .wait()
+                .await
+                .map_err(|e| BuildError::Internal(format!("error waiting for layers upload: {e}")))?;
             let rootfs_size = rootfs_size(&env, &last).await?;
             Ok(result_metadata(&env, rootfs_size, envd_version))
         }
