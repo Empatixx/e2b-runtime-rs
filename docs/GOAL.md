@@ -1,54 +1,47 @@
-# Cíl: dokončit orchestrator M6 → M7 → M8 bez dozoru
+# Cíl: orchestrator M9 → M10 → M11 → M12 bez dozoru
 
-Pracuješ sám, nikdo nic neschvaluje. Tenhle dokument je zadání i schválení, plány M7 a M8 si schválíš sám. Kde dokument mlčí, rozhodni sám, zapiš `Ruling:` do ledgeru a pokračuj. Pořadí je pevné. Lepší pořádně hotové M6 a M7 než tři rozdělané milníky.
+Pracuješ sám a nikdo nic neschvaluje. Tenhle dokument je zadání i schválení. Plány M9–M12 si schválíš sám. Kde dokument mlčí, rozhodni, zapiš `Ruling:` do ledgeru a pokračuj. Pořadí je pevné. Lepší pořádně hotové M9 a M10 než čtyři rozdělané milníky.
+
+Jde o přepis upstream E2B z Go do Rustu: business logika, limity, výchozí hodnoty, stavové kódy a texty chyb jako upstream. Struktury a styl ale podle našich konvencí, stejně jako u envd.
 
 ## Stav
 
 - **Repo:** `~/IdeaProjects/envd-rs`, větev `main`.
-- **Spec:** `docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md`.
-- **Plán M6:** `docs/superpowers/plans/2026-10-10-orchestrator-m6-resume.md`.
-- **Úkoly 1–3 M6** jsou commitnuté. Pushnutý a zelený v CI je jen úkol 1, úkoly 2–3 jsou zatím jen lokálně.
-- **Úkol 4** (omezené pokusy `/init`, závod proti pádu Firecrackeru, MMDS před startem) je napsaný, necommitnutý a na Linuxu nepřeložený. Pushni ho a oprav podle CI.
-- **Zbývají úkoly 5–9 M6.**
+- **Spec:** `docs/superpowers/specs/2026-10-13-orchestrator-fast-resume-design.md`.
+- **Výchozí čísla (M8):** resume 1,5–2,1 s, pause 556–705 ms.
 
 ## Hotovo znamená (vše zelené v CI)
 
-**M6 – resume:**
-- `resume_contract`: soubor zapsaný před snapshotem je po resume vidět a test vypíše `resume took N ms`.
-- Oficiální SDK testy projdou i proti obnovenému sandboxu.
+- **M9:** cache šablon, pool síťových slotů, pool NBD a souběžné NBD dispatch, souběžný resume. `resume_contract` vypíše rozpad fází.
+- **M10:** `InfoService`, `/health` na stejném portu, admission limity, graceful shutdown s drainem.
+- **M11:** Pause vrátí odpověď před uploadem, `AddSnapshot`, upload na pozadí s retry, `DiffStore` s TTL a vyklízením podle místa na disku.
+- **M12:** streamovaný chunker, trackery, prefetch ze záznamu, optimize, memfd.
 
-**M7 – pause:**
-- dirty stránky paměti a diffy paměti i rootfs nad rodičovskými headery, upload a nový build (upstream `Sandbox.Pause`, `fc/memory.go`, `build_upload*`);
-- test: studený start → soubor A → pause → resume → soubor B → pause → resume, pak jsou vidět A i B a proces na pozadí běží dál;
-- vypsat velikost diffu.
+U každého milníku zapiš čísla před a po do `docs/NIGHT-REPORT.md`.
 
-**M8 – gRPC:**
-- `SandboxService` z upstream `orchestrator.proto` (tonic): Create, Delete, Pause, List, Update;
-- mapa sandboxů, timeouty s úklidem, pool slotů, binárka `orchestrator`;
-- z backlogu: sledování smrti NBD a uffd serveru, `Drop` pro `NbdDevice`, `setsid`, cgroup controllers;
-- test přes skutečný server: Create → List → Pause → Create z buildu → Delete, a nic nezůstane.
+**Na konci:**
+1. Poslední CI běh je zelený.
+2. `docs/NIGHT-REPORT.md` je česky přepsaný a pushnutý.
+3. Ledgery hotových plánů jsou smazané.
 
 ## Jak pracovat
 
-- **Plán:** každý milník dostane plán v `docs/superpowers/plans/` ve stylu M5 a M6.
-- **Implementace:** úkol po úkolu, test napřed, sleduj, že padá. Commit po každém úkolu, ledger v `.superpowers/sdd/<plán>/progress.md`.
-- **Před commitem:** `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. Commit jen po zeleném běhu, takže řetězit přes `&&`, nikdy přes `;`.
-- **Linux a CI:** linuxové věci (KVM, nbd, uffd) se ověřují v GitHub Actions. Push na `origin main` kvůli CI je povolený.
-  - Běh sleduj přes `gh run view <id>`.
-  - Síťový výpadek GitHubu zkus jednou znovu přes `gh run rerun --failed`.
-  - Testy nikdy nezmírňuj. Při nejasné chybě použij systematic-debugging.
-- **Review:** na konci milníku review na opusu (`Agent`, `model: opus`).
-  - Kritické a důležité nálezy oprav, každý s testem, který napřed padá.
-  - Drobnosti zapiš do `docs/BACKLOG.md`.
-- **Styl (`CLAUDE.md`):**
+- **Plán:** každý milník má plán v `docs/superpowers/plans/`. Implementace jde úkol po úkolu, test napřed a ověř, že padá. Commit po každém úkolu, ledger je v `.superpowers/sdd/<plán>/progress.md`.
+- **Před commitem:** `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. Příkazy řetězit jen přes `&&`.
+- **Linux a CI:** linuxové věci se ověřují v GitHub Actions. Push na `origin main` kvůli CI je povolený.
+  - Běh sleduj přes `gh run view`.
+  - Síťový výpadek zkus jednou znovu přes `gh run rerun --failed`.
+  - Testy nikdy nezmírňuj. Na nejasné chyby použij systematic-debugging.
+- **Review:** na konci milníku review na opusu. Kritické a důležité nálezy oprav s testem, který napřed padá. Drobnosti patří do `docs/BACKLOG.md`.
+- **Styl podle `CLAUDE.md`:**
   - malé metody, řetězení, buildery, pojmenovaná pole;
   - žádné komentáře, `.0` ani `#[allow]`;
-  - `unsafe` a syscally schované v malých typech;
-  - parita s upstream Go tam, kde ji klient vidí. Upstream: `~/IdeaProjects/e2b-runtime-origin-main-review/packages`, větší průzkum deleguj na agenta `Explore`.
+  - `unsafe` a syscally schované v malých typech.
+- **Upstream:** `~/IdeaProjects/e2b-runtime-origin-main-review/packages`. Větší průzkum deleguj na agenta `Explore`.
 
 ## Zakázáno
 
-- `cargo clean`, ruční zásahy do `target/`, `git stash`, přepínání větví, worktree. Ve stejném repu může pracovat i jiná session.
+- `cargo clean`, ruční zásahy do `target/`, `git stash`, přepínání větví, worktree.
 - Force-push, přepis pushnuté historie, PR a merge.
 - Jakýkoli `kubectl`, hlavně proti `omni-legal-machine-prod`.
 - Mazání cizích Docker kontejnerů, image, volume a sítí.
@@ -56,15 +49,5 @@ Pracuješ sám, nikdo nic neschvaluje. Tenhle dokument je zadání i schválení
 ## Kdy se zastavit
 
 - Další krok je nevratný nebo zakázaný.
-- Plán je tak rozbitý, že každá cesta dál by byla hádání.
-- Stejná chyba v CI zůstává po 3 různých hypotézách. Zapiš je a pokračuj jinou nezávislou prací, pokud nějaká je.
-
-## Na konci
-
-1. Všechno commitni a pushni. Poslední běh CI musí být zelený.
-2. Napiš česky `docs/NIGHT-REPORT.md` a pushni ho:
-   - co je hotové a čísla běhů CI;
-   - doba resume a pause;
-   - všechna rozhodnutí `Ruling:`;
-   - co zůstalo otevřené a proč.
-3. Smaž ledgery hotových plánů.
+- Plán je tak rozbitý, že každá cesta by byla hádání.
+- Stejná chyba v CI zůstává po 3 různých hypotézách. Zapiš je a pokračuj jinou nezávislou prací.
