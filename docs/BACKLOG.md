@@ -111,10 +111,15 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Network slots are created per sandbox; upstream pre-creates 32 and recycles returned ones after 3 s | next |
 | `InfoService`, `TemplateService`, `VolumeService`, `ChunkService`, gRPC health and the cmux HTTP side are not served | next |
 | `SchedulingMetadata` and `resolved_firecracker_version` are left empty in responses | next |
-| Local expiry at `end_time` (upstream leaves expiry to the API evictor); revisit when the API exists | API |
 | `RunningSandbox.config` (deprecated upstream) is not filled | API |
 | Pause uploads synchronously inside the RPC; upstream returns after the snapshot and uploads in the background | next |
-| Sandbox work dirs (`E2B_WORK_DIR/<id>`) are not removed after stop | next |
 | No max-running / max-starting admission limits (`ResourceExhausted` texts upstream) | next |
-| Cgroup directories of a crashed orchestrator are reused, not cleaned at startup | next |
+| Local expiry is opt-in (`E2B_LOCAL_EXPIRY=1`); default leaves expiry and auto-pause to the API evictor like upstream | API |
+| The slot index returns to the pool even when `Slot::destroy` failed; keep it out or log it | next |
+| A missing or invalid `end_time` becomes "now" (matters only with local expiry) | next |
+| Status texts: "no free network slot" vs upstream "max number of running sandboxes on node reached (%d), please retry" | next |
+| Update racing expiry can return OK for a sandbox already stopping | next |
+| Startup sweep removes every `ns-<N>` netns and all of `/sys/fs/cgroup/e2b/*` and `E2B_WORK_DIR`; assumes a dedicated node | next |
+| No test of a cancelled Create / Pause RPC (fixed by spawning, not pinned by a test) | next |
+| Many backlog lines still say "M8"; re-target them now that M8 shipped | next |
 
