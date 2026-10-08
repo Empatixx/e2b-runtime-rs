@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 use parking_lot::Mutex;
+use tokio::sync::watch;
 
 use super::cache::BlockCache;
 use crate::storage::backend::Storage;
@@ -16,11 +17,20 @@ use crate::storage::header::PAGE_SIZE;
 pub const CHUNK_SIZE: u64 = 4 << 20;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-type SharedFetch = Shared<BoxFuture<'static, Result<(), String>>>;
+const STREAM_BATCH: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FetchState {
+    Running,
+    Failed(String),
+    Done,
+}
+
+type Sessions = Arc<Mutex<HashMap<u64, watch::Receiver<FetchState>>>>;
 
 pub struct Chunker {
     source: Arc<Source>,
-    in_flight: Mutex<HashMap<u64, SharedFetch>>,
+    sessions: Sessions,
 }
 
 struct Source {
@@ -48,6 +58,15 @@ impl Chunker {
             .map_err(|_| format!("head {object}: timed out after {timeout:?}"))??;
         let cache = BlockCache::create(cache_path, size, PAGE_SIZE)
             .map_err(|e| format!("create cache {}: {e}", cache_path.display()))?;
+        Ok(Self::with_cache(cache, storage, object, timeout))
+    }
+
+    pub fn local(storage: Storage, object: &str, path: &Path) -> Result<Self, String> {
+        let cache = BlockCache::adopt(path, PAGE_SIZE).map_err(|e| format!("adopt {}: {e}", path.display()))?;
+        Ok(Self::with_cache(cache, storage, object, FETCH_TIMEOUT))
+    }
+
+    fn with_cache(cache: BlockCache, storage: Storage, object: &str, timeout: Duration) -> Self {
         let source = Source {
             cache: Arc::new(cache),
             storage,
@@ -56,26 +75,10 @@ impl Chunker {
             fetches: AtomicU64::new(0),
             attempts: AtomicU64::new(0),
         };
-        Ok(Self {
+        Self {
             source: Arc::new(source),
-            in_flight: Mutex::default(),
-        })
-    }
-
-    pub fn local(storage: Storage, object: &str, path: &Path) -> Result<Self, String> {
-        let cache = BlockCache::adopt(path, PAGE_SIZE).map_err(|e| format!("adopt {}: {e}", path.display()))?;
-        let source = Source {
-            cache: Arc::new(cache),
-            storage,
-            object: object.to_owned(),
-            timeout: FETCH_TIMEOUT,
-            fetches: AtomicU64::new(0),
-            attempts: AtomicU64::new(0),
-        };
-        Ok(Self {
-            source: Arc::new(source),
-            in_flight: Mutex::default(),
-        })
+            sessions: Sessions::default(),
+        }
     }
 
     pub fn size(&self) -> u64 {
@@ -100,36 +103,67 @@ impl Chunker {
             ));
         }
         for chunk in chunks_covering(offset..end) {
-            self.ensure_chunk(chunk).await?;
+            let chunk_range = self.chunk_range(chunk);
+            self.ensure(chunk, offset.max(chunk_range.start)..end.min(chunk_range.end))
+                .await?;
         }
         let bytes = self.source.clone().read_cached(offset, buf.len()).await?;
         buf.copy_from_slice(&bytes);
         Ok(())
     }
 
-    async fn ensure_chunk(&self, chunk: u64) -> Result<(), String> {
-        if self.source.is_cached(&self.chunk_range(chunk)) {
-            return Ok(());
+    async fn ensure(&self, chunk: u64, wanted: Range<u64>) -> Result<(), String> {
+        let mut progress = self.session(chunk);
+        loop {
+            if self.source.is_cached(&wanted) {
+                return Ok(());
+            }
+            let state = progress.borrow_and_update().clone();
+            match state {
+                FetchState::Failed(e) => return Err(e),
+                FetchState::Done => return self.cached_after_fetch(&wanted),
+                FetchState::Running => {
+                    if progress.changed().await.is_err() {
+                        return self.cached_after_fetch(&wanted);
+                    }
+                }
+            }
         }
-        let fetch = self.shared_fetch(chunk);
-        let fetched = fetch.clone().await;
-        let mut in_flight = self.in_flight.lock();
-        if in_flight.get(&chunk).is_some_and(|current| current.ptr_eq(&fetch)) {
-            in_flight.remove(&chunk);
-        }
-        fetched
     }
 
-    fn shared_fetch(&self, chunk: u64) -> SharedFetch {
-        let range = self.chunk_range(chunk);
-        let mut in_flight = self.in_flight.lock();
-        if self.source.is_cached(&range) {
-            return futures::future::ready(Ok(())).boxed().shared();
+    fn cached_after_fetch(&self, wanted: &Range<u64>) -> Result<(), String> {
+        match self.source.is_cached(wanted) {
+            true => Ok(()),
+            false => Err(format!(
+                "fetch of {} {wanted:?} ended without the data",
+                self.source.object
+            )),
         }
-        in_flight
-            .entry(chunk)
-            .or_insert_with(|| self.source.clone().fetch(range).boxed().shared())
-            .clone()
+    }
+
+    fn session(&self, chunk: u64) -> watch::Receiver<FetchState> {
+        let range = self.chunk_range(chunk);
+        let mut sessions = self.sessions.lock();
+        if let Some(running) = sessions.get(&chunk) {
+            return running.clone();
+        }
+        let (state, progress) = watch::channel(FetchState::Running);
+        if self.source.is_cached(&range) {
+            state.send_replace(FetchState::Done);
+            return progress;
+        }
+        sessions.insert(chunk, progress.clone());
+        let source = self.source.clone();
+        let sessions = self.sessions.clone();
+        tokio::spawn(async move {
+            let fetched = source.fetch(range, &state).await;
+            sessions.lock().remove(&chunk);
+            state.send_replace(match fetched {
+                Ok(()) => FetchState::Done,
+                Err(e) => FetchState::Failed(e),
+            });
+        });
+        progress
     }
 
     fn chunk_range(&self, chunk: u64) -> Range<u64> {
@@ -139,18 +173,56 @@ impl Chunker {
 }
 
 impl Source {
-    async fn fetch(self: Arc<Self>, range: Range<u64>) -> Result<(), String> {
+    async fn fetch(&self, range: Range<u64>, state: &watch::Sender<FetchState>) -> Result<(), String> {
         self.attempts.fetch_add(1, Ordering::Relaxed);
-        let bytes = tokio::time::timeout(self.timeout, self.storage.get_range(&self.object, range.clone()))
+        tokio::time::timeout(self.timeout, self.stream(range.clone(), state))
             .await
             .map_err(|_| format!("fetch {} {range:?}: timed out after {:?}", self.object, self.timeout))??;
-        let cache = self.cache.clone();
-        tokio::task::spawn_blocking(move || cache.fill(range.start, &bytes))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("fill cache of {}: {e}", self.object))?;
         self.fetches.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    async fn stream(&self, range: Range<u64>, state: &watch::Sender<FetchState>) -> Result<(), String> {
+        let stream = self.storage.get_stream(&self.object, range.clone()).await?;
+        self.stream_from(range, stream, state).await
+    }
+
+    async fn stream_from(
+        &self,
+        range: Range<u64>,
+        mut stream: impl futures::Stream<Item = Result<Bytes, String>> + Unpin,
+        state: &watch::Sender<FetchState>,
+    ) -> Result<(), String> {
+        let mut pending = BytesMut::new();
+        let mut filled = range.start;
+        while let Some(bytes) = stream.next().await {
+            pending.extend_from_slice(&bytes?);
+            if pending.len() >= STREAM_BATCH {
+                let aligned = pending.len() - pending.len() % PAGE_SIZE as usize;
+                filled = self.fill(filled, pending.split_to(aligned).freeze()).await?;
+                state.send_modify(|_| {});
+            }
+        }
+        let filled = self.fill(filled, pending.freeze()).await?;
+        match filled == range.end {
+            true => Ok(()),
+            false => Err(format!(
+                "get {} {range:?}: got {} of {} bytes",
+                self.object,
+                filled - range.start,
+                range.end - range.start
+            )),
+        }
+    }
+
+    async fn fill(&self, offset: u64, bytes: Bytes) -> Result<u64, String> {
+        let end = offset + bytes.len() as u64;
+        let cache = self.cache.clone();
+        tokio::task::spawn_blocking(move || cache.fill(offset, &bytes))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("fill cache of {}: {e}", self.object))
+            .map(|()| end)
     }
 
     async fn read_cached(self: Arc<Self>, offset: u64, length: usize) -> Result<Vec<u8>, String> {
@@ -209,17 +281,17 @@ mod tests {
         let mut across = vec![0; 8192];
         chunker.read_at(4 * MIB - 4096, &mut across).await.unwrap();
         assert_eq!(across, data[(4 * MIB - 4096) as usize..][..8192]);
-        assert_eq!(chunker.fetch_count(), 2);
+        assert_eq!(chunker.fetch_attempts(), 2);
 
         let mut cached = vec![0; 100];
         chunker.read_at(100, &mut cached).await.unwrap();
         assert_eq!(cached, data[100..200]);
-        assert_eq!(chunker.fetch_count(), 2);
+        assert_eq!(chunker.fetch_attempts(), 2);
 
         let mut tail = vec![0; 1000];
         chunker.read_at(9 * MIB - 1000, &mut tail).await.unwrap();
         assert_eq!(tail, data[(9 * MIB - 1000) as usize..]);
-        assert_eq!(chunker.fetch_count(), 3);
+        assert_eq!(chunker.fetch_attempts(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -240,7 +312,7 @@ mod tests {
         for (index, block) in blocks.into_iter().enumerate() {
             assert_eq!(block.unwrap(), data[index * 4096..][..4096]);
         }
-        assert_eq!(chunker.fetch_count(), 1);
+        assert_eq!(chunker.fetch_attempts(), 1);
     }
 
     #[tokio::test]
@@ -252,12 +324,12 @@ mod tests {
         let mut block = vec![0; 4096];
         let error = chunker.read_at(0, &mut block).await.unwrap_err();
         assert!(error.starts_with("get build/memfile"), "{error}");
-        assert_eq!(chunker.fetch_count(), 0);
+        assert_eq!(chunker.fetch_attempts(), 1);
 
         storage.put(OBJECT, Bytes::from(data.clone())).await.unwrap();
         chunker.read_at(0, &mut block).await.unwrap();
         assert_eq!(block, data[..4096]);
-        assert_eq!(chunker.fetch_count(), 1);
+        assert_eq!(chunker.fetch_attempts(), 2);
     }
 
     #[tokio::test]
@@ -341,5 +413,26 @@ mod tests {
 
         assert_eq!(buf, data[MIB as usize..MIB as usize + 8192]);
         assert_eq!((chunker.fetch_attempts(), chunker.size()), (0, 2 * MIB + 4096));
+    }
+
+    #[tokio::test]
+    async fn streamed_blocks_are_readable_before_the_chunk_ends() {
+        let (dir, storage, _) = setup(4 * MIB).await;
+        let chunker = chunker(&dir, storage).await;
+        let first = Bytes::from(vec![7; STREAM_BATCH + 4096]);
+        let stream = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
+        let (state, _progress) = watch::channel(FetchState::Running);
+        let source = chunker.source.clone();
+        let streaming = tokio::spawn(async move { source.stream_from(0..4 * MIB, stream, &state).await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !chunker.source.is_cached(&(0..4096)) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(chunker.source.is_cached(&(0..STREAM_BATCH as u64)));
+        assert!(!chunker.source.is_cached(&(0..4 * MIB)));
+        assert!(!streaming.is_finished());
+        streaming.abort();
     }
 }

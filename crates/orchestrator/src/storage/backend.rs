@@ -3,12 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutPayload};
 
 use tokio::io::AsyncWriteExt;
 
@@ -73,6 +74,27 @@ impl Storage {
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(format!("get {path}: {e}")),
         }
+    }
+
+    pub async fn get_stream(
+        &self,
+        path: &str,
+        range: Range<u64>,
+    ) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
+        let options = GetOptions {
+            range: Some(range.clone().into()),
+            ..GetOptions::default()
+        };
+        let object = self
+            .store
+            .get_opts(&ObjectPath::from(path), options)
+            .await
+            .map_err(|e| format!("get {path} {range:?}: {e}"))?;
+        let path = path.to_owned();
+        Ok(object
+            .into_stream()
+            .map_err(move |e| format!("read {path}: {e}"))
+            .boxed())
     }
 
     pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
