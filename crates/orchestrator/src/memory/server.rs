@@ -612,6 +612,10 @@ mod tests {
         assert_eq!(fixture.server.prefault(10 * PAGE, &page), Ok(Prefaulted::Skipped));
         assert_eq!(read_page(&fixture.pages, 1).await, 9);
         assert_eq!(read_page(&fixture.pages, 0).await, 1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while fixture.server.faults_served() < 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         let trace = fixture.server.trace();
         assert_eq!(fixture.server.faults_served(), 1);
