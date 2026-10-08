@@ -153,3 +153,13 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `Flush` is answered at once while earlier writes may still be in flight (overlay is never fsynced anyway) | ublk |
 | Admission counts running sandboxes only; check whether upstream `Count()` includes reservations | API |
 
+## Orchestrator: prefetch (M12)
+
+| Item | Matters from |
+|---|---|
+| `RESUME_PREFETCH_SOURCE=last-cycle` and `both` (fetch-only warming of the newest layer) are not implemented; they act as `off` and `init` | API |
+| Pause harvest (record a trace with a throwaway resume after each pause) is not implemented; upstream has it off by default | API |
+| Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
+| Stream batches are 256 KiB; upstream reads `max(block size, MinChunkerReadSizeKB)` | API |
+| Kernel and Firecracker versions in `metadata.json` are copied from the parent; nothing probes the binaries | template build |
+

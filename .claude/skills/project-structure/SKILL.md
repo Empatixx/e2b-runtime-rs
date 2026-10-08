@@ -17,14 +17,17 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
   src/network/         slot.rs (netns, veth, tap, iptables per slot; HostSlots), pool.rs (NetworkPool: 32 new,
                        100 reused, 3s return delay), storage.rs (SlotStorage: index allocation, leaked namespaces)
-  src/template.rs      Template: snapfile + headers fetched once per build (OnceCell); template/cache.rs (TemplateCache:
-                       25h sliding TTL, Arc pins, 1 min grace)
+  src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
+                       (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
+                       (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
   src/cgroup.rs        cgroup v2 per sandbox
   src/firecracker/     config (VmConfig builder), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
-                       handshake.rs (SCM_RIGHTS listener), server.rs (page-fault loop), snapshot.rs (memfile export)
+                       handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
+                       pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
+                       trace.rs (PrefetchTracker, Trace intersection), prefetch.rs (init-trace prefetcher)
   src/envd.rs          envd POST /init client (upstream retry semantics)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
