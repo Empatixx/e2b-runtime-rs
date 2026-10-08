@@ -18,8 +18,46 @@ async fn phase2_routes_return_501() {
         let res = c.post(format!("http://{addr}{p}")).send().await.unwrap();
         assert_eq!(res.status(), 501, "{p}");
     }
-    let res = c.get(format!("http://{addr}/metrics")).send().await.unwrap();
-    assert_eq!(res.status(), 501);
+}
+
+#[tokio::test]
+async fn metrics_report_the_guest_like_upstream() {
+    let (addr, _) = spawn_server_with_state().await;
+    let res = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
+    let cache = res.headers()["cache-control"].to_str().unwrap().to_owned();
+    let content_type = res.headers()["content-type"].to_str().unwrap().to_owned();
+    let status = res.status();
+    let body = res.text().await.unwrap();
+
+    assert_eq!(
+        (cache.as_str(), content_type.as_str()),
+        ("no-store", "application/json")
+    );
+    match cfg!(target_os = "linux") {
+        true => {
+            assert_eq!(status, 200);
+            assert!(body.ends_with("}\n"), "{body:?}");
+            let metrics: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let mut keys: Vec<&str> = metrics.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "cpu_count",
+                    "cpu_used_pct",
+                    "disk_total",
+                    "disk_used",
+                    "mem_cache",
+                    "mem_total",
+                    "mem_used",
+                    "ts"
+                ]
+            );
+            assert!(metrics["cpu_count"].as_u64().unwrap() > 0);
+            assert!(metrics["mem_used"].as_u64().unwrap() <= metrics["mem_total"].as_u64().unwrap());
+        }
+        false => assert_eq!((status.as_u16(), body.as_str()), (500, "")),
+    }
 }
 
 #[test]

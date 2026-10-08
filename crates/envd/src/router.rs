@@ -42,7 +42,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/envs", get(envs::get_envs))
         .route("/files/compose", post(files::compose::post_files_compose))
-        .route("/metrics", get(health::not_implemented))
+        .route("/metrics", get(health::get_metrics))
         .route("/freeze", post(health::not_implemented))
         .route("/unfreeze", post(health::not_implemented))
         .route("/fsfreeze", post(health::not_implemented))

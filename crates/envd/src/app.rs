@@ -5,6 +5,8 @@ use parking_lot::RwLock;
 
 use crate::config::Config;
 use crate::envvars::EnvVars;
+use crate::host::metrics::CpuUsage;
+use crate::host::oom::OomWatcher;
 
 #[derive(Debug, Clone)]
 pub struct Defaults {
@@ -31,11 +33,15 @@ pub struct AppState {
     pub initialized: AtomicBool,
     pub last_set_time: AtomicI64,
     pub init_lock: tokio::sync::Mutex<()>,
+    pub cpu: CpuUsage,
+    pub oom_kills: Option<Arc<OomWatcher>>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Arc<Self> {
         Arc::new(Self {
+            oom_kills: (!config.is_not_fc).then(OomWatcher::start),
+            cpu: CpuUsage::start(),
             config,
             defaults: RwLock::default(),
             env_vars: EnvVars::default(),

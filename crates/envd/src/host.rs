@@ -1,5 +1,7 @@
 pub mod hosts;
+pub mod metrics;
 pub mod mmds;
+pub mod oom;
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha512};

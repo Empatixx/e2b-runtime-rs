@@ -7,7 +7,7 @@ File RPCs, `/files`, URL signing and the process lifecycle are ported closely. T
 - **G** = `e2b-runtime-origin-main-review/packages/envd`
 - **R** = `crates/envd/src`
 
-## 1. `/metrics` (missing; R `router.rs:45` answers 501)
+## 1. `/metrics` (done: R `host/metrics.rs`, `host/oom.rs`, `controllers/health.rs`)
 
 ### Response (G `internal/api/store.go:174-200`, `internal/host/metrics.go:12-26`)
 
@@ -20,7 +20,7 @@ File RPCs, `/files`, URL signing and the process lifecycle are ported closely. T
   | `ts` | i64 | Unix seconds |
   | `cpu_count` | u32 | logical CPUs |
   | `cpu_used_pct` | f32 | gopsutil `cpu.Percent(0,false)[0]`: delta since the previous call, rounded to 2 decimals only when > 0 |
-  | `mem_total`, `mem_used`, `mem_cache` | u64 | `Used = Total − Free − Buffers − Cached`; `Cached` includes `SReclaimable` |
+  | `mem_total`, `mem_used`, `mem_cache` | u64 | gopsutil v4.26.6: `Used = Total − Available` (`MemAvailable`, else `Cached + Free`); `Cached` includes `SReclaimable` |
   | `disk_used`, `disk_total` | u64 | `statfs("/")`: `total = Blocks*Bsize`, `used = total − Bavail*Bsize` |
   | `oom_kills` | `*[]OOMKill` | `omitempty`, see below |
 
@@ -84,6 +84,8 @@ The watcher starts only when the `-isnotfc` flag is not set.
    - keep the kill with the name `Unknown`;
    - log `Failed to find the process name of an out-of-memory kill`, once per seq above `lastUnnamed`.
    - The error texts are `no process ID followed by a name` and `no end to the process name`.
+
+Ported as upstream, with one exception: gopsutil's zoneinfo estimate of `Available` for kernels older than 3.14 (no `MemAvailable`) falls back to `Cached + Free`. Firecracker guests always have `MemAvailable`.
 
 ## 2. Other HTTP routes
 
