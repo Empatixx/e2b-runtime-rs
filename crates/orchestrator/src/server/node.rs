@@ -24,6 +24,7 @@ use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
+use crate::firecracker::version::supports_memfd;
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
@@ -450,7 +451,7 @@ impl Node {
             .work_dir(work_dir)
             .envd_timeout(self.envd_timeout)
             .prefetch(prefetch)
-            .use_memfd(self.use_memfd)
+            .use_memfd(self.use_memfd && supports_memfd(&config.firecracker_version))
             .hyperloop_ip(&self.orchestrator_ip)
             .envd(init)
             .resume(snapfile)

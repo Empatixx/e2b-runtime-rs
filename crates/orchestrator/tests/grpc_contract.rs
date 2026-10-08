@@ -190,6 +190,7 @@ fn create_request(id: &str, build: Uuid, lifetime: Duration) -> SandboxCreateReq
             team_id: "team".to_owned(),
             execution_id: format!("{id}-execution"),
             envd_version: "0.5.0".to_owned(),
+            firecracker_version: "v1.14.1_e2b".to_owned(),
             vcpu: 2,
             ram_mb: 1024,
             ..SandboxConfig::default()

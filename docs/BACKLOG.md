@@ -169,5 +169,4 @@ Every final review ends with minors and deferred rulings. They are collected her
 | A failed `metadata.json` write also skips caching the diffs, and uploads then retry against a missing file | API |
 | `collect_prefetch` returns the mapping; writing `metadata.json`, invalidating the template and log-only failure belong to the template build | template build |
 | Prefault installs zero pages that upstream skips | API |
-| `use_memfd` is sent whenever `USE_MEMFD` is on; upstream also gates it on the Firecracker version | API |
 
