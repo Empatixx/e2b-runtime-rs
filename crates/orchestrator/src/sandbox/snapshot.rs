@@ -2,19 +2,40 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use roaring::RoaringBitmap;
 use uuid::Uuid;
 
 use super::Sandbox;
 use crate::firecracker::client::FirecrackerClient;
-use crate::memory::snapshot::export_memfile;
+use crate::firecracker::memory_info::GuestRegion;
+use crate::memory::snapshot::{export_pages, memfile_pages};
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub build: Build,
+    pub memfile_bytes: u64,
+    pub memory_bytes: u64,
+    pub rootfs_bytes: u64,
+}
 
 struct SnapshotFiles {
     snapfile: PathBuf,
     memfile: PathBuf,
     rootfs: PathBuf,
+}
+
+struct Exported {
+    header: Header,
+    bytes: u64,
+}
+
+struct MemoryPages {
+    regions: Vec<GuestRegion>,
+    dirty: RoaringBitmap,
+    empty: RoaringBitmap,
 }
 
 impl SnapshotFiles {
@@ -34,7 +55,14 @@ impl SnapshotFiles {
 }
 
 impl Sandbox {
-    pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Build, String> {
+    pub async fn pause(self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
+        let snapshot = self.snapshot(storage, build_id).await;
+        let stopped = self.stop().await;
+        let snapshot = snapshot?;
+        stopped.map(|()| snapshot)
+    }
+
+    pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
         let vm = self.resources.vm.as_ref().ok_or("firecracker is not running")?;
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
@@ -51,19 +79,83 @@ impl Sandbox {
         files: &SnapshotFiles,
         storage: &Storage,
         build_id: Uuid,
-    ) -> Result<Build, String> {
+    ) -> Result<Snapshot, String> {
         client.pause().await?;
         client.create_snapshot(&files.snapfile).await?;
-        let memfile = self.export_memory(client, pid, &files.memfile, build_id).await?;
+        let pages = self.memory_pages(client).await?;
+        let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
+        let memfile = self.export_memory(pages, pid, &files.memfile, build_id).await?;
         self.flush_disk().await?;
         let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
         let build = Build {
             build_id,
-            memfile,
-            rootfs,
+            memfile: memfile.header,
+            rootfs: rootfs.header,
         };
         upload(storage, &build, files).await?;
-        Ok(build)
+        Ok(Snapshot {
+            build,
+            memfile_bytes: memfile.bytes,
+            memory_bytes,
+            rootfs_bytes: rootfs.bytes,
+        })
+    }
+
+    async fn memory_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
+        let regions = client.memory_mappings().await?;
+        let tracked = self
+            .resources
+            .memory
+            .as_ref()
+            .filter(|memory| memory.write_protecting());
+        let removed = self
+            .resources
+            .memory
+            .as_ref()
+            .map(|memory| memory.removed_pages())
+            .unwrap_or_default();
+        let (dirty, empty) = match tracked {
+            Some(_) => (client.memory_dirty().await?, RoaringBitmap::new()),
+            None => {
+                let info = client.memory_info().await?;
+                (&info.resident - &info.empty, info.empty)
+            }
+        };
+        Ok(MemoryPages {
+            dirty: memfile_pages(&regions, &dirty),
+            empty: memfile_pages(&regions, &empty) | removed,
+            regions,
+        })
+    }
+
+    async fn export_memory(
+        &self,
+        pages: MemoryPages,
+        pid: u32,
+        path: &Path,
+        build_id: Uuid,
+    ) -> Result<Exported, String> {
+        let page_size = pages
+            .regions
+            .first()
+            .map(|region| region.page_size)
+            .ok_or("firecracker reported no memory regions")?;
+        let size = pages.regions.iter().map(|region| region.size).sum();
+        let path = path.to_path_buf();
+        let diff = blocking("export memfile", move || {
+            let mut out = BufWriter::new(File::create(&path)?);
+            let diff = export_pages(pid, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
+            out.flush().map(|()| diff)
+        })
+        .await?;
+        exported(&diff, &self.memory_parent(page_size, size)?, build_id)
+    }
+
+    fn memory_parent(&self, page_size: u64, size: u64) -> Result<Header, String> {
+        self.config.memfile.as_ref().map_or_else(
+            || Header::new(Metadata::template(Uuid::nil(), page_size, size), Vec::new()),
+            |memfile| Ok(memfile.header().clone()),
+        )
     }
 
     async fn flush_disk(&self) -> Result<(), String> {
@@ -79,45 +171,22 @@ impl Sandbox {
             .map_err(|e| format!("flush rootfs device: {e}"))
     }
 
-    async fn export_memory(
-        &self,
-        client: &FirecrackerClient,
-        pid: u32,
-        path: &Path,
-        build_id: Uuid,
-    ) -> Result<Header, String> {
-        let (regions, info) = tokio::try_join!(client.memory_mappings(), client.memory_info())?;
-        let page_size = regions
-            .first()
-            .map(|region| region.page_size)
-            .ok_or("firecracker reported no memory regions")?;
-        let size = regions.iter().map(|region| region.size).sum();
-        let path = path.to_path_buf();
-        let diff = blocking("export memfile", move || {
-            let mut out = BufWriter::new(File::create(&path)?);
-            let diff = export_memfile(pid, &regions, &info, &mut out)?;
-            out.flush().map(|()| diff)
-        })
-        .await?;
-        diff.to_diff_header(&self.memory_parent(page_size, size)?, build_id)
-    }
-
-    fn memory_parent(&self, page_size: u64, size: u64) -> Result<Header, String> {
-        self.config.memfile.as_ref().map_or_else(
-            || Header::new(Metadata::template(Uuid::nil(), page_size, size), Vec::new()),
-            |memfile| Ok(memfile.header().clone()),
-        )
-    }
-
-    async fn export_rootfs(&self, path: &Path, build_id: Uuid) -> Result<Header, String> {
+    async fn export_rootfs(&self, path: &Path, build_id: Uuid) -> Result<Exported, String> {
         let overlay = self.config.rootfs.clone();
         let path = path.to_path_buf();
         let diff = blocking("export rootfs", move || {
             File::create(&path).and_then(|mut out| overlay.export_diff(&mut out))
         })
         .await?;
-        diff.to_diff_header(self.config.rootfs.base().header(), build_id)
+        exported(&diff, self.config.rootfs.base().header(), build_id)
     }
+}
+
+fn exported(diff: &DiffMetadata, parent: &Header, build_id: Uuid) -> Result<Exported, String> {
+    Ok(Exported {
+        header: diff.to_diff_header(parent, build_id)?,
+        bytes: diff.dirty.len() * diff.block_size,
+    })
 }
 
 async fn blocking(

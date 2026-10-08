@@ -87,7 +87,7 @@ mod linux {
 
     async fn resumed(assets: &Assets, template: &Template) -> Result<Sandbox, String> {
         let source = cold(assets, template).await?;
-        let build = source.snapshot(&template.storage, Uuid::new_v4()).await?;
+        let build = source.snapshot(&template.storage, Uuid::new_v4()).await?.build;
         source.stop().await?;
         let started = Instant::now();
         let sandbox = template
