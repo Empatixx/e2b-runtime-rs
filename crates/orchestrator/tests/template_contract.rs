@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 const SLOTS: std::ops::RangeInclusive<u32> = 4106..=4109;
 const BASE_IMAGE: &str = "debian:trixie-slim";
+const LOG_PAGE: u32 = 100;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 struct Host {
@@ -117,7 +118,7 @@ async fn wait_for_build(
             .into_inner();
         let finished = status.status != TemplateBuildState::Building as i32;
         if finished || tokio::time::Instant::now() > deadline {
-            let logs = status.log_entries.iter().map(|entry| entry.message.clone()).collect();
+            let logs = all_logs(templates, template_id, build_id).await;
             let reason = status.reason.map(|reason| reason.message).unwrap_or_default();
             return (status.status, logs, status.metadata, reason);
         }
@@ -251,4 +252,31 @@ async fn build(
         .await
         .unwrap();
     wait_for_build(templates, template_id, &build_id).await
+}
+
+async fn all_logs(
+    templates: &mut TemplateServiceClient<tonic::transport::Channel>,
+    template_id: &str,
+    build_id: &str,
+) -> Vec<String> {
+    let mut logs = Vec::new();
+    loop {
+        let page = templates
+            .template_build_status(TemplateStatusRequest {
+                template_id: template_id.to_owned(),
+                build_id: build_id.to_owned(),
+                offset: Some(logs.len() as i32),
+                limit: Some(LOG_PAGE),
+                ..TemplateStatusRequest::default()
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .log_entries;
+        let full = page.len() as u32 == LOG_PAGE;
+        logs.extend(page.into_iter().map(|entry| entry.message));
+        if !full {
+            return logs;
+        }
+    }
 }
