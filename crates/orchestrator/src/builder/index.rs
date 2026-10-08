@@ -15,7 +15,6 @@ struct IndexTemplate {
 }
 
 const MINIMAL_CACHED_VERSION: u64 = 2;
-const DEPRECATED_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedLayer {
@@ -58,7 +57,7 @@ impl LayerIndex {
             .flatten()?;
         TemplateMetadata::from_json(&bytes)
             .ok()
-            .filter(|metadata| metadata.version >= MINIMAL_CACHED_VERSION && metadata.version > DEPRECATED_VERSION)
+            .filter(|metadata| metadata.version >= MINIMAL_CACHED_VERSION)
             .map(|metadata| CachedLayer { build_id, metadata })
     }
 

@@ -70,7 +70,7 @@ impl BuildLog {
             .map_or(MAX_ENTRIES_PER_REQUEST, |limit| limit.min(MAX_ENTRIES_PER_REQUEST));
         let mut entries = self.entries.lock().clone();
         match query.direction {
-            LogsDirection::Backward => entries.sort_by(|left, right| right.timestamp.cmp(&left.timestamp)),
+            LogsDirection::Backward => entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp)),
             LogsDirection::Forward => entries.sort_by_key(|entry| entry.timestamp),
         }
         entries
