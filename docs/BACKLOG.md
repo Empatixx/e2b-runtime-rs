@@ -39,7 +39,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | `ioctl` arguments go through `as i32`, which truncates above 8 TiB | M8 |
-| The server has no request length cap or range check (upstream caps writes at 32 MiB) | M8 |
 | A truncated request header is treated as a clean EOF | any |
 | Blocking file I/O in server writes (`write_at` / `write_zeroes_at`) | M6 |
 | `nbd_contract` leaves mounts and devices behind when it panics | any |
@@ -50,7 +49,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Host `ip_forward` sysctl is set on every slot create; make it a startup check | M8 |
-| Firecracker joins the cgroup after spawn instead of `CLONE_INTO_CGROUP` | M8 |
 | The Firecracker console file grows without bound; send it to a logger | M8 |
 | `vm_contract` has no cleanup guard when it panics | any |
 | `MAX_SLOT` is 16383 vs upstream 32766 (deliberate; revisit for large nodes) | M8 |
@@ -75,9 +73,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | M8 |
 | Prefetch from a build-time page trace (needs template build) | template build |
 | Firecracker `use_memfd` (memfd copy-out instead of `process_vm_readv`) and `use_sync_wp` (synchronous WP events) are not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty` | M8 |
-| Rate limiter reset `PATCH`es after snapshot load (upstream sends empty limiters) | M8 |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
-| `resume` builds the memfile `BuildFile` in the caller; a template cache should own it | M8 |
 | Huge pages: `MAX_RUN_PAGES` counts pages, so a 2 MiB-page run can exceed `process_vm_readv`'s MAX_RW_COUNT; cap runs by bytes | M8 |
 | A failed `PUT /snapshot/load` still waits up to 10 s for the uffd handshake; cancel it when the load fails | M8 |
 | A memory server that dies during resume shows up as an envd timeout; race init against the server task too | M8 |
@@ -122,4 +118,14 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Startup sweep removes every `ns-<N>` netns and all of `/sys/fs/cgroup/e2b/*` and `E2B_WORK_DIR`; assumes a dedicated node | next |
 | No test of a cancelled Create / Pause RPC (fixed by spawning, not pinned by a test) | next |
 | Many backlog lines still say "M8"; re-target them now that M8 shipped | next |
+
+## Orchestrator: fast resume (M9)
+
+| Item | Matters from |
+|---|---|
+| Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | M12 |
+| No nftables `slot-firewall` with allow/deny sets and DSCP; private ranges are dropped with iptables FORWARD rules | API |
+| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn | M12 |
+| `NetworkPool::get` waits forever when no slot can be created; bounded only by the request timeout (M10) | M10 |
+| MMDS `address` stays `""` until hyperloop exists | API |
 

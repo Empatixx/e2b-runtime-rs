@@ -12,8 +12,13 @@ Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/storage/         object_store backends, build paths, header V3
   src/block/           sparse cache + tracker, chunker, build file, overlay
-  src/exposure/nbd/    NBD server, ioctls, device claim
-  src/network/slot.rs  netns, veth, tap, iptables per slot
+  src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
+                       pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
+  src/network/         slot.rs (netns, veth, tap, iptables per slot; HostSlots), pool.rs (NetworkPool: 32 new,
+                       100 reused, 3s return delay), storage.rs (SlotStorage: index allocation, leaked namespaces)
+  src/template.rs      Template: snapfile + headers fetched once per build (OnceCell); template/cache.rs (TemplateCache:
+                       25h sliding TTL, Arc pins, 1 min grace)
+  src/phases.rs        PhaseTimer: resume phase durations and notes
   src/cgroup.rs        cgroup v2 per sandbox
   src/firecracker/     config (VmConfig builder), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
@@ -24,9 +29,9 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
                        snapshot.rs (Snapshot, snapshot/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
                        resume.rs (snapshot load over uffd)
-  src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, slot pool; resume a build),
+  src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, network pool, template cache),
                        lifecycle.rs (task per sandbox: commands, end_time expiry, death watch), service.rs (SandboxService),
-                       registry.rs, slots.rs
+                       registry.rs
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/orchestrator.proto (no package upstream)
   src/main.rs          orchestrator binary: NodeConfig::from_env + tonic server on GRPC_PORT (5008)
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
