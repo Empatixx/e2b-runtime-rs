@@ -9,7 +9,7 @@ pub fn parent(path: &Path) -> PathBuf {
     path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
-fn reason(err: &io::Error) -> String {
+pub fn reason(err: &io::Error) -> String {
     err.raw_os_error()
         .map(|code| nix::errno::Errno::from_raw(code).desc())
         .map(|desc| {

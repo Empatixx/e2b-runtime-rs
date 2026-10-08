@@ -7,6 +7,7 @@ pub mod envd;
 pub mod events;
 pub mod exposure;
 pub mod firecracker;
+pub mod go_exec;
 pub mod go_os;
 pub mod go_strconv;
 pub mod go_time;
