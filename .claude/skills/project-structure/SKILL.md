@@ -31,7 +31,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/network/         slot.rs (netns, veth, tap, host REDIRECTs per slot; HostSlots), pool.rs (NetworkPool: 32 new,
                        100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
                        leaked namespaces), firewall.rs (nftables slot-firewall: sets, DSCP, EgressRules),
-                       settings.rs (SANDBOX_* network env)
+                       settings.rs (SANDBOX_* network env), prerequisites.rs (NETWORK_VERSION=2 checks)
   src/tcpfirewall/     egress TCP proxy on 5016/5017/5018: rules.rs (domain/CIDR allow-deny), sniff.rs (HTTP Host,
                        TLS SNI), proxy.rs (SO_ORIGINAL_DST, 30s dial)
   src/hyperloop/       hyperloop server on 5010 for the guest: server.rs (/me, /logs), logs.rs (SourceSandbox)
@@ -57,8 +57,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
   src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset
-  src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (line tap with the
-                       FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
+  src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (FC output to tracing with a
+                       2000-byte tail and the FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
@@ -71,7 +71,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload;
                        snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff),
                        resume.rs (snapshot load over uffd)
-  src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution),
+  src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution,
+                       config/binaries.rs: kernel and Firecracker per version),
                        upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
                        node/checkpoint.rs (Checkpoint resume-fresh), lifecycle.rs (task per sandbox: commands, end_time
                        expiry, death watch), service.rs (SandboxService), registry.rs (Go map semantics: reserve,

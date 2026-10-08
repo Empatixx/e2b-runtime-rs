@@ -39,6 +39,8 @@ Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of t
 | 19 | Template base phase (M14) | OCI pull with go-containerregistry texts, moby-like untar with whiteouts, overlayfs + rsync into ext4, upstream injected files byte for byte, provisioning console scan, Go kernel args, base layer upload and index |
 | 20 | Template steps (M15) | RUN, ENV/ARG, WORKDIR, USER, COPY/ADD with upstream scripts and error texts, the default user phase from v2.1.0, sticky force, layers resumed or cold-booted with an envd update, uploads in the background with the index written after landing |
 | 21 | Template finalize and optimize (M16) | finalize cold-boots the requested build id with the context's envd defaults, runs the embedded `configure.sh`, the start command in the background and the ready loop (2 s, 10 min, Go default ready commands), packs the CA cert bundle and uploads with `build_origin=template_build`; optimize resumes it twice and writes the intersected prefetch to `metadata.json`; the result carries the rootfs size and scheduling metadata |
+| 22 | Template ensurefreedisk | the resize-disk phase between the steps and finalize (env `BUILD_ENSURE_FREE_DISK_SPACE` stands in for the LaunchDarkly flag, default off): host-side ext4 grow over NBD, Go sizing and texts, filesystem-only layers without memory |
+| 23 | Backlog sweep (2026-10-08) | header versions refused, `delete_prefix` batched and empty prefixes refused per provider, multipart abort, a rate-limited GCS index write skipped with a warning, NBD flags without `SEND_FLUSH` and a flush answered with `not supported: Flush`, `MAX_SLOT` 32766, kernel and Firecracker per version under `HOST_KERNELS_DIR` / `FIRECRACKER_VERSIONS_DIR`, `TryAcquire` for fresh creates, gopsutil memory used, a pause fails when caching fails, envd bodies uncapped, `/init` omits an empty `envVars`, typed `metadata.json` in Go field order |
 | 18 | Shutdown | 15 s pause unless `ENVIRONMENT=local`, template builds drained with a 15 s consumer grace, `FORCE_STOP` |
 
 Also: cgroups are named `sbx-<id>-<random>` as upstream, so a same-id resume or checkpoint never shares the old sandbox's cgroup.
@@ -54,7 +56,9 @@ These paths are off by default upstream. We follow the default:
 - ClickHouse alternate endpoints are parsed and logged only;
 - resume-time envd live upgrade.
 
-Not ported yet: the `ensurefreedisk` template phase (`build-ensure-free-disk-space`, default false) and the envd `oom_kills` metric in envd-rs.
+Not ported yet: the envd `oom_kills` metric in envd-rs.
+
+One fragile spot: a rate-limited GCS write is recognised by object_store's `Server returned non-2xx status code: 429` text, because its error types are private.
 
 ## Deliberate rulings where Go is nondeterministic
 
