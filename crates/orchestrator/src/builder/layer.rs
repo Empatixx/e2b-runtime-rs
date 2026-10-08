@@ -179,15 +179,24 @@ impl LayerExecutor<'_> {
 
     async fn create_sandbox(&self, build: &LayerBuild<'_>, source: &LayerSource) -> Result<Sandbox, BuildError> {
         let sandbox_id = new_sandbox_id();
-        let layer = LayerSandbox {
-            source,
-            sandbox_id: &sandbox_id,
-            template_id: self.template_id,
-            firecracker_version: &self.env.config.firecracker_version,
-        };
+        let layer = self.layer_sandbox(source, &sandbox_id);
         match build.creator {
             SandboxCreator::Resume => self.resume(&layer).await,
             SandboxCreator::ColdBoot => self.cold_boot(&layer, build).await,
+        }
+    }
+
+    pub async fn resume_source(&self, source: &LayerSource) -> Result<Sandbox, BuildError> {
+        let sandbox_id = new_sandbox_id();
+        self.resume(&self.layer_sandbox(source, &sandbox_id)).await
+    }
+
+    fn layer_sandbox<'s>(&'s self, source: &'s LayerSource, sandbox_id: &'s str) -> LayerSandbox<'s> {
+        LayerSandbox {
+            source,
+            sandbox_id,
+            template_id: self.template_id,
+            firecracker_version: &self.env.config.firecracker_version,
         }
     }
 
@@ -285,12 +294,8 @@ impl LayerExecutor<'_> {
         node.cache_layer(&local, metadata.clone(), dir)
             .map_err(|e| format!("error adding snapshot to template cache: {e}"))?;
         self.log.push(LogLevel::Debug, format!("Uploading layer: {build_id}"));
-        let object_metadata = ObjectMetadata::default()
-            .with("team_id", self.team_id)
-            .with("template_id", self.template_id)
-            .with("build_origin", build_origin);
         self.uploads.start(
-            node.spawn_upload(local, object_metadata),
+            node.spawn_upload(local, self.object_metadata(build_origin)),
             LayerUpload {
                 index: self.index.clone(),
                 hash: hash.to_owned(),
@@ -299,6 +304,13 @@ impl LayerExecutor<'_> {
             },
         );
         Ok(())
+    }
+
+    pub fn object_metadata(&self, build_origin: &str) -> ObjectMetadata {
+        ObjectMetadata::default()
+            .with("team_id", self.team_id)
+            .with("template_id", self.template_id)
+            .with("build_origin", build_origin)
     }
 }
 

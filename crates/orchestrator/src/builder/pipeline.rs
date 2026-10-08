@@ -11,6 +11,7 @@ use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
 use super::phases::base::{BasePhase, BaseRequest, BaseSource};
 use super::phases::finalize::FinalizePhase;
+use super::phases::optimize::OptimizePhase;
 use super::phases::steps::{StepPhase, StepRole, StepsBuild, force_steps};
 use super::service::TemplateBuilder;
 use super::uploads::LayerUploads;
@@ -72,12 +73,13 @@ impl PhasePipeline {
         }
         phases.extend(step_phases(&steps, &config));
         phases.push(Box::new(FinalizePhase {
-            build: steps,
+            build: steps.clone(),
             build_id: config.build_id.clone(),
             start_command: config.start_command.clone(),
             ready_command: config.ready_command.clone(),
             context_defaults: template_v2,
         }));
+        phases.push(Box::new(OptimizePhase { build: steps }));
         Ok(phases)
     }
 }

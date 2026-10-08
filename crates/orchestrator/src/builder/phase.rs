@@ -81,6 +81,13 @@ impl BuildError {
         }
     }
 
+    pub fn detail(&self) -> &str {
+        match self {
+            BuildError::User { message, .. } => message,
+            BuildError::Internal(e) => e,
+        }
+    }
+
     pub fn reason(&self) -> TemplateBuildStatusReason {
         match self {
             BuildError::User { step, message, .. } => TemplateBuildStatusReason {

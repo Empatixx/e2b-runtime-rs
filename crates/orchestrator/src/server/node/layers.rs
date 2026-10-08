@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use uuid::Uuid;
 
 use super::Node;
@@ -9,9 +10,12 @@ use crate::block::overlay::Overlay;
 use crate::envd::{EnvdDefaults, EnvdInit};
 use crate::firecracker::version::supports_memfd;
 use crate::sandbox::config::SandboxBuilder;
+use crate::storage::backend::ObjectMetadata;
 use crate::storage::build::Build;
 use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
+
+const METADATA_FILE: &str = "metadata.json";
 
 pub struct LayerSource {
     pub template: Arc<Template>,
@@ -40,6 +44,25 @@ impl Node {
             snapfile,
             metadata,
         })
+    }
+
+    pub async fn put_layer_metadata(
+        &self,
+        source: &LayerSource,
+        metadata: &TemplateMetadata,
+        object_metadata: &ObjectMetadata,
+    ) -> Result<(), String> {
+        let json = metadata.to_json();
+        let local = source.snapfile.with_file_name(METADATA_FILE);
+        tokio::fs::write(&local, &json)
+            .await
+            .map_err(|e| format!("failed to write local metadata {}: {e}", local.display()))?;
+        self.storage
+            .put_with(&source.build.paths().metadata(), Bytes::from(json), object_metadata)
+            .await
+            .map_err(|e| format!("failed to write metadata: {e}"))?;
+        source.template.update_metadata(metadata.clone());
+        Ok(())
     }
 
     pub fn resume_layer(&self, layer: &LayerSandbox) -> Result<SandboxBuilder, String> {

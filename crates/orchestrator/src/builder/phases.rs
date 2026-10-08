@@ -1,5 +1,6 @@
 pub mod base;
 pub mod finalize;
+pub mod optimize;
 pub mod steps;
 
 use std::sync::Arc;
