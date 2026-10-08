@@ -12,7 +12,7 @@ use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
 use super::retry::Failure;
 use super::status::NodeStatus;
-use super::uploads::Uploads;
+use super::uploads::{Outcome, Uploads};
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
@@ -47,6 +47,7 @@ pub struct Node {
     kernel: PathBuf,
     work_dir: PathBuf,
     envd_timeout: Duration,
+    build_cache_max_usage: f64,
 }
 
 pub struct Lifetime {
@@ -74,12 +75,14 @@ impl Node {
             kernel: config.kernel.clone(),
             work_dir: config.work_dir.clone(),
             envd_timeout: config.envd_timeout,
+            build_cache_max_usage: config.build_cache_max_usage,
         })
     }
 
     pub fn start_background(&self) {
         self.network.start();
         tokio::spawn(self.templates.clone().run_eviction());
+        tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }
 
     pub async fn pause_locally(&self, sandbox: Sandbox, build_id: Uuid) -> Result<LocalSnapshot, String> {
@@ -94,6 +97,7 @@ impl Node {
     pub fn upload(&self, local: LocalSnapshot) {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
+        let store = self.store.clone();
         let attempt = move || {
             let local = local.clone();
             let storage = storage.clone();
@@ -107,6 +111,9 @@ impl Node {
         self.uploads
             .start(build.build_id, parents(&build), attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
+                if outcome == Outcome::Landed {
+                    store.unpin(build.build_id);
+                }
             });
     }
 

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::chunker::Chunker;
@@ -40,10 +42,44 @@ struct DiffKey {
     artifact: Artifact,
 }
 
+pub const DIFF_EXPIRATION: Duration = Duration::from_secs(25 * 60 * 60);
+pub const EVICTION_DELAY: Duration = Duration::from_secs(60);
+const EVICTION_TICK: Duration = Duration::from_secs(1);
+
+type ChunkerCell = Arc<OnceCell<Arc<Chunker>>>;
+
 pub struct DiffStore {
     storage: Storage,
     cache_dir: PathBuf,
-    chunkers: Mutex<HashMap<DiffKey, Arc<OnceCell<Arc<Chunker>>>>>,
+    entries: Mutex<HashMap<DiffKey, Entry>>,
+}
+
+struct Entry {
+    cell: ChunkerCell,
+    expires: Instant,
+    pinned: bool,
+    doomed: Option<Instant>,
+}
+
+impl Entry {
+    fn new(cell: ChunkerCell, pinned: bool) -> Self {
+        Self {
+            cell,
+            expires: Instant::now() + DIFF_EXPIRATION,
+            pinned,
+            doomed: None,
+        }
+    }
+
+    fn touch(&mut self) -> ChunkerCell {
+        self.expires = Instant::now() + DIFF_EXPIRATION;
+        self.doomed = None;
+        self.cell.clone()
+    }
+
+    fn is_gone(&self, now: Instant) -> bool {
+        !self.pinned && (self.expires <= now || self.doomed.is_some_and(|doomed| doomed <= now))
+    }
 }
 
 impl DiffStore {
@@ -51,7 +87,7 @@ impl DiffStore {
         Self {
             storage,
             cache_dir,
-            chunkers: Mutex::default(),
+            entries: Mutex::default(),
         }
     }
 
@@ -63,20 +99,74 @@ impl DiffStore {
     pub fn add_local(&self, build_id: Uuid, artifact: Artifact, path: &Path) -> Result<(), String> {
         let chunker = Chunker::local(self.storage.clone(), &artifact.object(build_id), path)?;
         let cell = Arc::new(OnceCell::new_with(Some(Arc::new(chunker))));
-        self.chunkers.lock().insert(DiffKey { build_id, artifact }, cell);
+        self.entries
+            .lock()
+            .insert(DiffKey { build_id, artifact }, Entry::new(cell, true));
         Ok(())
     }
 
-    fn cell(&self, key: DiffKey) -> Arc<OnceCell<Arc<Chunker>>> {
-        self.chunkers.lock().entry(key).or_default().clone()
+    pub fn unpin(&self, build_id: Uuid) {
+        self.entries
+            .lock()
+            .iter_mut()
+            .filter(|(key, _)| key.build_id == build_id)
+            .for_each(|(_, entry)| entry.pinned = false);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().is_empty()
+    }
+
+    pub fn evict(&self, over_limit: bool) {
+        let now = Instant::now();
+        let mut entries = self.entries.lock();
+        if over_limit {
+            let next = entries
+                .values_mut()
+                .filter(|entry| !entry.pinned && entry.doomed.is_none())
+                .min_by_key(|entry| entry.expires);
+            if let Some(entry) = next {
+                entry.doomed = Some(now + EVICTION_DELAY);
+            }
+        }
+        entries.retain(|_, entry| !entry.is_gone(now));
+    }
+
+    pub async fn run_eviction(self: Arc<Self>, max_usage_percent: f64) {
+        let mut ticks = tokio::time::interval(EVICTION_TICK);
+        loop {
+            ticks.tick().await;
+            let over_limit = disk_usage_percent(&self.cache_dir).is_some_and(|usage| usage > max_usage_percent);
+            self.evict(over_limit);
+        }
+    }
+
+    fn cell(&self, key: DiffKey) -> ChunkerCell {
+        self.entries
+            .lock()
+            .entry(key)
+            .or_insert_with(|| Entry::new(Arc::default(), false))
+            .touch()
     }
 
     async fn open(&self, build_id: Uuid, artifact: Artifact) -> Result<Arc<Chunker>, String> {
-        let cache_path = self.cache_dir.join(format!("{build_id}-{}", artifact.name()));
+        let cache_path = self
+            .cache_dir
+            .join(format!("{build_id}-{}-{}", artifact.name(), Uuid::new_v4()));
         Chunker::open(self.storage.clone(), &artifact.object(build_id), &cache_path)
             .await
             .map(Arc::new)
     }
+}
+
+fn disk_usage_percent(path: &Path) -> Option<f64> {
+    let stats = nix::sys::statvfs::statvfs(path).ok()?;
+    let total = stats.blocks() as f64;
+    (total > 0.0).then(|| (total - stats.blocks_free() as f64) * 100.0 / total)
 }
 
 pub struct BuildFile {
@@ -245,5 +335,71 @@ mod tests {
             store.chunker(id(2), Artifact::Memfile).await.unwrap().fetch_attempts(),
             0
         );
+    }
+
+    async fn store_with_one_diff(dir: &tempfile::TempDir) -> Arc<DiffStore> {
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        storage
+            .put(&Artifact::Rootfs.object(id(1)), Bytes::from(vec![1; 4096]))
+            .await
+            .unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        store.chunker(id(1), Artifact::Rootfs).await.unwrap();
+        store
+    }
+
+    fn cache_files(dir: &tempfile::TempDir) -> usize {
+        std::fs::read_dir(dir.path().join("cache")).map_or(0, |files| files.count())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unused_diffs_expire_and_their_cache_files_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_one_diff(&dir).await;
+        assert_eq!(cache_files(&dir), 1);
+
+        tokio::time::advance(DIFF_EXPIRATION).await;
+        store.evict(false);
+
+        assert!(store.is_empty());
+        assert_eq!(cache_files(&dir), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pinned_local_diff_survives_until_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_one_diff(&dir).await;
+        let diff = dir.path().join("local.diff");
+        std::fs::write(&diff, vec![2; 4096]).unwrap();
+        store.add_local(id(2), Artifact::Rootfs, &diff).unwrap();
+
+        tokio::time::advance(DIFF_EXPIRATION).await;
+        store.evict(true);
+        tokio::time::advance(EVICTION_DELAY).await;
+        store.evict(true);
+        assert_eq!(store.len(), 1);
+
+        store.unpin(id(2));
+        store.evict(false);
+        assert!(store.is_empty());
+        assert!(!diff.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disk_pressure_dooms_the_soonest_expiring_diff_unless_it_is_used_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_one_diff(&dir).await;
+
+        store.evict(true);
+        tokio::time::advance(EVICTION_DELAY / 2).await;
+        store.chunker(id(1), Artifact::Rootfs).await.unwrap();
+        tokio::time::advance(EVICTION_DELAY).await;
+        store.evict(false);
+        assert_eq!(store.len(), 1);
+
+        store.evict(true);
+        tokio::time::advance(EVICTION_DELAY).await;
+        store.evict(false);
+        assert!(store.is_empty());
     }
 }

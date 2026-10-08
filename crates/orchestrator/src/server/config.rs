@@ -12,6 +12,7 @@ const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_SANDBOXES: i64 = 200;
 const DEFAULT_MAX_STARTING: usize = 3;
 const DEFAULT_DRAIN_SLEEP_MS: u64 = 15_000;
+const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 90.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {
@@ -27,7 +28,7 @@ pub enum StorageConfig {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeConfig {
     pub grpc_port: u16,
     pub node_id: String,
@@ -44,6 +45,7 @@ pub struct NodeConfig {
     pub max_sandboxes: i64,
     pub max_starting: usize,
     pub drain_sleep: Duration,
+    pub build_cache_max_usage: f64,
 }
 
 impl NodeConfig {
@@ -92,6 +94,8 @@ impl NodeConfig {
             drain_sleep: Duration::from_millis(
                 number(vars, "SHUTDOWN_DRAIN_SLEEP_MS")?.unwrap_or(DEFAULT_DRAIN_SLEEP_MS),
             ),
+            build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
+                .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
         })
     }
 

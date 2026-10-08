@@ -50,7 +50,7 @@ mod serve {
             tracing::info!("forced shutdown: stopping every sandbox");
             node.shutdown().await;
         }
-        drop(stop.send(()));
+        let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
         node.close().await;
         served
