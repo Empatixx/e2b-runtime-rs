@@ -39,6 +39,12 @@ pub struct Template {
     metadata: OnceCell<Result<TemplateMetadata, TemplateError>>,
 }
 
+impl fmt::Debug for Template {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Template").field("build_id", &self.build_id).finish()
+    }
+}
+
 impl Template {
     pub fn new(storage: Storage, build_id: Uuid, dir: PathBuf) -> Self {
         Self {

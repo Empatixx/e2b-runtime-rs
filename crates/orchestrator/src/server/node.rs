@@ -390,6 +390,7 @@ impl Node {
                 lifecycle,
                 host_ip: slot.host_ip(),
                 slot,
+                template: template.clone(),
                 scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
                 started_at: SystemTime::now(),
             },
@@ -399,7 +400,7 @@ impl Node {
 
     fn template_of(&self, config: &SandboxConfig) -> Result<Arc<Template>, Status> {
         Uuid::parse_str(&config.build_id)
-            .map(|build_id| self.templates.get(build_id))
+            .map(|build_id| self.templates.get_for(build_id, config.max_sandbox_length))
             .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))
     }
 

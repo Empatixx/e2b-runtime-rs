@@ -25,6 +25,14 @@ pub struct TemplateCache {
 struct Entry {
     template: Arc<Template>,
     expires: Instant,
+    ttl: Duration,
+}
+
+fn expiration(max_sandbox_length_hours: i64) -> Duration {
+    match max_sandbox_length_hours {
+        hours if hours > 0 => TEMPLATE_EXPIRATION.max(Duration::from_secs((hours as u64 + 1) * 3600)),
+        _ => TEMPLATE_EXPIRATION,
+    }
 }
 
 impl TemplateCache {
@@ -37,13 +45,19 @@ impl TemplateCache {
     }
 
     pub fn get(&self, build_id: Uuid) -> Arc<Template> {
-        let expires = Instant::now() + TEMPLATE_EXPIRATION;
+        self.get_for(build_id, 0)
+    }
+
+    pub fn get_for(&self, build_id: Uuid, max_sandbox_length_hours: i64) -> Arc<Template> {
+        let ttl = expiration(max_sandbox_length_hours);
         let mut entries = self.entries.lock();
         let entry = entries.entry(build_id).or_insert_with(|| Entry {
             template: self.fetched(build_id),
-            expires,
+            expires: Instant::now(),
+            ttl,
         });
-        entry.expires = expires;
+        entry.ttl = entry.ttl.max(ttl);
+        entry.expires = Instant::now() + entry.ttl;
         entry.template.clone()
     }
 
@@ -66,6 +80,7 @@ impl TemplateCache {
         let entry = Entry {
             template: template.clone(),
             expires: Instant::now() + TEMPLATE_EXPIRATION,
+            ttl: TEMPLATE_EXPIRATION,
         };
         if let Some(replaced) = self.entries.lock().insert(build_id, entry)
             && Arc::strong_count(&replaced.template) == 1
@@ -266,5 +281,20 @@ mod tests {
         assert_eq!(template.build().await.unwrap(), build);
         assert_eq!(template.metadata().await.unwrap(), metadata);
         assert_eq!(template.snapfile().await.unwrap(), dir.join("snapfile"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_sandbox_extends_the_template_ttl() {
+        let fixture = fixture();
+        let build = upload(&fixture.storage).await;
+        fixture.cache.get_for(build.build_id, 48).fetch().await;
+
+        tokio::time::advance(Duration::from_secs(30 * 3600)).await;
+        fixture.cache.evict_expired();
+        assert_eq!(fixture.cache.len(), 1);
+
+        tokio::time::advance(Duration::from_secs(20 * 3600)).await;
+        fixture.cache.evict_expired();
+        assert!(fixture.cache.is_empty());
     }
 }

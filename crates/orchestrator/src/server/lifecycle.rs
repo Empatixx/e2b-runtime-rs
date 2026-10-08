@@ -18,6 +18,7 @@ use crate::proto::{SandboxConfig, SchedulingMetadata};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::Snapshot;
 use crate::storage::backend::ObjectMetadata;
+use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
@@ -32,6 +33,7 @@ pub struct SandboxInfo {
     pub host_ip: Ipv4Addr,
     pub slot: Slot,
     pub scheduling: SchedulingMetadata,
+    pub template: Arc<Template>,
     pub started_at: SystemTime,
 }
 
