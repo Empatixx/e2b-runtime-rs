@@ -173,3 +173,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Azure connection strings are split into `AccountName`/`AccountKey`/`BlobEndpoint`; SAS signing is object_store's, not upstream's user-delegation fallback with its error texts | template build |
 | `delete_prefix` with an empty prefix lists the whole bucket; upstream S3/Azure refuse with "refusing to delete objects with an empty prefix" | template build |
 | Base hash `cmdline:` and `cpu-template:` keys are not added; upstream takes them from feature flags that default to empty | template build |
+| The Docker Hub `AZURE_ACR` remote repository (ACR token exchange with DefaultAzureCredential) is not ported; startup fails with a "not ported" error | template build |
+| ECR tokens use static env credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, `AWS_REGION`); upstream's default AWS config also reads profiles and instance roles | template build |
+| The registry client does not refresh a bearer token on a mid-pull 401 and has no `http` fallback for insecure registries, both of which go-containerregistry does | template build |

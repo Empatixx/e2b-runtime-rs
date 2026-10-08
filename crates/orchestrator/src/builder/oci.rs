@@ -1,7 +1,12 @@
+pub mod auth;
 pub mod copy;
+pub mod ecr;
 #[cfg(target_os = "linux")]
 pub mod export;
 #[cfg(target_os = "linux")]
 pub mod overlay_mount;
+pub mod pull;
+pub mod reference;
+pub mod registry;
 #[cfg(target_os = "linux")]
 pub mod untar;

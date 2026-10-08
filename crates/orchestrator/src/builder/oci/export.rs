@@ -1,9 +1,12 @@
-use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use flate2::read::GzDecoder;
+use tokio_util::io::{StreamReader, SyncIoBridge};
 
+use super::pull::PulledImage;
+use super::registry::RegistrySession;
 use super::untar::untar;
 use crate::builder::logs::ScopedLog;
 use crate::go_humanize::bytes;
@@ -12,17 +15,33 @@ use crate::proto::LogLevel;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerSource {
-    File(PathBuf),
     Bytes(Vec<u8>),
+    Remote {
+        session: Arc<RegistrySession>,
+        digest: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageLayer {
     pub digest: String,
     pub size: u64,
     pub source: LayerSource,
+}
+
+pub fn remote_layers(image: &PulledImage) -> Vec<ImageLayer> {
+    image
+        .layers()
+        .iter()
+        .map(|layer| ImageLayer {
+            digest: layer.digest.clone(),
+            size: layer.size,
+            source: LayerSource::Remote {
+                session: image.session.clone(),
+                digest: layer.digest.clone(),
+            },
+        })
+        .collect()
 }
 
 pub async fn create_export(log: &ScopedLog<'_>, layers: Vec<ImageLayer>, path: &Path) -> Result<Vec<PathBuf>, String> {
@@ -37,7 +56,7 @@ pub async fn create_export(log: &ScopedLog<'_>, layers: Vec<ImageLayer>, path: &
             );
             let layer_path = path.join(format!("layer-{index}-{}", layer.digest.replace(':', "-")));
             let target = layer_path.clone();
-            let task = tokio::task::spawn_blocking(move || extract(index, &layer.source, &target));
+            let task = tokio::spawn(extract(index, layer.source, target));
             (layer_path, task)
         })
         .collect();
@@ -58,17 +77,33 @@ pub async fn create_export(log: &ScopedLog<'_>, layers: Vec<ImageLayer>, path: &
     Ok(paths)
 }
 
-fn extract(index: usize, source: &LayerSource, target: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(target).map_err(|e| format!("failed to create directory for layer {index}: {e}"))?;
-    let reader = uncompressed(source).map_err(|e| format!("failed to get uncompressed layer {index}: {e}"))?;
-    untar(reader, target).map_err(|e| format!("failed to untar layer {index}: {e}"))
+async fn extract(index: usize, source: LayerSource, target: PathBuf) -> Result<(), String> {
+    tokio::fs::create_dir_all(&target)
+        .await
+        .map_err(|e| format!("failed to create directory for layer {index}: {e}"))?;
+    let raw = open(source)
+        .await
+        .map_err(|e| format!("failed to get uncompressed layer {index}: {e}"))?;
+    tokio::task::spawn_blocking(move || {
+        let reader = uncompressed(raw).map_err(|e| format!("failed to get uncompressed layer {index}: {e}"))?;
+        untar(reader, &target).map_err(|e| format!("failed to untar layer {index}: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-fn uncompressed(source: &LayerSource) -> io::Result<Box<dyn Read + Send>> {
-    let mut raw: Box<dyn Read + Send> = match source {
-        LayerSource::File(path) => Box::new(BufReader::new(File::open(path)?)),
-        LayerSource::Bytes(bytes) => Box::new(io::Cursor::new(bytes.clone())),
-    };
+async fn open(source: LayerSource) -> io::Result<Box<dyn Read + Send>> {
+    match source {
+        LayerSource::Bytes(bytes) => Ok(Box::new(io::Cursor::new(bytes))),
+        LayerSource::Remote { session, digest } => session
+            .blob_stream(&digest)
+            .await
+            .map(|stream| Box::new(SyncIoBridge::new(StreamReader::new(stream))) as Box<dyn Read + Send>)
+            .map_err(|e| io::Error::other(e.to_string())),
+    }
+}
+
+fn uncompressed(mut raw: Box<dyn Read + Send>) -> io::Result<Box<dyn Read + Send>> {
     let mut magic = [0u8; 4];
     let read = read_prefix(&mut raw, &mut magic)?;
     let prefixed: Box<dyn Read + Send> = Box::new(io::Cursor::new(magic[..read].to_vec()).chain(raw));
