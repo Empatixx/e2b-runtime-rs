@@ -1,4 +1,5 @@
 pub mod base;
+pub mod ensure_free_disk;
 pub mod finalize;
 pub mod optimize;
 pub mod steps;

@@ -48,6 +48,10 @@ pub fn finalize_hash(previous: &str, configure_script: &str, cert_bundle_command
     hash_keys(previous, ["config-run-cmd", configure_script, cert_bundle_command])
 }
 
+pub fn ensure_free_disk_hash(previous: &str, free_disk_size_mb: i64) -> String {
+    hash_keys(previous, ["resize-disk", &free_disk_size_mb.to_string()])
+}
+
 pub fn optimize_hash(previous: &str) -> String {
     hash_keys(previous, ["optimize"])
 }
@@ -98,6 +102,8 @@ mod tests {
             sha("p;config-run-cmd;script;certs")
         );
         assert_eq!(optimize_hash("p"), sha("p;optimize"));
+        assert_eq!(ensure_free_disk_hash("p", 2048), sha("p;resize-disk;2048"));
+        assert_eq!(ensure_free_disk_hash("p", 0), sha("p;resize-disk;0"));
         assert_eq!(template_source("b1"), "template:b1");
     }
 }
