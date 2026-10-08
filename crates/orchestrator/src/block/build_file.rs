@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
@@ -54,11 +56,24 @@ pub struct DiffStore {
     entries: Mutex<HashMap<DiffKey, Entry>>,
 }
 
+pub type Ready = Shared<BoxFuture<'static, Result<(), String>>>;
+
+pub fn ready_now() -> Ready {
+    futures::future::ready(Ok(())).boxed().shared()
+}
+
+#[derive(Clone)]
+struct Pending {
+    path: PathBuf,
+    ready: Ready,
+}
+
 struct Entry {
     cell: ChunkerCell,
     expires: Instant,
     pinned: bool,
     doomed: Option<Instant>,
+    pending: Option<Pending>,
 }
 
 impl Entry {
@@ -68,6 +83,7 @@ impl Entry {
             expires: Instant::now() + DIFF_EXPIRATION,
             pinned,
             doomed: None,
+            pending: None,
         }
     }
 
@@ -92,8 +108,27 @@ impl DiffStore {
     }
 
     pub async fn chunker(&self, build_id: Uuid, artifact: Artifact) -> Result<Arc<Chunker>, String> {
-        let cell = self.cell(DiffKey { build_id, artifact });
-        cell.get_or_try_init(|| self.open(build_id, artifact)).await.cloned()
+        let (cell, pending) = self.cell(DiffKey { build_id, artifact });
+        cell.get_or_try_init(|| async {
+            match pending {
+                Some(pending) => {
+                    pending.ready.await?;
+                    Chunker::local(self.storage.clone(), &artifact.object(build_id), &pending.path).map(Arc::new)
+                }
+                None => self.open(build_id, artifact).await,
+            }
+        })
+        .await
+        .cloned()
+    }
+
+    pub fn add_local_when(&self, build_id: Uuid, artifact: Artifact, path: &Path, ready: Ready) {
+        let mut entry = Entry::new(Arc::default(), true);
+        entry.pending = Some(Pending {
+            path: path.to_path_buf(),
+            ready,
+        });
+        self.entries.lock().insert(DiffKey { build_id, artifact }, entry);
     }
 
     pub fn add_local(&self, build_id: Uuid, artifact: Artifact, path: &Path) -> Result<(), String> {
@@ -145,12 +180,10 @@ impl DiffStore {
         }
     }
 
-    fn cell(&self, key: DiffKey) -> ChunkerCell {
-        self.entries
-            .lock()
-            .entry(key)
-            .or_insert_with(|| Entry::new(Arc::default(), false))
-            .touch()
+    fn cell(&self, key: DiffKey) -> (ChunkerCell, Option<Pending>) {
+        let mut entries = self.entries.lock();
+        let entry = entries.entry(key).or_insert_with(|| Entry::new(Arc::default(), false));
+        (entry.touch(), entry.pending.clone())
     }
 
     async fn open(&self, build_id: Uuid, artifact: Artifact) -> Result<Arc<Chunker>, String> {
@@ -401,5 +434,32 @@ mod tests {
         tokio::time::advance(EVICTION_DELAY).await;
         store.evict(false);
         assert!(store.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pending_local_diff_is_read_only_after_it_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let diff = dir.path().join("memfile.diff");
+        let (done, ready) = tokio::sync::oneshot::channel::<()>();
+        let ready: Ready = async move { ready.await.map_err(|e| e.to_string()) }.boxed().shared();
+        store.add_local_when(id(4), Artifact::Memfile, &diff, ready);
+
+        let reading = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .chunker(id(4), Artifact::Memfile)
+                    .await
+                    .map(|chunker| chunker.size())
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!reading.is_finished());
+        std::fs::write(&diff, vec![3; 4096]).unwrap();
+        done.send(()).unwrap();
+
+        assert_eq!(reading.await.unwrap(), Ok(4096));
     }
 }

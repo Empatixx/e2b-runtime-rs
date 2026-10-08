@@ -7,13 +7,15 @@ use roaring::RoaringBitmap;
 use uuid::Uuid;
 
 use super::Sandbox;
+use crate::block::build_file::{Ready, ready_now};
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::server::MemoryServer;
-use crate::memory::snapshot::{GuestMemory, export_pages, memfile_pages};
+use crate::memory::snapshot::{GuestMemory, diff_metadata, export_pages, memfile_pages};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
+use futures::FutureExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -31,10 +33,20 @@ pub struct SnapshotFiles {
     pub rootfs: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct LocalSnapshot {
     pub snapshot: Snapshot,
     pub files: SnapshotFiles,
+    pub memfile_ready: Ready,
+}
+
+impl std::fmt::Debug for LocalSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSnapshot")
+            .field("snapshot", &self.snapshot)
+            .field("files", &self.files)
+            .finish()
+    }
 }
 
 struct Exported {
@@ -110,9 +122,10 @@ impl Sandbox {
         let files = SnapshotFiles::in_dir(dir);
         self.write(&client, pid, &files, build_id)
             .await
-            .map(|snapshot| LocalSnapshot {
+            .map(|(snapshot, memfile_ready)| LocalSnapshot {
                 snapshot,
                 files: files.clone(),
+                memfile_ready,
             })
             .inspect_err(|_| files.remove())
     }
@@ -123,16 +136,16 @@ impl Sandbox {
         pid: u32,
         files: &SnapshotFiles,
         build_id: Uuid,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<(Snapshot, Ready), String> {
         client.pause().await?;
         client.create_snapshot(&files.snapfile).await?;
         let pages = self.memory_pages(client).await?;
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
         let tracked_writes = pages.tracked_writes;
-        let memfile = self.export_memory(pages, pid, &files.memfile, build_id).await?;
+        let (memfile, memfile_ready) = self.export_memory(pages, pid, &files.memfile, build_id).await?;
         self.flush_disk().await?;
         let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
-        Ok(Snapshot {
+        let snapshot = Snapshot {
             build: Build {
                 build_id,
                 memfile: memfile.header,
@@ -142,7 +155,8 @@ impl Sandbox {
             memory_bytes,
             rootfs_bytes: rootfs.bytes,
             tracked_writes,
-        })
+        };
+        Ok((snapshot, memfile_ready))
     }
 
     async fn memory_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
@@ -187,7 +201,7 @@ impl Sandbox {
         pid: u32,
         path: &Path,
         build_id: Uuid,
-    ) -> Result<Exported, String> {
+    ) -> Result<(Exported, Ready), String> {
         let page_size = pages
             .regions
             .first()
@@ -195,19 +209,20 @@ impl Sandbox {
             .ok_or("firecracker reported no memory regions")?;
         let size = pages.regions.iter().map(|region| region.size).sum();
         let path = path.to_path_buf();
-        let memory = self
-            .resources
-            .memory
-            .as_ref()
-            .and_then(MemoryServer::memfd)
-            .map_or(GuestMemory::Process { pid }, GuestMemory::Memfd);
-        let diff = blocking("export memfile", move || {
-            let mut out = BufWriter::new(File::create(&path)?);
-            let diff = export_pages(&memory, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
-            out.flush().map(|()| diff)
-        })
-        .await?;
-        exported(&diff, &self.memory_parent(page_size, size)?, build_id)
+        let parent = self.memory_parent(page_size, size)?;
+        match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
+            Some(memfd) => {
+                let diff = diff_metadata(&pages.regions, &pages.dirty, &pages.empty)
+                    .map_err(|e| format!("export memfile: {e}"))?;
+                let ready = background_copy(GuestMemory::Memfd(memfd), pages, path);
+                Ok((exported(&diff, &parent, build_id)?, ready))
+            }
+            None => {
+                let memory = GuestMemory::Process { pid };
+                let diff = blocking("export memfile", move || write_pages(&memory, &pages, &path)).await?;
+                Ok((exported(&diff, &parent, build_id)?, ready_now()))
+            }
+        }
     }
 
     fn memory_parent(&self, page_size: u64, size: u64) -> Result<Header, String> {
@@ -241,6 +256,24 @@ impl Sandbox {
     }
 }
 
+fn write_pages(memory: &GuestMemory, pages: &MemoryPages, path: &Path) -> io::Result<DiffMetadata> {
+    let mut out = BufWriter::new(File::create(path)?);
+    let diff = export_pages(memory, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
+    out.flush().map(|()| diff)
+}
+
+fn background_copy(memory: GuestMemory, pages: MemoryPages, path: PathBuf) -> Ready {
+    let copy = tokio::task::spawn_blocking(move || write_pages(&memory, &pages, &path));
+    async move {
+        copy.await
+            .map_err(|e| format!("copy memfile from memfd: {e}"))?
+            .map(|_| ())
+            .map_err(|e| format!("copy memfile from memfd: {e}"))
+    }
+    .boxed()
+    .shared()
+}
+
 fn exported(diff: &DiffMetadata, parent: &Header, build_id: Uuid) -> Result<Exported, String> {
     Ok(Exported {
         header: diff.to_diff_header(parent, build_id)?,
@@ -260,6 +293,7 @@ async fn blocking(
 
 impl LocalSnapshot {
     pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
+        self.memfile_ready.clone().await?;
         let build = &self.snapshot.build;
         let paths = build.paths();
         let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());

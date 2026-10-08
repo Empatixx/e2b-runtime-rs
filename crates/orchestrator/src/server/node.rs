@@ -178,8 +178,12 @@ impl Node {
         let metadata_file = metadata_path(local);
         std::fs::write(&metadata_file, metadata.to_json())
             .map_err(|e| format!("write {}: {e}", metadata_file.display()))?;
-        self.store
-            .add_local(build_id, Artifact::Memfile, &local.files.memfile)?;
+        self.store.add_local_when(
+            build_id,
+            Artifact::Memfile,
+            &local.files.memfile,
+            local.memfile_ready.clone(),
+        );
         self.store.add_local(build_id, Artifact::Rootfs, &local.files.rootfs)?;
         self.templates.add_snapshot(
             local.snapshot.build.clone(),

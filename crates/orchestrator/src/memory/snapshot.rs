@@ -55,6 +55,22 @@ impl GuestMemory {
     }
 }
 
+pub fn diff_metadata(
+    regions: &[GuestRegion],
+    dirty: &RoaringBitmap,
+    empty: &RoaringBitmap,
+) -> io::Result<DiffMetadata> {
+    let page_size = regions
+        .first()
+        .map(|region| region.page_size)
+        .ok_or_else(|| io::Error::other("firecracker reported no memory regions"))?;
+    Ok(DiffMetadata {
+        dirty: dirty.clone(),
+        empty: empty - dirty,
+        block_size: page_size,
+    })
+}
+
 pub fn export_pages(
     memory: &GuestMemory,
     regions: &[GuestRegion],
