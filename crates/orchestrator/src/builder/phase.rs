@@ -139,7 +139,7 @@ async fn run_phase(log: &BuildLog, phase: &dyn Phase, source: &LayerResult) -> R
     phase.build(log, source, current).await
 }
 
-fn internal_context(context: &str, error: BuildError) -> BuildError {
+pub fn internal_context(context: &str, error: BuildError) -> BuildError {
     match error {
         BuildError::Internal(e) => BuildError::Internal(format!("{context}: {e}")),
         user => user,

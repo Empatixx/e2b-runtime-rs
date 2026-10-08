@@ -245,6 +245,8 @@ impl Node {
             .firecracker(&self.firecracker)
             .kernel(&self.kernel)
             .work_dir(self.work_dir.join(sandbox_id))
+            .hyperloop_ip(&self.orchestrator_ip)
+            .envd(self.build_envd(None))
     }
 
     pub fn layer_dir(&self, build_id: Uuid) -> PathBuf {

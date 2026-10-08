@@ -1,64 +1,33 @@
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use tokio::sync::mpsc::unbounded_channel;
 use uuid::Uuid;
 
 use super::{BasePhase, BaseSource};
 use crate::builder::ext4::{BLOCK_SIZE, Ext4};
+use crate::builder::layer::{
+    IO_ENGINE, LayerExecutor, MIN_ENVD_FOR_KVM_CLOCK, RESERVED_DISK_SPACE_MB, SandboxShape, new_sandbox_id,
+    sync_changes_to_disk,
+};
 use crate::builder::logs::ScopedLog;
 use crate::builder::oci::pull::{ImageConfig, parse_envs};
 use crate::builder::phase::{BuildError, Phase};
 use crate::builder::provision::wait_for_provisioning;
 use crate::builder::rootfs::{MB, RootfsRequest, create_ext4_filesystem};
 use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISION_RESULT_PATH, provision_script};
-use crate::builder::uploads::LayerUpload;
-use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
 use crate::go_exec::GoCommand;
-use crate::network::pool::SlotLease;
-use crate::network::slot::HostSlots;
 use crate::proto::LogLevel;
-use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
-use crate::sandbox::snapshot::LocalSnapshot;
-use crate::server::node::BuildNetwork;
-use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
 const BUILD_DIR_MODE: u32 = 0o777;
 const ROOTFS_FILE: &str = "rootfs.filesystem.build";
-const IO_ENGINE: &str = "Sync";
-const SYSTEMD_INIT: &str = "/sbin/init";
-const RESERVED_DISK_SPACE_MB: i64 = 256;
-const ENVD_WAIT: Duration = Duration::from_secs(60);
-const MIN_ENVD_FOR_KVM_CLOCK: &str = "0.2.11";
-const SYNC_COMMAND: &str = "/usr/bin/busybox sync";
-const BUILD_ORIGIN: &str = "template_build_cache";
-const SANDBOX_ID_LEN: usize = 20;
-const ROOT_USER: &str = "root";
 
 pub struct BaseBuild<'a> {
     pub phase: &'a BasePhase,
     pub log: &'a ScopedLog<'a>,
-}
-
-struct SlotHold {
-    network: BuildNetwork,
-    lease: SlotLease<HostSlots>,
-}
-
-impl SlotHold {
-    fn release(self) {
-        drop(self.network);
-        drop(self.lease);
-    }
-}
-
-struct HeldSlot {
-    builder: SandboxBuilder,
-    slot: SlotHold,
 }
 
 struct BuildDir {
@@ -150,9 +119,14 @@ impl BaseBuild<'_> {
 
     async fn provision(&self, rootfs: &Path) -> Result<(), BuildError> {
         let (console, lines) = unbounded_channel();
-        let held = self.build_slot("error creating sandbox").await?;
-        let sandbox = held
-            .builder
+        let sandbox_id = new_sandbox_id();
+        let slot = self
+            .executor()
+            .lease_slot(&sandbox_id, "error creating sandbox")
+            .await?;
+        let sandbox = self
+            .sandbox_builder(&sandbox_id)
+            .pooled_slot(slot.slot())
             .rootfs_file(rootfs)
             .init_path(BUSYBOX_INIT_PATH)
             .kernel_logs(true)
@@ -175,7 +149,7 @@ impl BaseBuild<'_> {
             .shut_down()
             .await
             .map_err(|e| BuildError::Internal(format!("error shutting down provisioned sandbox: {e}")))?;
-        held.slot.release();
+        slot.release();
         self.remove_result(rootfs).await
     }
 
@@ -188,44 +162,34 @@ impl BaseBuild<'_> {
         Ok(())
     }
 
-    async fn build_slot(&self, context: &str) -> Result<HeldSlot, BuildError> {
-        let node = &self.phase.env.node;
-        let lease = node
-            .network
-            .lease(None)
-            .await
-            .map_err(|e| BuildError::Internal(format!("{context}: {e}")))?;
-        let slot = lease
-            .slot()
-            .ok_or_else(|| BuildError::Internal(format!("{context}: no network slot")))?;
-        let (sandbox_id, builder) = self.sandbox_builder();
-        Ok(HeldSlot {
-            builder: builder.pooled_slot(slot),
-            slot: SlotHold {
-                network: node.assign_build_network(slot.host_ip(), &sandbox_id),
-                lease,
-            },
-        })
+    fn executor(&self) -> LayerExecutor<'_> {
+        LayerExecutor {
+            env: &self.phase.env,
+            index: &self.phase.index,
+            uploads: &self.phase.uploads,
+            log: self.log,
+            template_id: &self.phase.request.template_id,
+            team_id: &self.phase.request.team_id,
+        }
     }
 
-    fn sandbox_builder(&self) -> (String, SandboxBuilder) {
-        let id: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(SANDBOX_ID_LEN)
-            .collect();
-        let sandbox_id = format!("b{id}");
-        let builder = self
-            .phase
+    fn shape(&self) -> SandboxShape<'_> {
+        SandboxShape {
+            vcpus: self.phase.request.vcpus,
+            memory_mb: self.phase.request.memory_mb,
+            envd_version: &self.phase.request.envd_version,
+        }
+    }
+
+    fn sandbox_builder(&self, sandbox_id: &str) -> SandboxBuilder {
+        self.phase
             .env
             .node
-            .build_sandbox(&sandbox_id, &self.phase.request.template_id)
+            .build_sandbox(sandbox_id, &self.phase.request.template_id)
             .vcpus(self.phase.request.vcpus as u32)
             .memory_mib(self.phase.request.memory_mb as u32)
             .io_engine(IO_ENGINE)
-            .without_mmds();
-        (sandbox_id, builder)
+            .without_mmds()
     }
 
     async fn check_provisioned(&self, ext4: &Ext4) -> Result<(), BuildError> {
@@ -306,16 +270,19 @@ impl BaseBuild<'_> {
             .map_err(|e| BuildError::Internal(format!("create sandbox: pre-boot hook failed: {e}")))?;
         let base_build = Uuid::parse_str(&metadata.template.build_id)
             .map_err(|e| BuildError::Internal(format!("failed to parse build id: {e}")))?;
-        let held = self.build_slot("create sandbox").await?;
-        let mut sandbox = held
-            .builder
+        let executor = self.executor();
+        let sandbox_id = new_sandbox_id();
+        let slot = executor.lease_slot(&sandbox_id, "create sandbox").await?;
+        let builder = self
+            .phase
+            .env
+            .node
+            .build_sandbox(&sandbox_id, &self.phase.request.template_id);
+        let mut sandbox = executor
+            .boot_options(builder, &self.shape(), slot.slot())
             .memory_base(base_build)
             .rootfs_file(&ext4.file)
-            .init_path(SYSTEMD_INIT)
-            .kernel_logs(self.phase.env.development)
             .kvm_clock(kvm_clock)
-            .envd_timeout(ENVD_WAIT)
-            .skip_envd()
             .cold_boot()
             .await
             .map_err(|e| BuildError::Internal(format!("create sandbox: {e}")))?;
@@ -323,65 +290,11 @@ impl BaseBuild<'_> {
             let _ = sandbox.stop().await;
             return Err(BuildError::Internal(format!("wait for envd: {e}")));
         }
-        if let Err(e) = self.sync(&sandbox).await {
+        if let Err(e) = sync_changes_to_disk(sandbox.envd_address()).await {
             let _ = sandbox.stop().await;
             return Err(BuildError::Internal(format!("error running sync command: {e}")));
         }
-        let build_id = Uuid::parse_str(&metadata.template.build_id)
-            .map_err(|e| BuildError::Internal(format!("pause and upload: error processing vm: {e}")))?;
-        let dir = self.phase.env.node.layer_dir(build_id);
-        let local = sandbox
-            .pause_into(&dir, build_id)
-            .await
-            .map_err(|e| BuildError::Internal(format!("pause and upload: error processing vm: {e}")))?;
-        held.slot.release();
-        self.upload(local, dir, metadata, hash).await
-    }
-
-    async fn sync(&self, sandbox: &Sandbox) -> Result<(), String> {
-        run_command(
-            sandbox.envd_address(),
-            SYNC_COMMAND,
-            &CommandContext {
-                user: ROOT_USER.to_owned(),
-                ..CommandContext::default()
-            },
-            |_, _| {},
-        )
-        .await
-    }
-
-    async fn upload(
-        &self,
-        local: LocalSnapshot,
-        dir: PathBuf,
-        metadata: TemplateMetadata,
-        hash: &str,
-    ) -> Result<TemplateMetadata, BuildError> {
-        let node = &self.phase.env.node;
-        let build_id = &metadata.template.build_id;
-        self.log
-            .push(LogLevel::Debug, format!("Adding layer to cache: {build_id}"));
-        node.cache_layer(&local, metadata.clone(), dir).map_err(|e| {
-            BuildError::Internal(format!(
-                "pause and upload: error adding snapshot to template cache: {e}"
-            ))
-        })?;
-        self.log.push(LogLevel::Debug, format!("Uploading layer: {build_id}"));
-        let object_metadata = ObjectMetadata::default()
-            .with("team_id", &self.phase.request.team_id)
-            .with("template_id", &self.phase.request.template_id)
-            .with("build_origin", BUILD_ORIGIN);
-        self.phase.uploads.start(
-            node.spawn_upload(local, object_metadata),
-            LayerUpload {
-                index: self.phase.index.clone(),
-                hash: hash.to_owned(),
-                build_id: build_id.clone(),
-                fields: self.log.fields.clone(),
-            },
-        );
-        Ok(metadata)
+        executor.pause_and_upload(sandbox, slot, hash, metadata).await
     }
 }
 

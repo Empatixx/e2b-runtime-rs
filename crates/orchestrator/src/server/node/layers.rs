@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::Node;
 use crate::block::build_file::{Artifact, BuildFile};
 use crate::block::overlay::Overlay;
+use crate::envd::EnvdInit;
 use crate::firecracker::version::supports_memfd;
 use crate::sandbox::config::SandboxBuilder;
 use crate::storage::build::Build;
@@ -53,7 +54,16 @@ impl Node {
             .rootfs(self.layer_overlay(&layer.source.build, &work_dir)?)
             .memfile(memfile)
             .use_memfd(self.use_memfd && supports_memfd(layer.firecracker_version))
-            .hyperloop_ip(&self.orchestrator_ip))
+            .envd(self.build_envd(super::default_user(Some(&layer.source.metadata)))))
+    }
+
+    pub fn build_envd(&self, default_user: Option<String>) -> EnvdInit {
+        EnvdInit {
+            default_user,
+            lifecycle_id: Some(Uuid::new_v4().to_string()),
+            hyperloop_ip: Some(self.orchestrator_ip.clone()),
+            ..EnvdInit::default()
+        }
     }
 
     pub fn cold_boot_layer(&self, layer: &LayerSandbox) -> Result<SandboxBuilder, String> {
