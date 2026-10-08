@@ -39,6 +39,27 @@ pub struct StepsBuild {
     pub cancel: CancellationToken,
 }
 
+impl StepsBuild {
+    pub fn executor<'a>(&'a self, log: &'a ScopedLog<'a>) -> LayerExecutor<'a> {
+        LayerExecutor {
+            env: &self.env,
+            index: &self.index,
+            uploads: &self.uploads,
+            log,
+            template_id: &self.template_id,
+            team_id: &self.team_id,
+        }
+    }
+
+    pub fn shape(&self) -> SandboxShape<'_> {
+        SandboxShape {
+            vcpus: self.vcpus,
+            memory_mb: self.memory_mb,
+            envd_version: &self.envd_version,
+        }
+    }
+}
+
 pub enum StepRole {
     Step { number: usize, total: usize },
     DefaultUser,
@@ -83,17 +104,6 @@ impl StepPhase {
             phase: STEPS_PHASE,
             step_type: self.step.r#type.clone(),
             step_number: Some(self.number()),
-        }
-    }
-
-    fn executor<'a>(&'a self, log: &'a ScopedLog<'a>) -> LayerExecutor<'a> {
-        LayerExecutor {
-            env: &self.build.env,
-            index: &self.build.index,
-            uploads: &self.build.uploads,
-            log,
-            template_id: &self.build.template_id,
-            team_id: &self.build.team_id,
         }
     }
 
@@ -151,16 +161,13 @@ impl StepPhase {
             hash: &current.hash,
             update_envd: source.cached,
             creator,
-            shape: SandboxShape {
-                vcpus: self.build.vcpus,
-                memory_mb: self.build.memory_mb,
-                envd_version: &self.build.envd_version,
-            },
+            shape: self.build.shape(),
             envd_defaults: EnvdDefaults::default(),
             reserved_blocks: source.cached,
             build_origin: BUILD_CACHE_ORIGIN,
         };
         let metadata = self
+            .build
             .executor(log)
             .build_layer(layer, |envd, metadata| self.execute(log, envd, metadata))
             .await

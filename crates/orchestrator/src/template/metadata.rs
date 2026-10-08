@@ -28,7 +28,7 @@ pub struct TemplateMetadata {
     )]
     pub cmdline_args: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub balloon: Option<Value>,
+    pub balloon: Option<Balloon>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_template: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +54,12 @@ pub struct Start {
     pub ready_command: String,
     #[serde(default)]
     pub context: Context,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Balloon {
+    pub reporting: bool,
+    pub hinting: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +140,7 @@ impl TemplateMetadata {
             from_image: self.from_image.clone(),
             from_template: self.from_template.clone(),
             cmdline_args: self.cmdline_args.clone(),
-            balloon: self.balloon.clone(),
+            balloon: self.balloon,
             cpu_template: self.cpu_template.clone(),
             build_cpu_template: self.build_cpu_template.clone(),
             ..Self::default()

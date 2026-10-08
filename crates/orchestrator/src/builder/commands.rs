@@ -8,10 +8,12 @@ pub mod workdir;
 use std::future::Future;
 use std::net::SocketAddr;
 
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::logs::ScopedLog;
-use super::sandbox_command::{CommandLog, ROOT, run_logged};
+use super::sandbox_command::{CommandLog, ROOT, run_logged, run_logged_confirmed};
 use crate::envd::process::CommandContext;
 use crate::proto::{LogLevel, TemplateStep};
 use crate::storage::backend::Storage;
@@ -19,6 +21,7 @@ use crate::template::metadata::Context;
 
 pub const PROCESS_CANCELLED: &str = "context: context canceled";
 pub const REQUEST_CANCELLED: &str = "context canceled";
+pub const PROCESS_DEADLINE: &str = "context: context deadline exceeded";
 
 #[derive(Clone, Copy)]
 pub struct CommandRun<'a> {
@@ -33,13 +36,36 @@ pub struct CommandRun<'a> {
 
 impl CommandRun<'_> {
     pub async fn logged(&self, command: &str, context: &CommandContext) -> Result<(), String> {
-        let output = CommandLog {
+        self.until_cancelled(
+            run_logged(self.envd, command, context, &self.output()),
+            PROCESS_CANCELLED,
+        )
+        .await
+    }
+
+    pub async fn logged_until(&self, deadline: Instant, command: &str, context: &CommandContext) -> Result<(), String> {
+        tokio::time::timeout_at(deadline, self.logged(command, context))
+            .await
+            .unwrap_or_else(|_| Err(PROCESS_DEADLINE.to_owned()))
+    }
+
+    pub async fn logged_confirmed(
+        &self,
+        command: &str,
+        context: &CommandContext,
+        started: oneshot::Sender<()>,
+    ) -> Result<(), String> {
+        let output = self.output();
+        let run = run_logged_confirmed(self.envd, command, context, started, &output);
+        self.until_cancelled(run, PROCESS_CANCELLED).await
+    }
+
+    fn output(&self) -> CommandLog<'_> {
+        CommandLog {
             log: self.log,
             level: self.level,
             id: self.prefix,
-        };
-        self.until_cancelled(run_logged(self.envd, command, context, &output), PROCESS_CANCELLED)
-            .await
+        }
     }
 
     pub async fn until_cancelled<T>(

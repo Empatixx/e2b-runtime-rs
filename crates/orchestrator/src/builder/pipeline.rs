@@ -10,6 +10,7 @@ use super::layer::envd_version;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
 use super::phases::base::{BasePhase, BaseRequest, BaseSource};
+use super::phases::finalize::FinalizePhase;
 use super::phases::steps::{StepPhase, StepRole, StepsBuild, force_steps};
 use super::service::TemplateBuilder;
 use super::uploads::LayerUploads;
@@ -64,11 +65,19 @@ impl PhasePipeline {
             envd_version: envd_version.to_owned(),
             cancel: cancel.clone(),
         });
+        let template_v2 = with_default_user(request.version.as_deref().unwrap_or_default())?;
         let mut phases: Vec<Box<dyn Phase>> = vec![Box::new(base)];
-        if with_default_user(request.version.as_deref().unwrap_or_default())? {
+        if template_v2 {
             phases.push(Box::new(StepPhase::default_user(steps.clone(), config.force)));
         }
         phases.extend(step_phases(&steps, &config));
+        phases.push(Box::new(FinalizePhase {
+            build: steps,
+            build_id: config.build_id.clone(),
+            start_command: config.start_command.clone(),
+            ready_command: config.ready_command.clone(),
+            context_defaults: template_v2,
+        }));
         Ok(phases)
     }
 }

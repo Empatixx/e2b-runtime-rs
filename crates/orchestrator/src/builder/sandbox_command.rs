@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
 
+use tokio::sync::oneshot;
+
 use super::logs::ScopedLog;
-use crate::envd::process::{CommandContext, run_command};
+use crate::envd::process::{CommandContext, run_command, run_command_confirmed};
 use crate::proto::LogLevel;
 
 pub struct CommandLog<'a> {
@@ -17,6 +19,20 @@ pub async fn run_logged(
     output: &CommandLog<'_>,
 ) -> Result<(), String> {
     run_command(envd, command, context, |stdout, stderr| {
+        log_stream(output, "stdout", stdout);
+        log_stream(output, "stderr", stderr);
+    })
+    .await
+}
+
+pub async fn run_logged_confirmed(
+    envd: SocketAddr,
+    command: &str,
+    context: &CommandContext,
+    started: oneshot::Sender<()>,
+    output: &CommandLog<'_>,
+) -> Result<(), String> {
+    run_command_confirmed(envd, command, context, started, |stdout, stderr| {
         log_stream(output, "stdout", stdout);
         log_stream(output, "stderr", stderr);
     })
