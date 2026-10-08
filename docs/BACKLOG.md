@@ -21,8 +21,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The `locate` out-of-bounds text lacks Go's colon (`size: N`) | any |
 | `Header::encode` writes any version (Go refuses outside 1..=3) | M7 |
 | `delete_prefix` deletes one object at a time (`delete_stream` would batch) | M7 |
-| CI wait loops in `scripts/ci/*.sh` have no timeout | any |
-| `rustfs/rustfs:latest` is not pinned in CI | any |
+| CI wait loops in `scripts/ci/kvm-spike.sh` have no timeout | any |
 | The S3 test name and credentials still say "minio" | any |
 
 ## Orchestrator: block layer (M2)
