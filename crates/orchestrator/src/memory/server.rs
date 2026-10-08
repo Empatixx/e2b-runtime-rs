@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +28,7 @@ pub struct MemoryServer {
     state: Arc<SharedState>,
     uffd: Arc<AsyncFd<Uffd>>,
     regions: Regions,
+    memfd: Option<Arc<File>>,
 }
 
 #[derive(Clone)]
@@ -79,7 +81,7 @@ struct Serving {
 }
 
 impl MemoryServer {
-    pub fn start(uffd: Uffd, regions: Regions, memfile: Arc<BuildFile>) -> io::Result<Self> {
+    pub fn start(uffd: Uffd, regions: Regions, memfile: Arc<BuildFile>, memfd: Option<File>) -> io::Result<Self> {
         let state = Arc::new(SharedState::new(regions.page_size()));
         let uffd = Arc::new(AsyncFd::new(uffd)?);
         let serving = Serving {
@@ -102,7 +104,12 @@ impl MemoryServer {
             state,
             uffd,
             regions,
+            memfd: memfd.map(Arc::new),
         })
+    }
+
+    pub fn memfd(&self) -> Option<Arc<File>> {
+        self.memfd.clone()
     }
 
     pub fn page_size(&self) -> u64 {
@@ -364,7 +371,7 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let server = MemoryServer::start(uffd, regions, memfile).unwrap();
+        let server = MemoryServer::start(uffd, regions, memfile, None).unwrap();
         Fixture {
             _dir: dir,
             pages,
@@ -566,7 +573,7 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let server = MemoryServer::start(pages.register().unwrap(), regions, memfile).unwrap();
+        let server = MemoryServer::start(pages.register().unwrap(), regions, memfile, None).unwrap();
 
         let stuck_address = pages.address();
         let stuck = std::thread::spawn(move || Pages::read_byte(stuck_address));

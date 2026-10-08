@@ -148,6 +148,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         drain_sleep: Duration::ZERO,
         build_cache_max_usage: 90.0,
         prefetch_from_trace: true,
+        use_memfd: true,
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());

@@ -1,4 +1,7 @@
+use std::fs::File;
 use std::io::{self, IoSliceMut, Write};
+use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 
 use nix::sys::uio::{RemoteIoVec, process_vm_readv};
 use nix::unistd::Pid;
@@ -28,8 +31,32 @@ pub fn memfile_pages(regions: &[GuestRegion], indices: &RoaringBitmap) -> Roarin
         .collect()
 }
 
+pub enum GuestMemory {
+    Process { pid: u32 },
+    Memfd(Arc<File>),
+}
+
+impl GuestMemory {
+    fn copy(
+        &self,
+        regions: &[GuestRegion],
+        pages: &RoaringBitmap,
+        page_size: u64,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        match self {
+            GuestMemory::Process { pid } => runs(regions, pages, page_size)?
+                .iter()
+                .try_for_each(|run| copy_run(*pid, run, out)),
+            GuestMemory::Memfd(memfd) => offset_runs(pages, page_size)
+                .iter()
+                .try_for_each(|run| copy_memfd_run(memfd, run, out)),
+        }
+    }
+}
+
 pub fn export_pages(
-    pid: u32,
+    memory: &GuestMemory,
     regions: &[GuestRegion],
     dirty: &RoaringBitmap,
     empty: &RoaringBitmap,
@@ -39,9 +66,7 @@ pub fn export_pages(
         .first()
         .map(|region| region.page_size)
         .ok_or_else(|| io::Error::other("firecracker reported no memory regions"))?;
-    runs(regions, dirty, page_size)?
-        .iter()
-        .try_for_each(|run| copy_run(pid, run, out))?;
+    memory.copy(regions, dirty, page_size, out)?;
     Ok(DiffMetadata {
         dirty: dirty.clone(),
         empty: empty - dirty,
@@ -75,6 +100,30 @@ fn runs(regions: &[GuestRegion], pages: &RoaringBitmap, page_size: u64) -> io::R
         }
         runs
     }))
+}
+
+fn offset_runs(pages: &RoaringBitmap, page_size: u64) -> Vec<Run> {
+    pages
+        .iter()
+        .map(|page| u64::from(page) * page_size)
+        .fold(Vec::new(), |mut runs: Vec<Run>, offset| {
+            match runs.last_mut() {
+                Some(run) if run.address + run.length == offset && run.length + page_size <= MAX_RUN_BYTES => {
+                    run.length += page_size
+                }
+                _ => runs.push(Run {
+                    address: offset,
+                    length: page_size,
+                }),
+            }
+            runs
+        })
+}
+
+fn copy_memfd_run(memfd: &File, run: &Run, out: &mut impl Write) -> io::Result<()> {
+    let mut bytes = vec![0u8; run.length as usize];
+    memfd.read_exact_at(&mut bytes, run.address)?;
+    out.write_all(&bytes)
 }
 
 fn copy_run(pid: u32, run: &Run, out: &mut impl Write) -> io::Result<()> {
@@ -121,7 +170,16 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        let metadata = export_pages(std::process::id(), &[region], &set(&[0, 2]), &set(&[1, 2]), &mut out).unwrap();
+        let metadata = export_pages(
+            &GuestMemory::Process {
+                pid: std::process::id(),
+            },
+            &[region],
+            &set(&[0, 2]),
+            &set(&[1, 2]),
+            &mut out,
+        )
+        .unwrap();
 
         let expected = [vec![0x11; PAGE as usize], vec![0x22; PAGE as usize]].concat();
         assert!(out == expected, "exported bytes differ");
@@ -171,5 +229,30 @@ mod tests {
                 (0x10000 + 1600 * PAGE, PAGE)
             ]
         );
+    }
+
+    #[test]
+    fn exports_dirty_pages_from_a_memfd_by_memfile_offset() {
+        let mut memfd = tempfile::tempfile().unwrap();
+        let content: Vec<u8> = (0..4u8).flat_map(|page| vec![page + 1; PAGE as usize]).collect();
+        std::io::Write::write_all(&mut memfd, &content).unwrap();
+        let region = GuestRegion {
+            base_host_virt_addr: 0x7000_0000,
+            size: 4 * PAGE,
+            offset: 0,
+            page_size: PAGE,
+        };
+        let mut out = Vec::new();
+
+        export_pages(
+            &GuestMemory::Memfd(Arc::new(memfd)),
+            &[region],
+            &set(&[1, 2]),
+            &set(&[]),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(out, [vec![2; PAGE as usize], vec![3; PAGE as usize]].concat());
     }
 }

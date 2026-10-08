@@ -29,6 +29,7 @@ pub struct SandboxConfig {
     pub envd: EnvdInit,
     pub envd_timeout: Duration,
     pub prefetch: Option<MemoryPrefetch>,
+    pub use_memfd: bool,
 }
 
 #[derive(Default)]
@@ -48,6 +49,7 @@ pub struct SandboxBuilder {
     envd: EnvdInit,
     envd_timeout: Option<Duration>,
     prefetch: Option<MemoryPrefetch>,
+    use_memfd: Option<bool>,
 }
 
 impl SandboxBuilder {
@@ -127,6 +129,11 @@ impl SandboxBuilder {
         self
     }
 
+    pub fn use_memfd(mut self, use_memfd: bool) -> Self {
+        self.use_memfd = Some(use_memfd);
+        self
+    }
+
     pub fn build(self) -> Result<SandboxConfig, String> {
         Ok(SandboxConfig {
             id: self.id.ok_or("id is required")?,
@@ -144,6 +151,7 @@ impl SandboxBuilder {
             envd: self.envd,
             envd_timeout: self.envd_timeout.unwrap_or(DEFAULT_ENVD_TIMEOUT),
             prefetch: self.prefetch,
+            use_memfd: self.use_memfd.unwrap_or(true),
         })
     }
 }

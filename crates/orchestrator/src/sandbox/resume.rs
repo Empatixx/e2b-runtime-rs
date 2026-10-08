@@ -39,7 +39,10 @@ impl Sandbox {
         let prefaulter = self.start_prefetch(memfile.clone());
         let client = self.launch_with_rootfs().await?;
         self.phases.mark("rootfs+firecracker");
-        let (loaded, served) = tokio::join!(client.load_snapshot(snapfile, &socket), serve_memory(listener, memfile));
+        let (loaded, served) = tokio::join!(
+            client.load_snapshot(snapfile, &socket, self.config.use_memfd),
+            serve_memory(listener, memfile)
+        );
         let started = served.map(|server| {
             if let Some(prefaulter) = prefaulter {
                 let _ = prefaulter.send(server.prefaulter());
@@ -49,6 +52,13 @@ impl Sandbox {
         all_ok([started, loaded]).map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
         self.phases.mark("load_snapshot");
         self.phases.note("faults", self.faults_served());
+        self.phases.note(
+            "memfd",
+            self.resources
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.memfd().is_some()),
+        );
         client.set_rate_limits().await?;
         client
             .resume()
@@ -126,5 +136,6 @@ fn point_link(link: &Path, target: &Path) -> io::Result<()> {
 
 async fn serve_memory(listener: UffdListener, memfile: Arc<BuildFile>) -> Result<MemoryServer, String> {
     let handshake = listener.accept(HANDSHAKE_TIMEOUT).await?;
-    MemoryServer::start(handshake.uffd, handshake.regions, memfile).map_err(|e| format!("start memory server: {e}"))
+    MemoryServer::start(handshake.uffd, handshake.regions, memfile, handshake.memfd)
+        .map_err(|e| format!("start memory server: {e}"))
 }

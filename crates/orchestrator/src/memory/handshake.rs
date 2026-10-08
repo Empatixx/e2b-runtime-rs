@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::{self, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -20,6 +21,7 @@ pub struct UffdListener {
 pub struct Handshake {
     pub uffd: Uffd,
     pub regions: Regions,
+    pub memfd: Option<File>,
 }
 
 impl UffdListener {
@@ -42,13 +44,16 @@ impl UffdListener {
             .await
             .map_err(|_| format!("uffd handshake: no message within {timeout:?}"))??;
         let regions = Regions::parse(&received.payload).map_err(|e| format!("uffd handshake: {e}"))?;
-        let uffd = received
-            .fds
-            .into_iter()
+        let mut fds = received.fds.into_iter();
+        let uffd = fds
             .next()
             .map(Uffd::from_fd)
             .ok_or("uffd handshake: no file descriptor")?;
-        Ok(Handshake { uffd, regions })
+        Ok(Handshake {
+            uffd,
+            regions,
+            memfd: fds.next().map(File::from),
+        })
     }
 }
 

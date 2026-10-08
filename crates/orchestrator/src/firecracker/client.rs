@@ -96,14 +96,18 @@ impl FirecrackerClient {
         .await
     }
 
-    pub async fn load_snapshot(&self, snapfile: &Path, uffd_socket: &Path) -> Result<(), String> {
+    pub async fn load_snapshot(&self, snapfile: &Path, uffd_socket: &Path, use_memfd: bool) -> Result<(), String> {
+        let mut backend = json!({ "backend_type": "Uffd", "backend_path": uffd_socket });
+        if use_memfd {
+            backend["use_memfd"] = json!(true);
+        }
         self.put(
             "/snapshot/load",
             json!({
                 "snapshot_path": snapfile,
                 "enable_diff_snapshots": false,
                 "resume_vm": false,
-                "mem_backend": { "backend_type": "Uffd", "backend_path": uffd_socket },
+                "mem_backend": backend,
             }),
         )
         .await
@@ -466,7 +470,11 @@ mod tests {
     async fn load_snapshot_uses_the_uffd_backend() {
         let calls = calls_after(Faults::default(), async |client| {
             client
-                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"))
+                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"), false)
+                .await
+                .unwrap();
+            client
+                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"), true)
                 .await
                 .unwrap();
         })
@@ -474,16 +482,28 @@ mod tests {
 
         assert_eq!(
             calls,
-            vec![call(
-                "PUT",
-                "/snapshot/load",
-                json!({
-                    "snapshot_path": "/run/sbx/snapfile",
-                    "enable_diff_snapshots": false,
-                    "resume_vm": false,
-                    "mem_backend": { "backend_type": "Uffd", "backend_path": "/run/sbx/uffd.sock" }
-                })
-            )]
+            vec![
+                call(
+                    "PUT",
+                    "/snapshot/load",
+                    json!({
+                        "snapshot_path": "/run/sbx/snapfile",
+                        "enable_diff_snapshots": false,
+                        "resume_vm": false,
+                        "mem_backend": { "backend_type": "Uffd", "backend_path": "/run/sbx/uffd.sock" }
+                    })
+                ),
+                call(
+                    "PUT",
+                    "/snapshot/load",
+                    json!({
+                        "snapshot_path": "/run/sbx/snapfile",
+                        "enable_diff_snapshots": false,
+                        "resume_vm": false,
+                        "mem_backend": { "backend_type": "Uffd", "backend_path": "/run/sbx/uffd.sock", "use_memfd": true }
+                    })
+                )
+            ]
         );
     }
 

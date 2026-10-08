@@ -8,7 +8,8 @@ use uuid::Uuid;
 use super::Sandbox;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
-use crate::memory::snapshot::{export_pages, memfile_pages};
+use crate::memory::server::MemoryServer;
+use crate::memory::snapshot::{GuestMemory, export_pages, memfile_pages};
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
@@ -193,9 +194,15 @@ impl Sandbox {
             .ok_or("firecracker reported no memory regions")?;
         let size = pages.regions.iter().map(|region| region.size).sum();
         let path = path.to_path_buf();
+        let memory = self
+            .resources
+            .memory
+            .as_ref()
+            .and_then(MemoryServer::memfd)
+            .map_or(GuestMemory::Process { pid }, GuestMemory::Memfd);
         let diff = blocking("export memfile", move || {
             let mut out = BufWriter::new(File::create(&path)?);
-            let diff = export_pages(pid, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
+            let diff = export_pages(&memory, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
             out.flush().map(|()| diff)
         })
         .await?;

@@ -50,6 +50,7 @@ pub struct Node {
     envd_timeout: Duration,
     build_cache_max_usage: f64,
     prefetch_from_trace: bool,
+    use_memfd: bool,
 }
 
 pub struct Lifetime {
@@ -79,6 +80,7 @@ impl Node {
             envd_timeout: config.envd_timeout,
             build_cache_max_usage: config.build_cache_max_usage,
             prefetch_from_trace: config.prefetch_from_trace,
+            use_memfd: config.use_memfd,
         })
     }
 
@@ -300,6 +302,7 @@ impl Node {
             .work_dir(work_dir)
             .envd_timeout(self.envd_timeout)
             .prefetch(prefetch)
+            .use_memfd(self.use_memfd)
             .envd(EnvdInit {
                 access_token: config.envd_access_token.clone(),
                 env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),

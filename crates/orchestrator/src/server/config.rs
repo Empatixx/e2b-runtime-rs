@@ -47,6 +47,7 @@ pub struct NodeConfig {
     pub drain_sleep: Duration,
     pub build_cache_max_usage: f64,
     pub prefetch_from_trace: bool,
+    pub use_memfd: bool,
 }
 
 impl NodeConfig {
@@ -98,6 +99,7 @@ impl NodeConfig {
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
             prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
+            use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
         })
     }
 
@@ -175,6 +177,7 @@ mod tests {
         assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
         assert_eq!(config.drain_sleep, Duration::from_secs(15));
         assert!(config.prefetch_from_trace);
+        assert!(config.use_memfd);
         assert!(!prefetch_source(Some("off")));
         assert!(prefetch_source(Some("unknown")));
         assert!(config.labels.is_empty());
