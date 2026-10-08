@@ -240,3 +240,38 @@ Each task: tests first (RED), implement, gate, commit.
 11. **memfd background copy on pause.**
 12. **Checkpoint RPC,** resume-fresh.
 13. **Docs, PARITY.md, review, CI green.**
+
+## ClickHouse, host stats, OOM (detail for tasks 7–8)
+
+### Endpoints
+
+- `CLICKHOUSE_CONNECTION_STRING` is the primary endpoint; `CLICKHOUSE_CONNECTION_STRINGS` (separated by `;`, trimmed, deduplicated) are the alternates.
+- Opening a connection is lazy: an unreachable server is not a startup error. A DSN that does not parse is fatal for the primary and skips an alternate.
+- Every endpoint has its own events batcher and host-stats batcher. Names: `sandbox-events` and `sandbox-host-stats`, and for an alternate `<name>:<host:port>`.
+- Alternates are gated by the flag `clickhouse-write-fanout`, which defaults to false, so they drop items silently.
+
+### Batcher
+
+- **Limits:** queue 1000, max batch 1000, max delay 1000 ms.
+- **Push:** never blocks; when the queue is full the item is dropped (`ErrBatcherQueueFull`).
+- **Flush:** at max batch size or on a ticker every `max_delay`. A failed flush is logged (`"error batching sandbox events"` / `"error batching sandbox host stats"`) and the batch is dropped.
+- **Stop:** drains the queue and flushes once more.
+- **Insert settings:** `wait_for_async_insert=1`.
+
+### sandbox_events insert
+
+- **Columns:** `timestamp DateTime64(9), sandbox_id, sandbox_execution_id, sandbox_template_id, sandbox_build_id, sandbox_team_id UUID, event_data Nullable(String) (JSON of event_data), type, version, id UUID, events_ttl_days Int64`.
+- **TTL days:** `<= 0` becomes 7, and anything above 365 is clamped to 365.
+
+### sandbox_host_stats insert
+
+- **Columns:** `timestamp, sandbox_id, sandbox_execution_id, sandbox_template_id, sandbox_build_id, sandbox_team_id UUID, sandbox_vcpu_count Int64, sandbox_memory_mb Int64, cgroup_cpu_usage_usec, cgroup_cpu_user_usec, cgroup_cpu_system_usec, cgroup_memory_usage_bytes, cgroup_memory_peak_bytes, delta_cgroup_cpu_usage_usec, delta_cgroup_cpu_user_usec, delta_cgroup_cpu_system_usec, interval_us (UInt64), sandbox_type LowCardinality(String) 'sandbox'`.
+- **Timing:** one sample per second. A baseline row (all counters 0, `interval_us` 0) is pushed at start. Deltas use saturating subtraction, and `prev` advances only after a successful push. A final sample is taken on stop.
+- **memory.peak:** the file is opened O_RDWR when the cgroup is created. Each sample seeks to 0, reads, then writes "0" to reset the peak.
+- **Bad team id:** a team id that is not a UUID becomes the nil UUID, with a warning.
+
+### OOM
+
+- **envd `/metrics`:** `oom_kills: [{process, seq}]`. An omitted field means unknown.
+- **Seeding:** up to 5 attempts, 2 s timeout each, 2 s apart. If every attempt fails, the first poll sets the watermark instead.
+- **Polling:** every 5 s, 100 ms timeout. At most 10 kills are logged per poll as `"Out of memory: process was killed"` (process name truncated to 64 characters), then `"Out of memory: at least this many more processes were killed"` (processes).
