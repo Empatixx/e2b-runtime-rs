@@ -3,6 +3,7 @@ pub mod builder;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
 pub mod envd;
+pub mod events;
 pub mod exposure;
 pub mod firecracker;
 pub mod hyperloop;

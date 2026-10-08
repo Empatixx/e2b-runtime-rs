@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use fred::prelude::{ClientLike, Config, KeysInterface};
+use fred::types::Builder;
 use orchestrator::routing::publisher::{RouteStore, RoutingRecord};
-use orchestrator::routing::redis::{RedisRoutes, RedisSettings};
-use redis::AsyncCommands;
+use orchestrator::routing::redis::{Redis, RedisSettings};
 
 fn redis_url() -> Option<String> {
     let url = std::env::var("E2B_TEST_REDIS_URL").ok();
@@ -23,7 +24,7 @@ async fn routing_records_are_stored_with_ttl_and_deleted_only_by_their_execution
     let settings = RedisSettings::from_vars(&HashMap::from([("REDIS_URL".to_owned(), url.clone())]))
         .unwrap()
         .unwrap();
-    let routes = RedisRoutes::connect(&settings).await.unwrap();
+    let routes = Redis::connect(&settings).await.unwrap().routing_catalog();
     let sandbox_id = format!("contract-{}", uuid::Uuid::new_v4());
     let record = RoutingRecord {
         orchestrator_id: "orch".to_owned(),
@@ -37,11 +38,8 @@ async fn routing_records_are_stored_with_ttl_and_deleted_only_by_their_execution
         .store(&sandbox_id, &record, Some(Duration::from_secs(3600)))
         .await
         .unwrap();
-    let mut client = redis::Client::open(url)
-        .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
+    let client = Builder::from_config(Config::from_url(&url).unwrap()).build().unwrap();
+    client.init().await.unwrap();
     let key = format!("sandbox:routing:{sandbox_id}");
     let stored: String = client.get(&key).await.unwrap();
     let ttl: i64 = client.ttl(&key).await.unwrap();

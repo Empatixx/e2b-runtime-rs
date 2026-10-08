@@ -7,9 +7,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::node::{Node, routed_sandbox};
+use super::node::{Node, event_sandbox, execution, routed_sandbox};
 use super::registry::Lifecycle;
 use super::status::Work;
+use crate::events::{PAUSED, SandboxEvent};
 use crate::network::slot::Slot;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
@@ -112,6 +113,11 @@ impl Running {
     async fn pause(&self, build_id: Uuid, template_id: String, reply: oneshot::Sender<Result<Snapshot, String>>) {
         let parent = self.info.lock().clone();
         let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
+        if snapshotted.is_ok() {
+            self.node
+                .events
+                .publish(SandboxEvent::new(PAUSED, &event_sandbox(&parent)).with_execution(&execution(&parent)));
+        }
         if let Ok(local) = &snapshotted {
             let object_metadata = ObjectMetadata::default()
                 .with("template_id", template_id)

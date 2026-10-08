@@ -18,6 +18,7 @@ use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::{EnvdInit, VolumeMount};
+use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
@@ -50,6 +51,7 @@ pub struct Node {
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
     pub routing: RoutingPublisher,
+    pub events: EventsService,
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
@@ -78,6 +80,7 @@ impl Node {
             services: config.services.clone(),
             status: Arc::default(),
             uploads: Arc::default(),
+            events: EventsService::default(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
@@ -249,9 +252,11 @@ impl Node {
             });
         match started {
             Ok(handle) => {
-                let routed = routed_sandbox(&handle.info.lock());
+                let info = handle.info.lock().clone();
                 self.registry.activate(lifecycle, handle);
-                self.routing.on_insert(&routed).await;
+                self.routing.on_insert(&routed_sandbox(&info)).await;
+                let kind = if info.config.snapshot { RESUMED } else { CREATED };
+                self.events.publish(SandboxEvent::new(kind, &event_sandbox(&info)));
                 Ok(())
             }
             Err(status) => {
@@ -427,6 +432,26 @@ pub fn egress_rules(egress: Option<&SandboxNetworkEgressConfig>) -> Result<Optio
         allowed: egress.allowed_cidrs.clone(),
         denied: egress.denied_cidrs.clone(),
     }))
+}
+
+pub fn event_sandbox(info: &SandboxInfo) -> EventSandbox {
+    EventSandbox {
+        sandbox_id: info.config.sandbox_id.clone(),
+        execution_id: info.config.execution_id.clone(),
+        base_template_id: info.config.base_template_id.clone(),
+        build_id: info.config.build_id.clone(),
+        team_id: info.config.team_id.clone(),
+        events_ttl_days: info.config.events_ttl_days,
+        metadata: info.config.metadata.clone().into_iter().collect(),
+    }
+}
+
+pub fn execution(info: &SandboxInfo) -> Execution {
+    Execution {
+        started_at: info.start,
+        vcpu_count: info.config.vcpu,
+        memory_mb: info.config.ram_mb,
+    }
 }
 
 pub fn routed_sandbox(info: &SandboxInfo) -> RoutedSandbox {

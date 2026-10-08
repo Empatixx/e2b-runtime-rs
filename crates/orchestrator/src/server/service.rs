@@ -5,12 +5,14 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::lifecycle::{Command, SandboxHandle};
-use super::node::{Lifetime, Node, egress_rules};
+use super::node::{Lifetime, Node, egress_rules, event_sandbox, execution};
+use crate::events::{KILLED, SandboxEvent, UPDATED, rfc3339};
 use crate::proto::sandbox_service_server::SandboxService;
 use crate::proto::{
     RunningSandbox, SandboxCheckpointRequest, SandboxCheckpointResponse, SandboxCreateRequest, SandboxCreateResponse,
     SandboxDeleteRequest, SandboxListResponse, SandboxPauseRequest, SandboxPauseResponse, SandboxUpdateRequest,
 };
+use serde_json::json;
 
 pub struct SandboxServer {
     node: Arc<Node>,
@@ -51,6 +53,7 @@ impl SandboxService for SandboxServer {
             .map(|egress| egress_rules(Some(egress)).map(Option::unwrap_or_default))
             .transpose()?;
         let previous_end = handle.info.lock().end;
+        let request_had_egress = request.egress.is_some();
         if let Some(end) = request.end_time {
             handle.info.lock().end = system_time(end);
         }
@@ -73,6 +76,35 @@ impl SandboxService for SandboxServer {
         if request.end_time.is_some() {
             let _ = handle.commands.send(Command::Extend).await;
         }
+        let info = handle.info.lock().clone();
+        let updated = request
+            .end_time
+            .map(|_| ("set_timeout", json!(rfc3339(info.end))))
+            .into_iter()
+            .chain(
+                info.config
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.egress.as_ref())
+                    .filter(|_| request_had_egress)
+                    .map(|egress| {
+                        (
+                            "network_egress",
+                            json!({
+                                "allowed_cidrs": egress.allowed_cidrs,
+                                "denied_cidrs": egress.denied_cidrs,
+                                "allowed_domains": egress.allowed_domains,
+                            }),
+                        )
+                    }),
+            )
+            .fold(
+                SandboxEvent::new(UPDATED, &event_sandbox(&info)),
+                |event, (key, value)| event.with(key, value),
+            );
+        if request.end_time.is_some() || request_had_egress {
+            self.node.events.publish(updated);
+        }
         Ok(Response::new(()))
     }
 
@@ -88,13 +120,21 @@ impl SandboxService for SandboxServer {
     }
 
     async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
-        let id = request.into_inner().sandbox_id;
+        let request = request.into_inner();
+        let id = request.sandbox_id;
         self.running(&id, &format!("sandbox '{id}' not found"))?;
         let handle = self
             .node
             .registry
             .stop(&id)
             .ok_or_else(|| Status::internal(format!("failed to delete sandbox '{id}'")))?;
+        let info = handle.info.lock().clone();
+        let kill_reason = request.kill_reason.filter(|reason| !reason.is_empty());
+        self.node.events.publish(
+            SandboxEvent::new(KILLED, &event_sandbox(&info))
+                .with_execution(&execution(&info))
+                .with("kill_reason", json!(kill_reason.as_deref().unwrap_or("unknown"))),
+        );
         let _ = handle.commands.send(Command::Delete).await;
         Ok(Response::new(()))
     }

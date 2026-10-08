@@ -2,15 +2,22 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use base64::Engine;
+use fred::prelude::{
+    ClientLike, Config, Expiration, KeysInterface, LuaInterface, Pool, ReconnectPolicy, StreamsInterface, TlsConnector,
+};
+use fred::rustls::pki_types::CertificateDer;
+use fred::rustls::pki_types::pem::PemObject;
+use fred::rustls::{ClientConfig, RootCertStore};
+use fred::types::Builder;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use redis::aio::ConnectionManager;
-use redis::cluster_async::ClusterConnection;
-use redis::{AsyncCommands, Script, TlsCertificates};
 
 use super::publisher::{RouteStore, RoutingRecord};
+use crate::events::{EventSink, STREAM};
 
 const ROUTING_KEY_PREFIX: &str = "sandbox:routing:";
+const DEFAULT_POOL_SIZE: usize = 5;
+const INVALID_URL: &str = r#"failed to parse REDIS_URL: "<redacted>" is not a valid redis URL"#;
 const DELETE_IF_SAME_EXECUTION: &str = r"
 local v = redis.call('GET', KEYS[1])
 if not v then
@@ -39,6 +46,7 @@ pub struct RedisSettings {
     pub password: Option<String>,
     pub tls: bool,
     pub ca: Option<Vec<u8>>,
+    pub pool_size: usize,
 }
 
 impl RedisSettings {
@@ -66,90 +74,101 @@ impl RedisSettings {
                     .map_err(|e| e.to_string())
             })
             .transpose()?;
+        let pool_size = var("REDIS_POOL_SIZE")
+            .and_then(|size| size.parse().ok())
+            .filter(|size| *size > 0)
+            .unwrap_or(DEFAULT_POOL_SIZE);
         Ok(Some(Self {
             target,
             password,
             tls,
             ca,
+            pool_size,
         }))
     }
 
-    fn url(&self, address: &str) -> String {
+    fn fred_url(&self) -> String {
+        match &self.target {
+            Target::Single(address) => self.url(address, ""),
+            Target::Cluster(address) => self.url(address, "-cluster"),
+        }
+    }
+
+    fn tls_connector(&self) -> Result<TlsConnector, String> {
+        let Some(ca) = &self.ca else {
+            return TlsConnector::default_rustls().map_err(|e| e.to_string());
+        };
+        let mut roots = RootCertStore::empty();
+        CertificateDer::pem_slice_iter(ca)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "failed to parse Redis TLS CA certificate".to_owned())?
+            .into_iter()
+            .try_for_each(|certificate| roots.add(certificate))
+            .map_err(|_| "failed to parse Redis TLS CA certificate".to_owned())?;
+        Ok(ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+            .into())
+    }
+
+    fn url(&self, address: &str, flavor: &str) -> String {
         let scheme = if self.tls { "rediss" } else { "redis" };
+        let scheme = format!("{scheme}{flavor}");
         let address = address.split_once("://").map_or(address, |(_, rest)| rest);
         match &self.password {
             Some(password) => format!("{scheme}://:{password}@{address}"),
             None => format!("{scheme}://{address}"),
         }
     }
+}
 
-    fn certificates(&self) -> TlsCertificates {
-        TlsCertificates {
-            client_tls: None,
-            root_cert: self.ca.clone(),
+#[derive(Clone)]
+pub struct Redis {
+    pool: Pool,
+}
+
+impl Redis {
+    pub async fn connect(settings: &RedisSettings) -> Result<Self, String> {
+        let mut config = Config::from_url(&settings.fred_url()).map_err(|_| INVALID_URL.to_owned())?;
+        if settings.tls {
+            config.tls = Some(settings.tls_connector()?.into());
+        }
+        let pool = Builder::from_config(config)
+            .set_policy(ReconnectPolicy::default())
+            .build_pool(settings.pool_size)
+            .map_err(|e| format!("failed to create redis client: {e}"))?;
+        pool.init().await.map_err(|e| format!("failed to ping redis: {e}"))?;
+        let _: String = pool
+            .ping(None)
+            .await
+            .map_err(|e| format!("failed to ping redis: {e}"))?;
+        Ok(Self { pool })
+    }
+
+    pub fn routing_catalog(&self) -> RoutingCatalog {
+        RoutingCatalog {
+            redis: self.pool.clone(),
+        }
+    }
+
+    pub fn event_stream(&self) -> EventStream {
+        EventStream {
+            redis: self.pool.clone(),
         }
     }
 }
 
 #[derive(Clone)]
-enum Connection {
-    Single(ConnectionManager),
-    Cluster(ClusterConnection),
+pub struct RoutingCatalog {
+    redis: Pool,
 }
 
 #[derive(Clone)]
-pub struct RedisRoutes {
-    connection: Connection,
+pub struct EventStream {
+    redis: Pool,
 }
 
-impl RedisRoutes {
-    pub async fn connect(settings: &RedisSettings) -> Result<Self, String> {
-        let connection = match &settings.target {
-            Target::Single(url) => {
-                let url = settings.url(url);
-                let client = match settings.tls {
-                    true => redis::Client::build_with_tls(url, settings.certificates()),
-                    false => redis::Client::open(url),
-                }
-                .map_err(|_| r#"failed to parse REDIS_URL: "<redacted>" is not a valid redis URL"#.to_owned())?;
-                Connection::Single(
-                    ConnectionManager::new(client)
-                        .await
-                        .map_err(|e| format!("failed to ping redis: {e}"))?,
-                )
-            }
-            Target::Cluster(address) => {
-                let builder = redis::cluster::ClusterClientBuilder::new(vec![settings.url(address)]);
-                let builder = match settings.tls {
-                    true => builder.certs(settings.certificates()),
-                    false => builder,
-                };
-                let client = builder
-                    .build()
-                    .map_err(|e| format!("failed to connect to redis cluster: {e}"))?;
-                Connection::Cluster(
-                    client
-                        .get_async_connection()
-                        .await
-                        .map_err(|e| format!("failed to ping redis: {e}"))?,
-                )
-            }
-        };
-        let routes = Self { connection };
-        routes.ping().await?;
-        Ok(routes)
-    }
-
-    async fn ping(&self) -> Result<(), String> {
-        let pong: Result<String, _> = match self.connection.clone() {
-            Connection::Single(mut connection) => redis::cmd("PING").query_async(&mut connection).await,
-            Connection::Cluster(mut connection) => redis::cmd("PING").query_async(&mut connection).await,
-        };
-        pong.map(|_| ()).map_err(|e| format!("failed to ping redis: {e}"))
-    }
-}
-
-impl RouteStore for RedisRoutes {
+impl RouteStore for RoutingCatalog {
     fn store(
         &self,
         sandbox_id: &str,
@@ -158,15 +177,13 @@ impl RouteStore for RedisRoutes {
     ) -> BoxFuture<'static, Result<(), String>> {
         let key = format!("{ROUTING_KEY_PREFIX}{sandbox_id}");
         let value = serde_json::to_string(record).unwrap_or_default();
-        let connection = self.connection.clone();
+        let expiration = ttl.map(|ttl| Expiration::EX(ttl.as_secs() as i64));
+        let redis = self.redis.clone();
         async move {
-            let stored: Result<(), redis::RedisError> = match (connection, ttl) {
-                (Connection::Single(mut connection), Some(ttl)) => connection.set_ex(key, value, ttl.as_secs()).await,
-                (Connection::Single(mut connection), None) => connection.set(key, value).await,
-                (Connection::Cluster(mut connection), Some(ttl)) => connection.set_ex(key, value, ttl.as_secs()).await,
-                (Connection::Cluster(mut connection), None) => connection.set(key, value).await,
-            };
-            stored.map_err(|e| format!("failed to store sandbox info in redis: {e}"))
+            redis
+                .set::<(), _, _>(key, value, expiration, None, false)
+                .await
+                .map_err(|e| format!("failed to store sandbox info in redis: {e}"))
         }
         .boxed()
     }
@@ -174,16 +191,34 @@ impl RouteStore for RedisRoutes {
     fn delete(&self, sandbox_id: &str, execution_id: &str) -> BoxFuture<'static, Result<i64, String>> {
         let key = format!("{ROUTING_KEY_PREFIX}{sandbox_id}");
         let execution_id = execution_id.to_owned();
-        let connection = self.connection.clone();
+        let redis = self.redis.clone();
         async move {
-            let script = Script::new(DELETE_IF_SAME_EXECUTION);
-            let mut invocation = script.key(key);
-            invocation.arg(execution_id);
-            let outcome: Result<i64, redis::RedisError> = match connection {
-                Connection::Single(mut connection) => invocation.invoke_async(&mut connection).await,
-                Connection::Cluster(mut connection) => invocation.invoke_async(&mut connection).await,
-            };
-            outcome.map_err(|e| format!("failed to delete sandbox info from redis: {e}"))
+            redis
+                .eval::<i64, _, _, _>(DELETE_IF_SAME_EXECUTION, key, execution_id)
+                .await
+                .map_err(|e| format!("failed to delete sandbox info from redis: {e}"))
+        }
+        .boxed()
+    }
+}
+
+impl EventSink for EventStream {
+    fn publish(&self, delivery_key: &str, payload: String) -> BoxFuture<'static, Result<(), String>> {
+        let key = delivery_key.to_owned();
+        let redis = self.redis.clone();
+        async move {
+            let subscribed: i64 = redis
+                .exists(key)
+                .await
+                .map_err(|e| format!("could not determine if redis stream is published: {e}"))?;
+            if subscribed == 0 {
+                return Ok(());
+            }
+            redis
+                .xadd::<String, _, _, _, _>(STREAM, false, None::<()>, "*", vec![("payload", payload)])
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         }
         .boxed()
     }
@@ -207,7 +242,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(settings.target, Target::Cluster("c:6379".to_owned()));
-        assert_eq!(settings.url("c:6379"), "redis://c:6379");
+        assert_eq!(settings.fred_url(), "redis-cluster://c:6379");
     }
 
     #[test]
@@ -225,6 +260,6 @@ mod tests {
         let secure = RedisSettings::from_vars(&vars(&[("REDIS_URL", "rediss://a:6379"), ("REDIS_PASSWORD", "p")]))
             .unwrap()
             .unwrap();
-        assert_eq!(secure.url("rediss://a:6379"), "rediss://:p@a:6379");
+        assert_eq!(secure.fred_url(), "rediss://:p@a:6379");
     }
 }
