@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::build_file::BuildFile;
 use super::cache::BlockCache;
-use crate::storage::header::{DiffMetadata, PAGE_SIZE};
+use crate::storage::header::DiffMetadata;
 
 pub struct Overlay {
     base: Arc<BuildFile>,
@@ -14,12 +14,16 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(base: Arc<BuildFile>, cache_path: &Path) -> io::Result<Self> {
-        let cache = BlockCache::create(cache_path, base.size(), PAGE_SIZE)?;
+        let cache = BlockCache::create(cache_path, base.size(), base.block_size())?;
         Ok(Self { base, cache })
     }
 
     pub fn size(&self) -> u64 {
         self.cache.size()
+    }
+
+    pub fn block_size(&self) -> u64 {
+        self.cache.block_size()
     }
 
     pub fn base(&self) -> &Arc<BuildFile> {
@@ -152,6 +156,23 @@ mod tests {
         assert_eq!(
             overlay.read_at(100, &mut buf).await.unwrap_err(),
             "misaligned read: offset 100 length 4096 block size 4096"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_block_size_comes_from_the_base_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, _) = template(dir.path()).await;
+        let header = Header::new(Metadata::template(id(1), 8192, SIZE), Vec::new()).unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let base = BuildFile::new(header, Artifact::Rootfs, store);
+        let overlay = Overlay::new(Arc::new(base), &dir.path().join("overlay")).unwrap();
+
+        let mut buf = vec![0; 4096];
+        assert_eq!(overlay.block_size(), 8192);
+        assert_eq!(
+            overlay.read_at(4096, &mut buf).await.unwrap_err(),
+            "misaligned read: offset 4096 length 4096 block size 8192"
         );
     }
 }

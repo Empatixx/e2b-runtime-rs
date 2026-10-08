@@ -17,7 +17,7 @@ use crate::storage::header::PAGE_SIZE;
 pub const CHUNK_SIZE: u64 = 4 << 20;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-const STREAM_BATCH: usize = 256 * 1024;
+const MIN_READ_BATCH: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FetchState {
@@ -47,7 +47,7 @@ impl Chunker {
         Self::open_with_timeout(storage, object, cache_path, FETCH_TIMEOUT).await
     }
 
-    pub async fn open_with_timeout(
+    async fn open_with_timeout(
         storage: Storage,
         object: &str,
         cache_path: &Path,
@@ -89,7 +89,8 @@ impl Chunker {
         self.source.fetches.load(Ordering::Relaxed)
     }
 
-    pub fn fetch_attempts(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn fetch_attempts(&self) -> u64 {
         self.source.attempts.load(Ordering::Relaxed)
     }
 
@@ -157,14 +158,10 @@ impl Chunker {
         }
         sessions.insert(chunk, progress.clone());
         let source = self.source.clone();
-        let sessions = self.sessions.clone();
+        let session = FetchSession::new(chunk, self.sessions.clone(), state, &source.object, &range);
         tokio::spawn(async move {
-            let fetched = source.fetch(range, &state).await;
-            sessions.lock().remove(&chunk);
-            state.send_replace(match fetched {
-                Ok(()) => FetchState::Done,
-                Err(e) => FetchState::Failed(e),
-            });
+            let fetched = source.fetch(range, &session.state).await;
+            session.finish(fetched);
         });
         progress
     }
@@ -172,6 +169,47 @@ impl Chunker {
     fn chunk_range(&self, chunk: u64) -> Range<u64> {
         let start = chunk * CHUNK_SIZE;
         start..(start + CHUNK_SIZE).min(self.size())
+    }
+}
+
+struct FetchSession {
+    chunk: u64,
+    sessions: Sessions,
+    state: watch::Sender<FetchState>,
+    panicked: String,
+    settled: bool,
+}
+
+impl FetchSession {
+    fn new(chunk: u64, sessions: Sessions, state: watch::Sender<FetchState>, object: &str, range: &Range<u64>) -> Self {
+        Self {
+            chunk,
+            sessions,
+            state,
+            panicked: format!("fetch of {object} {range:?} panicked"),
+            settled: false,
+        }
+    }
+
+    fn finish(mut self, fetched: Result<(), String>) {
+        self.settle(match fetched {
+            Ok(()) => FetchState::Done,
+            Err(e) => FetchState::Failed(e),
+        });
+    }
+
+    fn settle(&mut self, state: FetchState) {
+        self.settled = true;
+        self.sessions.lock().remove(&self.chunk);
+        self.state.send_replace(state);
+    }
+}
+
+impl Drop for FetchSession {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.settle(FetchState::Failed(self.panicked.clone()));
+        }
     }
 }
 
@@ -196,11 +234,12 @@ impl Source {
         mut stream: impl futures::Stream<Item = Result<Bytes, String>> + Unpin,
         state: &watch::Sender<FetchState>,
     ) -> Result<(), String> {
+        let batch = self.read_batch();
         let mut pending = BytesMut::new();
         let mut filled = range.start;
         while let Some(bytes) = stream.next().await {
             pending.extend_from_slice(&bytes?);
-            if pending.len() >= STREAM_BATCH {
+            if pending.len() >= batch {
                 let aligned = pending.len() - pending.len() % PAGE_SIZE as usize;
                 filled = self.fill(filled, pending.split_to(aligned).freeze()).await?;
                 state.send_modify(|_| {});
@@ -216,6 +255,10 @@ impl Source {
             ));
         }
         self.fill(filled, pending.freeze()).await.map(|_| ())
+    }
+
+    fn read_batch(&self) -> usize {
+        MIN_READ_BATCH.max(self.cache.block_size() as usize)
     }
 
     async fn fill(&self, offset: u64, bytes: Bytes) -> Result<u64, String> {
@@ -429,7 +472,7 @@ mod tests {
     async fn streamed_blocks_are_readable_before_the_chunk_ends() {
         let (dir, storage, _) = setup(4 * MIB).await;
         let chunker = chunker(&dir, storage).await;
-        let first = Bytes::from(vec![7; STREAM_BATCH + 4096]);
+        let first = Bytes::from(vec![7; MIN_READ_BATCH + 4096]);
         let stream = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
         let (state, _progress) = watch::channel(FetchState::Running);
         let source = chunker.source.clone();
@@ -440,7 +483,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        assert!(chunker.source.is_cached(&(0..STREAM_BATCH as u64)));
+        assert!(chunker.source.is_cached(&(0..MIN_READ_BATCH as u64)));
         assert!(!chunker.source.is_cached(&(0..4 * MIB)));
         assert!(!streaming.is_finished());
         streaming.abort();
@@ -460,5 +503,21 @@ mod tests {
 
         assert!(streamed.unwrap_err().contains("got 4196 of 4194304 bytes"));
         assert!(!chunker.source.is_cached(&(4096..8192)));
+    }
+
+    #[tokio::test]
+    async fn a_session_dropped_without_finishing_leaves_no_entry_and_fails_its_waiters() {
+        let sessions = Sessions::default();
+        let (state, progress) = watch::channel(FetchState::Running);
+        sessions.lock().insert(3, progress.clone());
+        let session = FetchSession::new(3, sessions.clone(), state, OBJECT, &(0..4096));
+
+        drop(session);
+
+        assert!(sessions.lock().is_empty());
+        assert_eq!(
+            *progress.borrow(),
+            FetchState::Failed("fetch of build/memfile 0..4096 panicked".to_owned())
+        );
     }
 }

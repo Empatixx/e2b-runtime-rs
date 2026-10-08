@@ -1,6 +1,7 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom};
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use parking_lot::RwLock;
@@ -17,6 +18,7 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn create(path: &Path, size: u64, block_size: u64) -> io::Result<Self> {
+        check_block_count(size, block_size)?;
         Ok(Self {
             file: SparseFile::create(path, size)?,
             block_size,
@@ -26,6 +28,7 @@ impl BlockCache {
 
     pub fn adopt(path: &Path, block_size: u64) -> io::Result<Self> {
         let file = SparseFile::adopt(path)?;
+        check_block_count(file.size(), block_size)?;
         let mut tracker = BlockTracker::default();
         tracker.set(0..file.size().div_ceil(block_size) as u32, BlockState::Data);
         Ok(Self {
@@ -71,11 +74,56 @@ impl BlockCache {
         self.check_aligned(offset, data.len() as u64)?;
         data.chunks(self.block_size as usize)
             .zip((offset..).step_by(self.block_size as usize))
+            .take_while(|(_, block_offset)| *block_offset < self.size())
             .try_for_each(|(block, block_offset)| self.write_block(block_offset, block))
     }
 
     pub fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String> {
         self.check_aligned(offset, length)?;
+        self.punch(offset, self.clamp(offset, length))
+    }
+
+    pub fn export_diff(&self, out: &mut File) -> io::Result<DiffMetadata> {
+        let tracker = self.tracker.read();
+        let start = out.stream_position()?;
+        let written = tracker
+            .data_runs()
+            .into_iter()
+            .try_fold(start, |position, run| self.export_run(out, run, position))?;
+        out.seek(SeekFrom::Start(written))?;
+        Ok(DiffMetadata {
+            dirty: tracker.data().clone(),
+            empty: tracker.zero().clone(),
+            block_size: self.block_size,
+        })
+    }
+
+    fn export_run(&self, out: &File, run: Range<u32>, position: u64) -> io::Result<u64> {
+        let from = u64::from(run.start) * self.block_size;
+        let length = u64::from(run.end - run.start) * self.block_size;
+        let available = self.clamp(from, length);
+        self.file.copy_to(out, from, position, available)?;
+        out.write_all_at(&vec![0; (length - available) as usize], position + available)?;
+        Ok(position + length)
+    }
+
+    fn write_block(&self, offset: u64, block: &[u8]) -> Result<(), String> {
+        let length = self.clamp(offset, block.len() as u64);
+        if block.iter().all(|byte| *byte == 0) {
+            return self.punch(offset, length);
+        }
+        let mut tracker = self.tracker.write();
+        self.file
+            .write_at(offset, &block[..length as usize])
+            .map_err(|e| format!("write at {offset}: {e}"))?;
+        tracker.set(self.blocks(offset, length), BlockState::Data);
+        Ok(())
+    }
+
+    fn punch(&self, offset: u64, length: u64) -> Result<(), String> {
+        if length == 0 {
+            return Ok(());
+        }
         let mut tracker = self.tracker.write();
         self.file
             .punch_hole(offset, length)
@@ -84,30 +132,8 @@ impl BlockCache {
         Ok(())
     }
 
-    pub fn export_diff(&self, out: &mut File) -> io::Result<DiffMetadata> {
-        let tracker = self.tracker.read();
-        let mut block = vec![0; self.block_size as usize];
-        for index in tracker.data() {
-            self.file.read_at(u64::from(index) * self.block_size, &mut block)?;
-            out.write_all(&block)?;
-        }
-        Ok(DiffMetadata {
-            dirty: tracker.data().clone(),
-            empty: tracker.zero().clone(),
-            block_size: self.block_size,
-        })
-    }
-
-    fn write_block(&self, offset: u64, block: &[u8]) -> Result<(), String> {
-        if block.iter().all(|byte| *byte == 0) {
-            return self.write_zeroes_at(offset, block.len() as u64);
-        }
-        let mut tracker = self.tracker.write();
-        self.file
-            .write_at(offset, block)
-            .map_err(|e| format!("write at {offset}: {e}"))?;
-        tracker.set(self.blocks(offset, block.len() as u64), BlockState::Data);
-        Ok(())
+    fn clamp(&self, offset: u64, length: u64) -> u64 {
+        self.size().saturating_sub(offset).min(length)
     }
 
     fn check_aligned(&self, offset: u64, length: u64) -> Result<(), String> {
@@ -124,13 +150,27 @@ impl BlockCache {
     fn blocks(&self, offset: u64, length: u64) -> Range<u32> {
         let first = offset / self.block_size;
         let end = (offset + length).div_ceil(self.block_size);
-        first as u32..end as u32
+        saturating_index(first)..saturating_index(end)
+    }
+}
+
+fn saturating_index(block: u64) -> u32 {
+    u32::try_from(block).unwrap_or(u32::MAX)
+}
+
+fn check_block_count(size: u64, block_size: u64) -> io::Result<()> {
+    match size.div_ceil(block_size) > u64::from(u32::MAX) {
+        true => Err(io::Error::other(format!(
+            "{size} bytes in blocks of {block_size} need more than {} block indexes",
+            u32::MAX
+        ))),
+        false => Ok(()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Read, Write};
 
     use super::*;
 
@@ -216,6 +256,67 @@ mod tests {
         let mut tail = [0; 904];
         cache.read_at(4096, &mut tail).unwrap();
         assert_eq!(tail, [4; 904]);
+    }
+
+    #[test]
+    fn contiguous_dirty_blocks_export_as_one_run_after_the_stream_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(dir.path(), 6);
+        cache
+            .write_at(4096, &[[1; 4096], [2; 4096], [3; 4096]].concat())
+            .unwrap();
+        cache.write_at(5 * 4096, &[4; 4096]).unwrap();
+
+        let mut out = tempfile::tempfile().unwrap();
+        out.write_all(&[9; 10]).unwrap();
+        cache.export_diff(&mut out).unwrap();
+
+        let expected = [vec![9; 10], vec![1; 4096], vec![2; 4096], vec![3; 4096], vec![4; 4096]].concat();
+        assert_eq!(contents(&mut out), expected);
+        assert_eq!(out.stream_position().unwrap(), expected.len() as u64);
+    }
+
+    #[test]
+    fn a_partial_last_block_exports_zero_padded_to_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::create(&dir.path().join("cache"), 5000, 4096).unwrap();
+        cache.fill(0, &[4; 5000]).unwrap();
+
+        let mut out = tempfile::tempfile().unwrap();
+        cache.export_diff(&mut out).unwrap();
+
+        assert_eq!(contents(&mut out), [vec![4; 5000], vec![0; 3192]].concat());
+    }
+
+    #[test]
+    fn writes_past_the_size_are_dropped_and_the_cache_file_keeps_its_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache");
+        let cache = BlockCache::create(&path, 2 * 4096, 4096).unwrap();
+
+        cache.write_at(4096, &[[5; 4096], [6; 4096]].concat()).unwrap();
+        cache.write_at(4 * 4096, &[7; 4096]).unwrap();
+        cache.write_zeroes_at(8 * 4096, 4096).unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * 4096);
+        assert!(cache.is_present(4096, 4096));
+        assert!(!cache.is_present(2 * 4096, 4096));
+        let mut out = tempfile::tempfile().unwrap();
+        let diff = cache.export_diff(&mut out).unwrap();
+        assert_eq!(diff.dirty.iter().collect::<Vec<_>>(), vec![1]);
+        assert!(diff.empty.is_empty());
+    }
+
+    #[test]
+    fn a_cache_with_more_blocks_than_the_index_holds_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = BlockCache::create(&dir.path().join("cache"), (1 << 32) * 4096, 4096)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "17592186044416 bytes in blocks of 4096 need more than 4294967295 block indexes"
+        );
     }
 
     #[test]

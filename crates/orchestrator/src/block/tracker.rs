@@ -43,9 +43,23 @@ impl BlockTracker {
         &self.data
     }
 
+    pub fn data_runs(&self) -> Vec<Range<u32>> {
+        runs(&self.data)
+    }
+
     pub fn zero(&self) -> &RoaringBitmap {
         &self.zero
     }
+}
+
+fn runs(blocks: &RoaringBitmap) -> Vec<Range<u32>> {
+    blocks.iter().fold(Vec::new(), |mut runs, index| {
+        match runs.last_mut() {
+            Some(last) if last.end == index => last.end += 1,
+            _ => runs.push(index..index + 1),
+        }
+        runs
+    })
 }
 
 #[cfg(test)]
@@ -79,5 +93,15 @@ mod tests {
         assert!(!tracker.is_present(9..30));
         assert!(!tracker.is_present(25..31));
         assert!(tracker.is_present(5..5));
+    }
+
+    #[test]
+    fn data_runs_join_neighbouring_blocks() {
+        let mut tracker = BlockTracker::default();
+        tracker.set(0..3, BlockState::Data);
+        tracker.set(5..6, BlockState::Data);
+        tracker.set(3..4, BlockState::Zero);
+
+        assert_eq!(tracker.data_runs(), vec![0..3, 5..6]);
     }
 }

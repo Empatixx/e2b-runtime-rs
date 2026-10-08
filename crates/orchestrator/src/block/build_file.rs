@@ -225,6 +225,10 @@ impl BuildFile {
         self.header.metadata.size
     }
 
+    pub fn block_size(&self) -> u64 {
+        self.header.metadata.block_size
+    }
+
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         let mut done = 0;
         while done < buf.len() {
@@ -302,8 +306,38 @@ mod tests {
         let mut past = vec![0; 10];
         assert_eq!(
             file.read_at(4 * 4096, &mut past).await.unwrap_err(),
-            "offset 16384 is out of bounds (size 16384)"
+            "offset 16384 is out of bounds (size: 16384)"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unaligned_read_crosses_from_data_into_a_nil_mapping_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        storage
+            .put(&Artifact::Rootfs.object(id(1)), Bytes::from(vec![1; 3 * 4096]))
+            .await
+            .unwrap();
+        let metadata = Metadata::template(id(1), 4096, 3 * 4096);
+        let mappings = vec![
+            mapping(0, id(1), 0),
+            mapping(4096, Uuid::nil(), 0),
+            mapping(8192, id(1), 8192),
+        ];
+        let header = Header::new(metadata, mappings).unwrap();
+        let file = BuildFile::new(
+            header,
+            Artifact::Rootfs,
+            Arc::new(DiffStore::new(storage, dir.path().join("cache"))),
+        );
+
+        let mut across = vec![9; 4096 + 200];
+        file.read_at(4000, &mut across).await.unwrap();
+        assert_eq!(across, [vec![1; 96], vec![0; 4096], vec![1; 104]].concat());
+
+        let mut both_ways = vec![9; 4096 + 20];
+        file.read_at(4086, &mut both_ways).await.unwrap();
+        assert_eq!(both_ways, [vec![1; 10], vec![0; 4096], vec![1; 10]].concat());
     }
 
     #[tokio::test]
