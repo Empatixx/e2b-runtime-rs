@@ -39,7 +39,7 @@ The port keeps upstream's business logic exactly where a client or the API can o
 - **InitLayerFileUpload:**
   - object `{cacheScope}/files/{hash}.tar` in the build storage;
   - returns `present = exists`, plus a presigned PUT URL valid for 30 min with its headers;
-  - for local storage it returns a `file://` path and no headers (ruling: local storage cannot presign).
+  - if signing fails while the file exists, it returns `{present: true}` with no URL.
 - **Build logs:** a `tracing` layer captures the entries of one build (timestamp, message, level, fields) into that build's ring. The user-facing lines use upstream's text, for example `[CACHED ][prefix] text [hash]`.
 - **Errors:**
   - a user error is `PhaseBuildError{phase, step}`, which becomes `reason{message, step}`;
@@ -94,10 +94,11 @@ The port keeps upstream's business logic exactly where a client or the API can o
 
 ## OCI → ext4 and provisioning (M14)
 
-**Pull** with the `oci-client` crate:
+**Pull** with the `oci-client` crate, as upstream `oci.go`:
 - platform `linux/<arch>`, and the image config architecture is checked;
-- Basic auth for general registries;
-- ECR and GCP auth go to the backlog (ruling).
+- Docker Hub images without auth go through the Docker Hub proxy remote repository when one is configured;
+- auth: ECR (`GetAuthorizationToken` → Basic), GCP (`_json_key` Basic), general (Basic);
+- registry errors are mapped to upstream's user-facing texts.
 
 **Injected files** are copied verbatim into `crates/orchestrator/assets/template/`. Source: `O/pkg/template/build/core/rootfs/files/*.tpl` and `phases/base/provision.sh`, rendered with the same values. The full list:
 - `/usr/bin/envd` (0777, our envd) and the envd systemd preset;
@@ -107,10 +108,14 @@ The port keeps upstream's business logic exactly where a client or the API can o
 - chrony source, journald, watchdog-off, serial-getty, seed-certs;
 - the symlink `multi-user.target.wants/envd.service`.
 
-**Root filesystem:**
-1. Flatten the layers in-process into a staging dir. Tar entries apply in layer order and whiteouts are honoured (`.wh.` and `.wh..wh..opq`).
-2. `mkfs.ext4 -d <staging>` with upstream's `-O` features (`^64bit,^dir_nlink,ext_attr,extent,extra_isize,filetype,flex_bg,huge_file,inline_data,large_file,sparse_super2 -b 4096 -m 0 -i 4096`) and a 25000 MB maximum. Ruling: `-d` instead of loop mount, overlayfs and rsync. It gives the same filesystem tree without mounts.
-3. `e2fsck -pfv` → `resize2fs -M` → `e2fsck` → `tune2fs -O ^read-only`.
+**Root filesystem**, as upstream `oci.go` and `filesystem/ext4.go`:
+1. `mkfs.ext4 -O ^64bit,^dir_nlink,ext_attr,extent,extra_isize,filetype,flex_bg,huge_file,inline_data,large_file,sparse_super2 -b 4096 -m 0 -i 4096 <file> <max>M`, with max `build-base-rootfs-size-limit-mb` = 25000.
+2. Loop mount the ext4.
+3. Untar every layer in parallel into its own directory, honouring overlay whiteouts.
+4. Mount overlayfs over the layer directories (new mount API, `lowerdir+`).
+5. `rsync -aH --whole-file --inplace` into the ext4; ENOSPC becomes the image-too-large error.
+6. Unmount.
+7. `e2fsck -pfv` → `resize2fs -M` → `e2fsck` → `tune2fs -O ^read-only`.
 4. Read the free space via `debugfs -R stats`, `resize2fs` to add `diskSizeMB − free`, then `e2fsck`.
 
 **Provision boot:**
@@ -165,16 +170,16 @@ The port keeps upstream's business logic exactly where a client or the API can o
 - **M15:** RUN, ENV, WORKDIR, USER and COPY steps, a cached rebuild that logs `[CACHED ]`, and a resume between layers.
 - **M16:** a full build from `debian:bookworm-slim` with a start command → `SandboxService.Create` of the build → the SDK `commands.run` works and the prefetch counter is above 0.
 
-## Out of scope
+## Also ported, as upstream (later milestones)
 
-- ECR and GCP registry auth.
-- The Docker Hub proxy cache.
 - `ensurefreedisk`.
 - CPU templates and cmdline args in the hash.
 - envd memory protection.
 - Huge pages.
 - The artifact-registry image delete.
-- External log shipping (Loki).
+- External log shipping.
+
+Each gets a task in the milestone where upstream runs it. Upstream's feature-flag defaults decide what runs by default.
 
 ## Order
 
