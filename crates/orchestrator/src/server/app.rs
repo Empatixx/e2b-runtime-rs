@@ -10,8 +10,12 @@ use super::metrics::{HostMetrics, machine_info};
 use super::node::Node;
 use super::service::SandboxServer;
 use super::status::NodeStatus;
+use crate::builder::builds::BuildCache;
+use crate::builder::pipeline::PhasePipeline;
+use crate::builder::service::TemplateServer;
 use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
+use crate::proto::template_service_server::TemplateServiceServer;
 
 pub const COMMIT: &str = match option_env!("E2B_COMMIT") {
     Some(commit) => commit,
@@ -22,20 +26,39 @@ pub struct App {
     pub node: Arc<Node>,
     pub status: Arc<NodeStatus>,
     pub metrics: Arc<HostMetrics>,
+    pub templates: Option<Arc<TemplateServer<PhasePipeline>>>,
+    builds: Arc<BuildCache>,
 }
 
 impl App {
     pub fn new(node: Arc<Node>) -> Self {
+        let builds = Arc::new(BuildCache::default());
+        let templates = node.services.runs_template_manager().then(|| {
+            Arc::new(TemplateServer::new(
+                builds.clone(),
+                node.storage.clone(),
+                Arc::new(PhasePipeline),
+            ))
+        });
         Self {
             status: node.status.clone(),
             node,
             metrics: Arc::default(),
+            templates,
+            builds,
         }
     }
 
     pub fn start_background(&self) {
         self.node.start_background();
         tokio::spawn(self.metrics.clone().run());
+        tokio::spawn(self.builds.clone().run_eviction());
+    }
+
+    pub async fn wait_for_builds(&self) {
+        if let Some(templates) = &self.templates {
+            templates.wait_for_builds().await;
+        }
     }
 
     pub fn router(&self) -> Router {
@@ -43,6 +66,10 @@ impl App {
         let routes = Routes::new(SandboxServiceServer::new(SandboxServer::new(self.node.clone())))
             .add_service(InfoServiceServer::new(self.info()))
             .add_service(grpc_health);
+        let routes = match &self.templates {
+            Some(templates) => routes.add_service(TemplateServiceServer::from_arc(templates.clone())),
+            None => routes,
+        };
         with_health(routes, self.status.clone(), COMMIT)
     }
 
@@ -54,6 +81,7 @@ impl App {
             commit: COMMIT.to_owned(),
             started: SystemTime::now(),
             labels: self.node.labels.clone(),
+            roles: self.node.services.roles(),
             max_sandboxes: self.node.max_sandboxes,
             machine: machine_info(
                 &std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),

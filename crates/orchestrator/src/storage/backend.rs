@@ -1,14 +1,17 @@
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
+use hyper::Method;
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
+use object_store::signer::Signer;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutPayload};
 
 use tokio::io::AsyncWriteExt;
@@ -18,6 +21,7 @@ use super::header::Header;
 #[derive(Clone)]
 pub struct Storage {
     store: Arc<dyn ObjectStore>,
+    signer: Option<Arc<dyn Signer>>,
 }
 
 #[derive(Default)]
@@ -33,7 +37,10 @@ impl Storage {
     pub fn local(root: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(root).map_err(|e| format!("create storage dir {}: {e}", root.display()))?;
         let store = LocalFileSystem::new_with_prefix(root).map_err(|e| e.to_string())?;
-        Ok(Self { store: Arc::new(store) })
+        Ok(Self {
+            store: Arc::new(store),
+            signer: None,
+        })
     }
 
     pub fn s3() -> S3Builder {
@@ -143,6 +150,18 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn upload_signed_url(&self, path: &str, expires_in: Duration) -> Result<String, String> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or("failed to presign PUT URL: local storage cannot sign URLs")?;
+        signer
+            .signed_url(Method::PUT, &ObjectPath::from(path), expires_in)
+            .await
+            .map(|url| url.to_string())
+            .map_err(|e| format!("failed to presign PUT URL: {e}"))
+    }
+
     pub async fn load_header(&self, path: &str) -> Result<Header, String> {
         Header::decode(&self.get(path).await?)
     }
@@ -187,8 +206,11 @@ impl S3Builder {
                 .with_virtual_hosted_style_request(false),
             None => builder,
         };
-        let store = builder.build().map_err(|e| format!("s3 bucket {}: {e}", self.bucket))?;
-        Ok(Storage { store: Arc::new(store) })
+        let store = Arc::new(builder.build().map_err(|e| format!("s3 bucket {}: {e}", self.bucket))?);
+        Ok(Storage {
+            store: store.clone(),
+            signer: Some(store),
+        })
     }
 }
 

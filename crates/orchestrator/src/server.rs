@@ -13,6 +13,7 @@ pub mod registry;
 pub mod retry;
 #[cfg(target_os = "linux")]
 pub mod service;
+pub mod services;
 pub mod shutdown;
 pub mod status;
 pub mod uploads;

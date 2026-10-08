@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::services::Services;
 use crate::network::slot::MAX_SLOT;
 use crate::storage::backend::Storage;
 
@@ -48,6 +49,7 @@ pub struct NodeConfig {
     pub build_cache_max_usage: f64,
     pub prefetch_from_trace: bool,
     pub use_memfd: bool,
+    pub services: Services,
 }
 
 impl NodeConfig {
@@ -100,6 +102,7 @@ impl NodeConfig {
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
             prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
             use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
+            services: Services::parse(var("ORCHESTRATOR_SERVICES").as_deref()),
         })
     }
 

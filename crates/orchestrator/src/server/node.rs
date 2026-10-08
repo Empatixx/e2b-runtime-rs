@@ -11,6 +11,7 @@ use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
 use super::retry::Failure;
+use super::services::Services;
 use super::status::NodeStatus;
 use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
@@ -39,6 +40,7 @@ pub struct Node {
     pub local_expiry: bool,
     pub templates: Arc<TemplateCache>,
     pub labels: Vec<String>,
+    pub services: Services,
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
     admission: Admission,
@@ -65,6 +67,7 @@ impl Node {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
             labels: config.labels.clone(),
+            services: config.services.clone(),
             status: Arc::default(),
             uploads: Arc::default(),
             admission: Admission::new(config.max_sandboxes, config.max_starting),

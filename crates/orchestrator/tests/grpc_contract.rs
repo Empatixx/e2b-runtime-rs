@@ -12,14 +12,16 @@ use orchestrator::envd::{ENVD_PORT, EnvdInit};
 use orchestrator::network::slot::Slot;
 use orchestrator::proto::info_service_client::InfoServiceClient;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
+use orchestrator::proto::template_service_client::TemplateServiceClient;
 use orchestrator::proto::{
     SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest, SandboxPauseRequest, SandboxUpdateRequest,
-    ServiceInfoStatus, ServiceStatusChangeRequest,
+    ServiceInfoStatus, ServiceStatusChangeRequest, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest,
 };
 use orchestrator::sandbox::Sandbox;
 use orchestrator::server::app::App;
 use orchestrator::server::config::{NodeConfig, StorageConfig};
 use orchestrator::server::node::Node;
+use orchestrator::server::services::Services;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::header::{Header, Metadata};
 use tonic::Code;
@@ -149,6 +151,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         build_cache_max_usage: 90.0,
         prefetch_from_trace: true,
         use_memfd: true,
+        services: Services::parse(Some("orchestrator,template-manager")),
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());
@@ -227,6 +230,35 @@ async fn check_node_services(cluster: &Cluster) {
         service_status: ServiceInfoStatus::Healthy.into(),
     };
     info.service_status_override(healthy).await.unwrap();
+
+    let mut templates = TemplateServiceClient::connect(format!("http://{}", cluster.address))
+        .await
+        .unwrap();
+    let sourceless = templates
+        .template_create(TemplateCreateRequest {
+            template: Some(TemplateConfig::default()),
+            ..TemplateCreateRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (sourceless.code(), sourceless.message()),
+        (
+            Code::InvalidArgument,
+            "template build requires either fromImage or fromTemplate"
+        )
+    );
+    let unknown = templates
+        .template_build_status(TemplateStatusRequest {
+            build_id: "nope".to_owned(),
+            ..TemplateStatusRequest::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unknown.message(),
+        "error while getting build info, maybe already expired: build nope not found in cache"
+    );
 }
 
 async fn running_envd(pool: Pool) -> String {
