@@ -217,6 +217,7 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
         .unwrap();
     let took = started.elapsed();
     println!("resume took {} ms", took.as_millis());
+    println!("resume phases: {}", resumed.phases());
 
     let note = read_file(&resumed, NOTE).await;
     let health = health(&resumed).await;
@@ -329,6 +330,7 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let resume_started = Instant::now();
     let third = templates.resume(&host, "sbx-gen2", 4035, &paused_again.build).await;
     println!("second resume took {} ms", resume_started.elapsed().as_millis());
+    println!("second resume phases: {}", third.phases());
     run_in_guest(
         &third,
         "kill -0 $(cat /dev/shm/sleep.pid) && echo alive > /dev/shm/alive",

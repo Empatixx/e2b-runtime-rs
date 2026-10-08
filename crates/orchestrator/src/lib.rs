@@ -6,6 +6,7 @@ pub mod exposure;
 pub mod firecracker;
 pub mod memory;
 pub mod network;
+pub mod phases;
 pub mod proto;
 #[cfg(target_os = "linux")]
 pub mod sandbox;

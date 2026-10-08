@@ -27,10 +27,13 @@ impl Sandbox {
     async fn start_resumed(&mut self, build: &Build, storage: &Storage) -> Result<(), String> {
         let memfile = self.config.memfile.clone().ok_or("memfile is required to resume")?;
         let snapfile = self.download_snapfile(build, storage).await?;
+        self.phases.mark("template");
         let socket = self.config.work_dir.join("uffd.sock");
         let listener = UffdListener::bind(&socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
         let rootfs = self.attach_disk_and_slot().await?;
+        self.phases.mark("slot+rootfs");
         let client = self.spawn_firecracker(rootfs).await?;
+        self.phases.mark("firecracker");
         let log = self.config.work_dir.join("firecracker.log");
         std::fs::File::create(&log).map_err(|e| format!("create {}: {e}", log.display()))?;
         client.set_logger(&log).await?;
@@ -41,14 +44,19 @@ impl Sandbox {
         let started = served.map(|server| {
             self.resources.memory = Some(server);
         });
+        self.phases.mark("load_snapshot");
         let resumed = async {
             all_ok([started, loaded])?;
             client.resume().await
         }
         .await;
         resumed.map_err(|e| format!("{e}; {}", self.resume_diagnostics(&log)))?;
+        self.phases.mark("resume_vm");
         client.set_mmds(&self.mmds_metadata()).await?;
-        self.init_envd().await
+        self.phases.mark("mmds");
+        self.init_envd().await?;
+        self.phases.mark("envd_init");
+        Ok(())
     }
 
     fn resume_diagnostics(&self, log: &std::path::Path) -> String {

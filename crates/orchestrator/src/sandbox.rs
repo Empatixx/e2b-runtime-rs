@@ -18,10 +18,12 @@ use crate::firecracker::config::VmConfig;
 use crate::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
+use crate::phases::PhaseTimer;
 
 pub struct Sandbox {
     config: SandboxConfig,
     resources: Resources,
+    phases: PhaseTimer,
 }
 
 impl SandboxBuilder {
@@ -59,6 +61,10 @@ impl Sandbox {
         SocketAddr::from((self.config.slot.host_ip(), ENVD_PORT))
     }
 
+    pub fn phases(&self) -> String {
+        self.phases.render()
+    }
+
     pub fn faults_served(&self) -> u64 {
         self.resources
             .memory
@@ -87,6 +93,7 @@ impl Sandbox {
         Self {
             config,
             resources: Resources::default(),
+            phases: PhaseTimer::start(),
         }
     }
 
