@@ -22,15 +22,17 @@ stop_sandbox() {
 trap 'stop_sandbox; cat "$LOG"' EXIT
 
 check_egress() {
-  local host_ip server dropped
+  local host_ip server
   host_ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
   python3 -m http.server 8099 --bind "$host_ip" >/dev/null 2>&1 &
   server=$!
   for _ in $(seq 1 20); do curl -sf -o /dev/null "http://$host_ip:8099" && break; sleep 0.5; done
   (cd examples/sdk-playground && npm install --silent && BLOCKED_URL="$host_ip:8099" E2B_DEBUG=true node egress.mjs)
   kill "$server"
-  dropped=$(sudo ip netns exec ns-4020 iptables -w -L FORWARD -v -n -x | awk '$3 == "DROP" && $9 ~ /^(10\.0\.0\.0\/8|172\.16\.0\.0\/12|192\.168\.0\.0\/16)$/ { sum += $1 } END { print sum + 0 }')
-  [ "$dropped" -gt 0 ] || { echo "guest firewall did not drop the private-range probe"; exit 1; }
+  sudo ip netns exec ns-4020 nft list chain inet slot-firewall PREROUTE_FILTER | grep -q 'ip daddr @filtered_always_denylist drop' \
+    || { echo "guest firewall has no private-range drop rule"; exit 1; }
+  sudo ip netns exec ns-4020 nft list set inet slot-firewall filtered_always_denylist | grep -q '10.0.0.0/8' \
+    || { echo "guest firewall does not deny the private ranges"; exit 1; }
 }
 
 cargo build -q -p orchestrator --example sandbox
