@@ -1,6 +1,7 @@
 pub const REQUEST_SIZE: usize = 28;
 pub const REPLY_SIZE: usize = 16;
-pub const EIO: u32 = 5;
+pub const BACKEND_ERROR: u32 = 1;
+pub const MAX_WRITE: u32 = 32 * 1024 * 1024;
 
 const REQUEST_MAGIC: u32 = 0x2560_9513;
 const REPLY_MAGIC: u32 = 0x6744_6698;
@@ -133,9 +134,9 @@ mod tests {
 
     #[test]
     fn encodes_a_reply() {
-        let reply = encode_reply([3; 8], EIO);
+        let reply = encode_reply([3; 8], BACKEND_ERROR);
         assert_eq!(reply[..4], 0x6744_6698u32.to_be_bytes());
-        assert_eq!(reply[4..8], 5u32.to_be_bytes());
+        assert_eq!(reply[4..8], 1u32.to_be_bytes());
         assert_eq!(reply[8..], [3; 8]);
     }
 }

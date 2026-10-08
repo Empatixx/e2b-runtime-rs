@@ -173,3 +173,39 @@ async fn dropping_an_exposure_disconnects_the_device() {
     }
     assert!(!pid.exists(), "a dropped exposure left its nbd device connected");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_writers_and_readers_see_their_own_data() {
+    if !ready() {
+        eprintln!("skipping: needs root and the nbd kernel module");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let exposure = expose(zero_overlay(dir.path(), "parallel").await).await.unwrap();
+    let device = exposure.path();
+    let part = SIZE / 8;
+
+    let workers: Vec<_> = (0..8u64)
+        .map(|worker| {
+            let device = device.clone();
+            std::thread::spawn(move || {
+                use std::os::unix::fs::FileExt;
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&device)
+                    .unwrap();
+                let data = vec![worker as u8 + 1; part as usize];
+                file.write_all_at(&data, worker * part).unwrap();
+                file.sync_all().unwrap();
+                let mut back = vec![0; part as usize];
+                file.read_exact_at(&mut back, worker * part).unwrap();
+                back == data
+            })
+        })
+        .collect();
+    let matched: Vec<bool> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+    exposure.close().await.unwrap();
+
+    assert_eq!(matched, vec![true; 8]);
+}

@@ -1,11 +1,35 @@
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
-use super::protocol::{Command, EIO, REPLY_SIZE, REQUEST_SIZE, Request, encode_reply};
+use super::protocol::{BACKEND_ERROR, Command, MAX_WRITE, REPLY_SIZE, REQUEST_SIZE, Request, encode_reply};
 use crate::block::overlay::Overlay;
+
+pub trait BlockDevice: Send + Sync + 'static {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> impl Future<Output = Result<(), String>> + Send;
+    fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String>;
+    fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String>;
+}
+
+impl BlockDevice for Overlay {
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        Overlay::read_at(self, offset, buf).await
+    }
+
+    fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String> {
+        Overlay::write_at(self, offset, data)
+    }
+
+    fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String> {
+        Overlay::write_zeroes_at(self, offset, length)
+    }
+}
 
 struct Response {
     error: u32,
@@ -13,79 +37,121 @@ struct Response {
 }
 
 impl Response {
-    fn ok(data: Vec<u8>) -> Self {
-        Self { error: 0, data }
-    }
-
-    fn from_result(result: Result<(), String>) -> Self {
-        Self {
-            error: if result.is_ok() { 0 } else { EIO },
-            data: Vec::new(),
+    fn from_result(result: Result<Vec<u8>, String>, request: &Request) -> Self {
+        match result {
+            Ok(data) => Self { error: 0, data },
+            Err(e) => {
+                tracing::warn!(offset = request.offset, length = request.length, error = %e, "nbd request failed");
+                Self {
+                    error: BACKEND_ERROR,
+                    data: Vec::new(),
+                }
+            }
         }
     }
 }
 
-pub async fn serve(device: Arc<Overlay>, mut socket: UnixStream) -> Result<(), String> {
-    while let Some(request) = next_request(&mut socket).await? {
+type Replies = Arc<Mutex<OwnedWriteHalf>>;
+
+pub async fn serve<D: BlockDevice>(device: Arc<D>, socket: UnixStream) -> Result<(), String> {
+    let (mut reader, writer) = socket.into_split();
+    let replies: Replies = Arc::new(Mutex::new(writer));
+    let mut in_flight = JoinSet::new();
+    let served = dispatch(&device, &mut reader, &replies, &mut in_flight).await;
+    let finished = finish(in_flight).await;
+    served.and(finished)
+}
+
+async fn dispatch<D: BlockDevice>(
+    device: &Arc<D>,
+    reader: &mut OwnedReadHalf,
+    replies: &Replies,
+    in_flight: &mut JoinSet<Result<(), String>>,
+) -> Result<(), String> {
+    while let Some(request) = next_request(reader).await? {
         if request.command == Command::Disconnect {
             return Ok(());
         }
-        let response = handle(&device, &mut socket, request).await?;
-        send(&mut socket, request.handle, response).await?;
+        let payload = payload(reader, &request).await?;
+        in_flight.spawn(answer(device.clone(), replies.clone(), request, payload));
+        while let Some(done) = in_flight.try_join_next() {
+            done.map_err(|e| format!("nbd request task: {e}"))??;
+        }
     }
     Ok(())
 }
 
-async fn next_request(socket: &mut UnixStream) -> Result<Option<Request>, String> {
+async fn finish(mut in_flight: JoinSet<Result<(), String>>) -> Result<(), String> {
+    let mut finished = Ok(());
+    while let Some(done) = in_flight.join_next().await {
+        finished = finished.and(
+            done.map_err(|e| format!("nbd request task: {e}"))
+                .and_then(|answered| answered),
+        );
+    }
+    finished
+}
+
+async fn next_request(reader: &mut OwnedReadHalf) -> Result<Option<Request>, String> {
     let mut header = [0; REQUEST_SIZE];
-    match socket.read_exact(&mut header).await {
+    match reader.read_exact(&mut header).await {
         Ok(_) => Request::decode(&header).map(Some),
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
         Err(e) => Err(format!("read nbd request: {e}")),
     }
 }
 
-async fn handle(device: &Overlay, socket: &mut UnixStream, request: Request) -> Result<Response, String> {
-    let length = request.length as usize;
+async fn payload(reader: &mut OwnedReadHalf, request: &Request) -> Result<Vec<u8>, String> {
+    if request.command != Command::Write {
+        return Ok(Vec::new());
+    }
+    if request.length > MAX_WRITE {
+        return Err(format!("nbd write of {} bytes exceeds {MAX_WRITE}", request.length));
+    }
+    let mut payload = vec![0; request.length as usize];
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| format!("read nbd write payload: {e}"))
+        .map(|_| payload)
+}
+
+async fn answer<D: BlockDevice>(
+    device: Arc<D>,
+    replies: Replies,
+    request: Request,
+    payload: Vec<u8>,
+) -> Result<(), String> {
+    let result = perform(&*device, &request, payload).await;
+    let response = Response::from_result(result, &request);
+    send(&replies, request.handle, response).await
+}
+
+async fn perform<D: BlockDevice>(device: &D, request: &Request, payload: Vec<u8>) -> Result<Vec<u8>, String> {
     match request.command {
         Command::Read => {
-            let mut data = vec![0; length];
-            let read = device.read_at(request.offset, &mut data).await;
-            Ok(match read {
-                Ok(()) => Response::ok(data),
-                Err(e) => Response::from_result(Err(log_device_error(&request, e))),
-            })
+            let mut data = vec![0; request.length as usize];
+            device.read_at(request.offset, &mut data).await.map(|()| data)
         }
-        Command::Write => {
-            let mut payload = vec![0; length];
-            socket
-                .read_exact(&mut payload)
-                .await
-                .map_err(|e| format!("read nbd write payload: {e}"))?;
-            Ok(Response::from_result(device.write_at(request.offset, &payload)))
-        }
-        Command::Trim | Command::WriteZeroes => Ok(Response::from_result(
-            device.write_zeroes_at(request.offset, u64::from(request.length)),
-        )),
-        Command::Flush | Command::Disconnect => Ok(Response::ok(Vec::new())),
+        Command::Write => device.write_at(request.offset, &payload).map(|()| Vec::new()),
+        Command::Trim | Command::WriteZeroes => device
+            .write_zeroes_at(request.offset, u64::from(request.length))
+            .map(|()| Vec::new()),
+        Command::Flush | Command::Disconnect => Ok(Vec::new()),
     }
 }
 
-async fn send(socket: &mut UnixStream, handle: [u8; 8], response: Response) -> Result<(), String> {
+async fn send(replies: &Replies, handle: [u8; 8], response: Response) -> Result<(), String> {
     let reply: [u8; REPLY_SIZE] = encode_reply(handle, response.error);
-    socket
+    let mut writer = replies.lock().await;
+    writer
         .write_all(&reply)
         .await
         .map_err(|e| format!("write nbd reply: {e}"))?;
-    socket
+    writer
         .write_all(&response.data)
         .await
         .map_err(|e| format!("write nbd read data: {e}"))
-}
-
-fn log_device_error(request: &Request, error: String) -> String {
-    tracing::warn!(offset = request.offset, length = request.length, %error, "nbd request failed");
-    error
 }
 
 #[cfg(test)]
@@ -179,10 +245,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_errors_reply_eio_and_keep_serving() {
+    async fn device_errors_reply_an_error_and_keep_serving() {
         let mut client = start().await;
         client.send(Command::Read, 100, 4096).await;
-        assert_eq!(client.reply().await, EIO);
+        assert_eq!(client.reply().await, BACKEND_ERROR);
         assert_eq!(client.read(0, 4096).await, vec![1; 4096]);
 
         drop(client.socket);
@@ -196,6 +262,74 @@ mod tests {
         assert_eq!(
             client.server.await.unwrap(),
             Err("bad nbd request magic 0x0".to_owned())
+        );
+    }
+
+    struct GatedDevice {
+        gate: tokio::sync::Notify,
+    }
+
+    impl BlockDevice for GatedDevice {
+        async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            if offset == 0 {
+                self.gate.notified().await;
+            }
+            buf.fill(offset as u8);
+            Ok(())
+        }
+
+        fn write_at(&self, _: u64, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn write_zeroes_at(&self, _: u64, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    async fn request(socket: &mut UnixStream, command: Command, handle: u8, offset: u64, length: u32) {
+        let request = Request {
+            command,
+            handle: [handle; 8],
+            offset,
+            length,
+        };
+        socket.write_all(&request.encode()).await.unwrap();
+    }
+
+    async fn reply_with_data(socket: &mut UnixStream, length: usize) -> (u8, Vec<u8>) {
+        let mut reply = [0; REPLY_SIZE];
+        socket.read_exact(&mut reply).await.unwrap();
+        let mut data = vec![0; length];
+        socket.read_exact(&mut data).await.unwrap();
+        (reply[8], data)
+    }
+
+    #[tokio::test]
+    async fn a_slow_read_does_not_hold_back_later_replies() {
+        let device = Arc::new(GatedDevice {
+            gate: tokio::sync::Notify::new(),
+        });
+        let (mut socket, server_side) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(serve(device.clone(), server_side));
+
+        request(&mut socket, Command::Read, 1, 0, 512).await;
+        request(&mut socket, Command::Read, 2, 7, 512).await;
+
+        assert_eq!(reply_with_data(&mut socket, 512).await, (2, vec![7; 512]));
+        device.gate.notify_one();
+        assert_eq!(reply_with_data(&mut socket, 512).await, (1, vec![0; 512]));
+        request(&mut socket, Command::Disconnect, 3, 0, 0).await;
+        assert_eq!(server.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_write_over_32_mib_ends_the_server() {
+        let mut client = start().await;
+        client.send(Command::Write, 0, MAX_WRITE + 1).await;
+        assert_eq!(
+            client.server.await.unwrap(),
+            Err("nbd write of 33554433 bytes exceeds 33554432".to_owned())
         );
     }
 }

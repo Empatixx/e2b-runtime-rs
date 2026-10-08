@@ -1,45 +1,43 @@
-use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-
 use super::ioctl;
+use super::pool::{DEFAULT_POOL_SIZE, DevicePool};
 
 const FLAGS: i32 = 1 | 4 | 32 | 64;
 const TIMEOUT_SECONDS: u64 = 90;
-const CONNECT_POLLS: u32 = 200;
-const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_POLL_INTERVAL: Duration = Duration::from_micros(100);
 
-static CLAIMED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
-static NEXT_INDEX: AtomicU32 = AtomicU32::new(0);
+static POOL: OnceLock<DevicePool> = OnceLock::new();
+
+pub fn host_pool() -> &'static DevicePool {
+    POOL.get_or_init(|| DevicePool::new(device_count(), pool_size(), Box::new(is_idle)))
+}
 
 struct Claim {
     index: u32,
 }
 
 impl Claim {
-    fn next_free() -> io::Result<Self> {
-        let mut claimed = CLAIMED.lock();
-        let devices = (0..).take_while(|index| device_path(*index).exists()).count() as u32;
-        let index = rotation(NEXT_INDEX.load(Ordering::Relaxed), devices)
-            .find(|index| !claimed.contains(index) && is_idle(*index))
-            .ok_or_else(|| io::Error::other("no free nbd device (load the nbd module with a larger nbds_max)"))?;
-        NEXT_INDEX.store(index + 1, Ordering::Relaxed);
-        claimed.insert(index);
-        Ok(Self { index })
+    async fn take() -> io::Result<Self> {
+        host_pool()
+            .get()
+            .await
+            .map(|index| Self { index })
+            .map_err(io::Error::other)
     }
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        CLAIMED.lock().remove(&self.index);
+        host_pool().release(self.index);
     }
 }
 
@@ -73,7 +71,7 @@ impl Attached {
 
 impl NbdDevice {
     pub async fn attach(kernel_socket: UnixStream, size: u64, block_size: u64) -> io::Result<Self> {
-        let claim = Claim::next_free()?;
+        let claim = Claim::take().await?;
         let control = OpenOptions::new()
             .read(true)
             .write(true)
@@ -128,7 +126,8 @@ impl NbdDevice {
     }
 
     async fn wait_until_connected(&self, size: u64) -> io::Result<()> {
-        for _ in 0..CONNECT_POLLS {
+        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
             if pid_path(self.index()).exists() && self.reported_size() == Some(size) {
                 return Ok(());
             }
@@ -193,8 +192,18 @@ fn spawn_worker(control: File) -> JoinHandle<io::Result<()>> {
     })
 }
 
-fn rotation(start: u32, devices: u32) -> impl Iterator<Item = u32> {
-    (0..devices).map(move |step| (start + step) % devices)
+fn device_count() -> u32 {
+    std::fs::read_to_string("/sys/module/nbd/parameters/nbds_max")
+        .ok()
+        .and_then(|max| max.trim().parse().ok())
+        .unwrap_or_else(|| (0..).take_while(|index| device_path(*index).exists()).count() as u32)
+}
+
+fn pool_size() -> usize {
+    std::env::var("NBD_POOL_SIZE")
+        .ok()
+        .and_then(|size| size.parse().ok())
+        .unwrap_or(DEFAULT_POOL_SIZE)
 }
 
 fn is_idle(index: u32) -> bool {
@@ -212,15 +221,4 @@ fn sys_path(index: u32) -> PathBuf {
 
 fn pid_path(index: u32) -> PathBuf {
     sys_path(index).join("pid")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rotation_starts_after_the_last_claim_and_wraps() {
-        assert_eq!(rotation(14, 16).take(4).collect::<Vec<_>>(), vec![14, 15, 0, 1]);
-        assert_eq!(rotation(0, 0).count(), 0);
-    }
 }
