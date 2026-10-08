@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod node;
 pub mod registry;
 pub mod retry;
+pub mod scheduling;
 #[cfg(target_os = "linux")]
 pub mod service;
 pub mod services;

@@ -12,6 +12,7 @@ use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
+use super::scheduling::from_headers;
 use super::services::Services;
 use super::status::NodeStatus;
 use super::uploads::Uploads;
@@ -23,7 +24,7 @@ use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
-use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig};
+use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig, SchedulingMetadata};
 use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::LocalSnapshot;
@@ -230,7 +231,11 @@ impl Node {
             .join(format!("{}-{}", lifecycle.sandbox_id, lifecycle.lifecycle_id))
     }
 
-    pub async fn create(self: Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<(), Status> {
+    pub async fn create(
+        self: Arc<Self>,
+        config: SandboxConfig,
+        lifetime: Lifetime,
+    ) -> Result<SchedulingMetadata, Status> {
         let _work = self.status.track_work();
         let lifecycle = Lifecycle {
             sandbox_id: config.sandbox_id.clone(),
@@ -257,7 +262,7 @@ impl Node {
                 self.routing.on_insert(&routed_sandbox(&info)).await;
                 let kind = if info.config.snapshot { RESUMED } else { CREATED };
                 self.events.publish(SandboxEvent::new(kind, &event_sandbox(&info)));
-                Ok(())
+                Ok(info.scheduling)
             }
             Err(status) => {
                 self.registry.abandon(&id);
@@ -363,6 +368,7 @@ impl Node {
                 lifecycle,
                 host_ip: slot.host_ip(),
                 slot,
+                scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
                 started_at: SystemTime::now(),
             },
             self.clone(),

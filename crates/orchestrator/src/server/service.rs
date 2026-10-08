@@ -6,12 +6,14 @@ use uuid::Uuid;
 
 use super::lifecycle::{Command, SandboxHandle};
 use super::node::{Lifetime, Node, egress_rules, event_sandbox, execution};
+use super::scheduling::from_headers;
 use crate::events::{KILLED, SandboxEvent, UPDATED, rfc3339};
 use crate::proto::sandbox_service_server::SandboxService;
 use crate::proto::{
     RunningSandbox, SandboxCheckpointRequest, SandboxCheckpointResponse, SandboxCreateRequest, SandboxCreateResponse,
     SandboxDeleteRequest, SandboxListResponse, SandboxPauseRequest, SandboxPauseResponse, SandboxUpdateRequest,
 };
+use crate::sandbox::snapshot::Snapshot;
 use serde_json::json;
 
 pub struct SandboxServer {
@@ -35,12 +37,15 @@ impl SandboxService for SandboxServer {
             start: request.start_time.map_or(SystemTime::UNIX_EPOCH, system_time),
             end: request.end_time.map_or(SystemTime::UNIX_EPOCH, system_time),
         };
-        tokio::spawn(self.node.clone().create(config, lifetime))
+        let resolved_firecracker_version = config.firecracker_version.clone();
+        let scheduling_metadata = tokio::spawn(self.node.clone().create(config, lifetime))
             .await
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
         Ok(Response::new(SandboxCreateResponse {
             client_id: self.node.node_id.clone(),
-            ..SandboxCreateResponse::default()
+            scheduling_metadata: Some(scheduling_metadata),
+            filesystem_boot_applied: false,
+            resolved_firecracker_version,
         }))
     }
 
@@ -154,7 +159,16 @@ impl SandboxService for SandboxServer {
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
-            .map(|()| Response::new(SandboxPauseResponse::default()))
+            .map(|snapshot| {
+                Response::new(SandboxPauseResponse {
+                    scheduling_metadata: Some(from_headers(
+                        snapshot.build.build_id,
+                        Some(&snapshot.build.memfile),
+                        &snapshot.build.rootfs,
+                        snapshot.memfile_bytes,
+                    )),
+                })
+            })
             .map_err(|e| {
                 Status::internal(format!(
                     "error snapshotting sandbox '{id}': error snapshotting sandbox: {e}"
@@ -194,7 +208,7 @@ impl SandboxServer {
     }
 }
 
-async fn pause(handle: SandboxHandle, build_id: Uuid, template_id: String) -> Result<(), String> {
+async fn pause(handle: SandboxHandle, build_id: Uuid, template_id: String) -> Result<Snapshot, String> {
     let (reply, snapshot) = tokio::sync::oneshot::channel();
     handle
         .commands
@@ -205,10 +219,7 @@ async fn pause(handle: SandboxHandle, build_id: Uuid, template_id: String) -> Re
         })
         .await
         .map_err(|_| "the sandbox stopped".to_owned())?;
-    snapshot
-        .await
-        .map_err(|_| "the sandbox stopped".to_owned())?
-        .map(|_| ())
+    snapshot.await.map_err(|_| "the sandbox stopped".to_owned())?
 }
 
 fn system_time(timestamp: prost_types::Timestamp) -> SystemTime {

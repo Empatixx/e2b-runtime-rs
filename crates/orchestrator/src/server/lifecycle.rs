@@ -12,7 +12,7 @@ use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
 use crate::network::slot::Slot;
-use crate::proto::SandboxConfig;
+use crate::proto::{SandboxConfig, SchedulingMetadata};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::Snapshot;
 use crate::storage::backend::ObjectMetadata;
@@ -29,6 +29,7 @@ pub struct SandboxInfo {
     pub lifecycle: Lifecycle,
     pub host_ip: Ipv4Addr,
     pub slot: Slot,
+    pub scheduling: SchedulingMetadata,
     pub started_at: SystemTime,
 }
 
