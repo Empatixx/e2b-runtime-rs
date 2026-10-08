@@ -136,6 +136,10 @@ impl BuildSlot {
     }
 }
 
+fn snapshot_error(cause: String) -> BuildError {
+    BuildError::Internal(format!("get template snapshot: get template snapshot: {cause}"))
+}
+
 async fn fail(sandbox: Sandbox, error: BuildError) -> BuildError {
     let _ = sandbox.stop().await;
     error
@@ -152,7 +156,7 @@ impl LayerExecutor<'_> {
             .node
             .layer_source(build.source_build_id)
             .await
-            .map_err(BuildError::Internal)?;
+            .map_err(snapshot_error)?;
         let mut sandbox = self.create_sandbox(&build, &source).await?;
         if build.update_envd
             && let Err(e) = update_envd(self.log, &mut sandbox, &self.env.config.envd).await
@@ -346,6 +350,14 @@ pub fn reserved_blocks() -> PreBoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_snapshot_error_wraps_the_cache_error_twice_like_upstream() {
+        assert_eq!(
+            snapshot_error("boom".to_owned()),
+            BuildError::Internal("get template snapshot: get template snapshot: boom".to_owned())
+        );
+    }
 
     #[test]
     fn the_replace_script_matches_upstream_bytes() {

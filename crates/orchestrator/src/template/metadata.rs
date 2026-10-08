@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod cpu_template;
+
+pub use cpu_template::CpuTemplate;
+
 pub const CURRENT_VERSION: u64 = 2;
 const DEPRECATED_VERSION: u64 = 1;
 
@@ -18,7 +22,7 @@ pub struct TemplateMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_template: Option<Value>,
+    pub from_template: Option<FromTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefetch: Option<Prefetch>,
     #[serde(
@@ -30,9 +34,9 @@ pub struct TemplateMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balloon: Option<Balloon>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_template: Option<Value>,
+    pub cpu_template: Option<CpuTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_cpu_template: Option<Value>,
+    pub build_cpu_template: Option<CpuTemplate>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub filesystem_only: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -44,6 +48,14 @@ pub struct TemplateVersions {
     pub build_id: String,
     pub kernel_version: String,
     pub firecracker_version: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FromTemplate {
+    #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
+    pub build_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,10 +121,11 @@ impl TemplateMetadata {
     }
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("decode metadata.json: {e}"))?;
-        match value.get("version").and_then(Value::as_u64) {
-            Some(version) if version > DEPRECATED_VERSION => {
-                serde_json::from_value(value).map_err(|e| format!("decode metadata.json: {e}"))
+        let value: Value =
+            serde_json::from_slice(bytes).map_err(|e| format!("error unmarshaling template version: {e}"))?;
+        match value.get("version").and_then(Value::as_f64) {
+            Some(version) if version > DEPRECATED_VERSION as f64 => {
+                serde_json::from_value(value).map_err(|e| format!("error unmarshaling template metadata: {e}"))
             }
             _ => Ok(Self::v1()),
         }
@@ -128,7 +141,10 @@ impl TemplateMetadata {
             template: self.template.clone(),
             context: self.context.clone(),
             start: self.start.clone(),
-            from_template: Some(serde_json::json!({ "alias": alias, "build_id": build_id })),
+            from_template: Some(FromTemplate {
+                alias: alias.to_owned(),
+                build_id: build_id.to_owned(),
+            }),
             ..Self::default()
         }
     }
@@ -241,6 +257,46 @@ mod tests {
         );
         assert_eq!(TemplateMetadata::from_json(br#"{"version":"2"}"#).unwrap(), v1);
         assert!(TemplateMetadata::from_json(br#"{"version":2,"template":{"build_id":"b","kernel_version":"k","firecracker_version":"f"},"context":{},"unknown":1}"#).is_ok());
+    }
+
+    #[test]
+    fn a_fractional_version_fails_to_decode_like_go() {
+        let error = TemplateMetadata::from_json(br#"{"version":1.5}"#).unwrap_err();
+
+        assert!(error.starts_with("error unmarshaling template metadata: "), "{error}");
+        assert_eq!(
+            TemplateMetadata::from_json(br#"{"version":1.0}"#).unwrap(),
+            TemplateMetadata::v1()
+        );
+        assert_eq!(
+            TemplateMetadata::from_json(br#"{"version":null}"#).unwrap(),
+            TemplateMetadata::v1()
+        );
+        assert!(
+            TemplateMetadata::from_json(b"{")
+                .unwrap_err()
+                .starts_with("error unmarshaling template version: ")
+        );
+    }
+
+    #[test]
+    fn nested_objects_keep_go_struct_order() {
+        let based = paused().based_on("base", "b0");
+        let json = String::from_utf8(based.to_json()).unwrap();
+
+        assert!(
+            json.ends_with(r#""from_template":{"alias":"base","build_id":"b0"}}"#),
+            "{json}"
+        );
+        let cpu =
+            br#"{"version":2,"cpu_template":{"x86_tsc_khz":3200000,"msr_modifiers":[{"bitmap":"0b0","addr":"0x1"}]}}"#;
+        let json = String::from_utf8(TemplateMetadata::from_json(cpu).unwrap().to_json()).unwrap();
+        assert!(
+            json.ends_with(
+                r#""cpu_template":{"msr_modifiers":[{"addr":"0x1","bitmap":"0b0"}],"x86_tsc_khz":3200000}}"#
+            ),
+            "{json}"
+        );
     }
 
     #[test]

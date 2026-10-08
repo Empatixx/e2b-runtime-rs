@@ -209,6 +209,7 @@ mod tests {
 
     use super::*;
     use crate::storage::backend::Storage;
+    use crate::template::metadata::FromTemplate;
 
     fn request(source: BaseSource, force: bool) -> BaseRequest {
         BaseRequest {
@@ -311,7 +312,10 @@ mod tests {
         assert!(good.cached);
         assert_eq!(
             good.metadata.from_template,
-            Some(serde_json::json!({ "alias": "base", "build_id": "good" }))
+            Some(FromTemplate {
+                alias: "base".to_owned(),
+                build_id: "good".to_owned()
+            })
         );
     }
 }

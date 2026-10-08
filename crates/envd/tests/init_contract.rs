@@ -120,3 +120,16 @@ async fn init_rejects_empty_or_escaped_tokens_and_reports_memory() {
         r#"{"user":"user","fallback":false}"#
     );
 }
+
+#[tokio::test]
+async fn init_accepts_bodies_over_two_megabytes() {
+    let (addr, _) = spawn_server_with_state().await;
+    let big = "x".repeat(3 * 1024 * 1024);
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/init"))
+        .json(&serde_json::json!({ "envVars": {"BIG": big} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+}

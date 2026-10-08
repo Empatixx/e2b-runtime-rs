@@ -48,9 +48,11 @@ pub struct VolumeMount {
 impl EnvdInit {
     pub fn body(&self, timestamp: DateTime<Utc>) -> Value {
         let mut body = json!({
-            "envVars": self.env_vars,
             "timestamp": rfc3339_nano(timestamp.into()),
         });
+        if !self.env_vars.is_empty() {
+            body["envVars"] = json!(self.env_vars);
+        }
         [
             ("accessToken", &self.access_token),
             ("defaultUser", &self.default_user),
@@ -223,7 +225,6 @@ mod tests {
         assert_eq!(
             EnvdInit::default().body(timestamp),
             json!({
-                "envVars": {},
                 "timestamp": "2026-10-09T10:00:00.000000001Z"
             })
         );

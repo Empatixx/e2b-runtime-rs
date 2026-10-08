@@ -10,7 +10,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::steps::StepsBuild;
-use crate::builder::commands::{CommandRun, PROCESS_CANCELLED, REQUEST_CANCELLED, as_context, root_only};
+use crate::builder::commands::{
+    CommandRun, PROCESS_CANCELLED, REQUEST_CANCELLED, START_CANCELLED, as_context, root_only,
+};
 use crate::builder::hash::finalize_hash;
 use crate::builder::layer::{BUILD_ORIGIN, LayerBuild, SandboxCreator, sync_changes_to_disk};
 use crate::builder::logs::ScopedLog;
@@ -239,7 +241,7 @@ async fn run_start(
         ..*run
     };
     match run.logged_confirmed(&start.start_command, context, started).await {
-        Err(e) if e != PROCESS_CANCELLED => {
+        Err(e) if e != PROCESS_CANCELLED && e != START_CANCELLED => {
             commands.cancel();
             Err(format!("error running start command: {e}"))
         }

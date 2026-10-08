@@ -20,6 +20,8 @@ use crate::storage::backend::Storage;
 use crate::template::metadata::Context;
 
 pub const PROCESS_CANCELLED: &str = "context: context canceled";
+pub const START_CANCELLED: &str =
+    "error starting process: canceled: Post \"http://localhost:5007/process.Process/Start\": context canceled";
 pub const REQUEST_CANCELLED: &str = "context canceled";
 pub const PROCESS_DEADLINE: &str = "context: context deadline exceeded";
 
@@ -36,6 +38,7 @@ pub struct CommandRun<'a> {
 
 impl CommandRun<'_> {
     pub async fn logged(&self, command: &str, context: &CommandContext) -> Result<(), String> {
+        self.refuse_start_when_cancelled()?;
         self.until_cancelled(
             run_logged(self.envd, command, context, &self.output()),
             PROCESS_CANCELLED,
@@ -55,9 +58,17 @@ impl CommandRun<'_> {
         context: &CommandContext,
         started: oneshot::Sender<()>,
     ) -> Result<(), String> {
+        self.refuse_start_when_cancelled()?;
         let output = self.output();
         let run = run_logged_confirmed(self.envd, command, context, started, &output);
         self.until_cancelled(run, PROCESS_CANCELLED).await
+    }
+
+    fn refuse_start_when_cancelled(&self) -> Result<(), String> {
+        match self.cancel.is_cancelled() {
+            true => Err(START_CANCELLED.to_owned()),
+            false => Ok(()),
+        }
     }
 
     fn output(&self) -> CommandLog<'_> {
@@ -164,7 +175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_command_fails_with_the_go_context_text() {
+    async fn a_command_started_after_the_cancel_fails_like_a_go_start_error() {
         let log = BuildLog::default();
         let fields = BTreeMap::new();
         let scoped = log.scoped(&fields);
@@ -189,7 +200,7 @@ mod tests {
 
         assert_eq!(
             execute(&run, &step, Context::default()).await,
-            Err("failed to run command 'sleep 60': context: context canceled".to_owned())
+            Err(format!("failed to run command 'sleep 60': {START_CANCELLED}"))
         );
     }
 }

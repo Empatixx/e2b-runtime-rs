@@ -40,13 +40,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/fsfreeze", post(fsfreeze::post_fsfreeze))
         .route("/fsthaw", post(fsfreeze::post_fsthaw))
         .route("/collapse", post(collapse::post_collapse))
-        .route(
-            "/upgrade",
-            post(upgrade::post_upgrade).layer(DefaultBodyLimit::disable()),
-        )
+        .route("/upgrade", post(upgrade::post_upgrade))
         .fallback_service(from_fn(legacy_sdk).layer(connect.into_axum_service()))
         .layer(from_fn(authenticate_user))
         .layer(from_fn_with_state(state.clone(), require_token));
 
-    public.merge(protected).with_state(state).layer(from_fn(cors))
+    public
+        .merge(protected)
+        .with_state(state)
+        .layer(DefaultBodyLimit::disable())
+        .layer(from_fn(cors))
 }

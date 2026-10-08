@@ -31,11 +31,10 @@ pub struct LayerSandbox<'a> {
 
 impl Node {
     pub async fn layer_source(&self, build_id: &str) -> Result<LayerSource, String> {
-        let snapshot = |e: String| format!("get template snapshot: get template snapshot: {e}");
-        let id = Uuid::parse_str(build_id).map_err(|e| snapshot(format!("failed to parse build id: {e}")))?;
+        let id = Uuid::parse_str(build_id).map_err(|e| format!("failed to parse build id: {e}"))?;
         let template = self.templates.get(id);
-        let (build, snapfile, metadata) = tokio::try_join!(template.build(), template.snapfile(), template.metadata())
-            .map_err(|e| snapshot(e.to_string()))?;
+        let (build, snapfile, metadata) =
+            tokio::try_join!(template.build(), template.snapfile(), template.metadata()).map_err(|e| e.to_string())?;
         Ok(LayerSource {
             template,
             build,
