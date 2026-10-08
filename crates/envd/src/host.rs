@@ -1,8 +1,12 @@
+pub mod cacerts;
 pub mod collapse;
+pub mod command;
 pub mod fsfreeze;
 pub mod hosts;
 pub mod metrics;
 pub mod mmds;
+pub mod mmds_route;
+pub mod nfs;
 pub mod oom;
 
 use chrono::{DateTime, Duration, Utc};

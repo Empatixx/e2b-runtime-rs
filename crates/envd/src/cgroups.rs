@@ -1,5 +1,6 @@
 pub mod freeze;
 pub mod hierarchy;
+pub mod memory;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

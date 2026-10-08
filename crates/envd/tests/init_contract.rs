@@ -64,9 +64,14 @@ async fn init_rejects_bad_json_and_older_timestamp_keeps_data() {
             .json(&serde_json::json!({ "timestamp": ts, "defaultUser": user }))
             .send()
     };
-    assert_eq!(init("2026-10-05T10:00:00Z", "newer").await.unwrap().status(), 204);
-    assert_eq!(init("2026-10-05T09:00:00Z", "older").await.unwrap().status(), 204);
+    let now = chrono::Utc::now();
+    let newer = now.to_rfc3339();
+    let older = (now - chrono::Duration::hours(1)).to_rfc3339();
+    assert_eq!(init(&newer, "newer").await.unwrap().status(), 204);
+    assert_eq!(init(&older, "older").await.unwrap().status(), 204);
     assert_eq!(state.defaults().user, "newer");
+    assert_eq!(init(&newer, "same").await.unwrap().status(), 204);
+    assert_eq!(state.defaults().user, "same");
 }
 
 #[tokio::test]
@@ -84,5 +89,34 @@ async fn init_reports_effective_defaults() {
     assert_eq!(
         res.headers()["x-envd-defaults"],
         r#"{"user":"root","workdir":"/tmp","fallback":false}"#
+    );
+}
+
+#[tokio::test]
+async fn init_rejects_empty_or_escaped_tokens_and_reports_memory() {
+    let (addr, _) = spawn_server_with_state().await;
+    let c = reqwest::Client::new();
+    let post = |body: &'static str| {
+        c.post(format!("http://{addr}/init"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+
+    let empty = post(r#"{"accessToken":""}"#).await.unwrap();
+    let escaped = post(r#"{"accessToken":"a\u0062"}"#).await.unwrap();
+    let mixed_case = post(r#"{"DEFAULTUSER":"user"}"#).await.unwrap();
+
+    assert_eq!(empty.status(), 400);
+    assert_eq!(escaped.status(), 400);
+    assert!(empty.headers().contains_key("x-envd-version"));
+    assert_eq!(
+        empty.headers()["x-envd-memory"],
+        r#"{"request":0,"low":0,"floor":0,"partial":true}"#
+    );
+    assert_eq!(mixed_case.status(), 204);
+    assert_eq!(
+        mixed_case.headers()["x-envd-defaults"],
+        r#"{"user":"user","fallback":false}"#
     );
 }

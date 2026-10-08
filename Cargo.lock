@@ -668,6 +668,7 @@ dependencies = [
  "chrono",
  "connectrpc",
  "connectrpc-build",
+ "futures",
  "hex",
  "http",
  "hyper-util",
