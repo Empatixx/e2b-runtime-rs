@@ -15,6 +15,7 @@ use tokio_stream::StreamExt;
 
 use crate::app::AppState;
 use crate::auth::request_user;
+use crate::cgroups::ProcessType;
 use crate::proto::process::__buffa::oneof::process_input::Input;
 use crate::proto::process::__buffa::oneof::stream_input_request::Event as InputEvent;
 use crate::proto::process::*;
@@ -23,6 +24,8 @@ use crate::util::keepalive::keepalive_interval;
 use events::{exited_events, live_events};
 use registry::Processes;
 use spawn::{Launch, spawn};
+
+const SYSTEM_TAG: &str = "_system";
 
 pub struct ProcessService {
     pub state: Arc<AppState>,
@@ -118,8 +121,11 @@ impl Process for ProcessService {
     ) -> ServiceResult<ServiceStream<StartResponse>> {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
+        let request = request.to_owned_message();
+        let placement = self.state.cgroups.placement(process_type(&request));
         let launch = Launch {
-            request: request.to_owned_message(),
+            request,
+            placement,
             user,
             workdir: defaults.workdir,
             global_env: self.state.env_vars.all(),
@@ -223,5 +229,13 @@ impl Process for ProcessService {
             .await
             .map_err(|e| ConnectError::new(ErrorCode::Unknown, format!("error closing stdin: {e}")))?;
         connectrpc::Response::ok(CloseStdinResponse::default())
+    }
+}
+
+fn process_type(request: &StartRequest) -> ProcessType {
+    match (request.tag.as_deref(), request.pty.as_option()) {
+        (Some(SYSTEM_TAG), _) => ProcessType::System,
+        (_, Some(_)) => ProcessType::Pty,
+        _ => ProcessType::User,
     }
 }

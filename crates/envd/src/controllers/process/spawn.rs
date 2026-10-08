@@ -12,6 +12,8 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Gid, Pid, Uid};
 use pty_process::{OwnedWritePty, Size};
+
+use crate::cgroups::Placement;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc::Receiver;
@@ -104,6 +106,7 @@ impl Process {
 
 pub struct Launch {
     pub request: StartRequest,
+    pub placement: Option<Placement>,
     pub user: User,
     pub workdir: Option<String>,
     pub global_env: BTreeMap<String, String>,
@@ -128,6 +131,7 @@ struct Started {
 pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>, Receiver<DataEvent>), ConnectError> {
     let Launch {
         mut request,
+        placement,
         user,
         workdir,
         global_env,
@@ -160,7 +164,16 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
         .collect();
 
     let started = match request.pty.as_option() {
-        Some(pty) => start_pty(&args, &env, &cwd, &user, pty.size.rows, pty.size.cols).map_err(|e| {
+        Some(pty) => start_pty(
+            &args,
+            &env,
+            &cwd,
+            &user,
+            placement.as_ref(),
+            pty.size.rows,
+            pty.size.cols,
+        )
+        .map_err(|e| {
             start_error(
                 &e,
                 format!(
@@ -172,7 +185,15 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
                 ),
             )
         })?,
-        None => start_pipes(&args, &env, &cwd, &user, request.stdin.unwrap_or(true)).map_err(|e| {
+        None => start_pipes(
+            &args,
+            &env,
+            &cwd,
+            &user,
+            placement.as_ref(),
+            request.stdin.unwrap_or(true),
+        )
+        .map_err(|e| {
             start_error(
                 &e,
                 format!(
@@ -206,7 +227,14 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
     Ok((process, subscription))
 }
 
-fn start_pipes(args: &[String], env: &[(String, String)], cwd: &Path, user: &User, stdin: bool) -> io::Result<Started> {
+fn start_pipes(
+    args: &[String],
+    env: &[(String, String)],
+    cwd: &Path,
+    user: &User,
+    placement: Option<&Placement>,
+    stdin: bool,
+) -> io::Result<Started> {
     let mut command = tokio::process::Command::new("/bin/sh");
     command
         .args(args)
@@ -216,6 +244,10 @@ fn start_pipes(args: &[String], env: &[(String, String)], cwd: &Path, user: &Use
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(placement) = placement {
+        let procs = placement.raw_fd();
+        unsafe { command.pre_exec(move || Placement::join(procs)) };
+    }
 
     let mut child = spawn_as(&mut command, user)?;
     let stdout = child.stdout.take().map(|stdout| OutputPipe {
@@ -241,6 +273,7 @@ fn start_pty(
     env: &[(String, String)],
     cwd: &Path,
     user: &User,
+    placement: Option<&Placement>,
     rows: u32,
     cols: u32,
 ) -> io::Result<Started> {
@@ -253,9 +286,12 @@ fn start_pty(
         .env_clear()
         .envs(env.iter().cloned())
         .current_dir(cwd);
-    let child = unsafe { command.pre_exec(switch_user(user)) }
-        .spawn(pts)
-        .map_err(io::Error::other)?;
+    let command = unsafe { command.pre_exec(switch_user(user)) };
+    let command = match placement.map(Placement::raw_fd) {
+        Some(procs) => unsafe { command.pre_exec(move || Placement::join(procs)) },
+        None => command,
+    };
+    let child = command.spawn(pts).map_err(io::Error::other)?;
 
     let (reader, writer) = pty.into_split();
     Ok(Started {

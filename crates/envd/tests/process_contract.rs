@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use common::spawn_server_with_state;
+use common::{spawn_server_with_flags, spawn_server_with_state};
 use serde_json::{Value, json};
 
 struct Stream {
@@ -28,8 +28,16 @@ fn envelope(body: &Value) -> Vec<u8> {
 }
 
 async fn open(addr: std::net::SocketAddr, method: &str, body: Value) -> Stream {
+    open_as(addr, method, body, "root").await
+}
+
+async fn open_as(addr: std::net::SocketAddr, method: &str, body: Value, user: &str) -> Stream {
     let response = reqwest::Client::new()
         .post(format!("http://{addr}/process.Process/{method}"))
+        .header(
+            "authorization",
+            format!("Basic {}", STANDARD.encode(format!("{user}:"))),
+        )
         .header("content-type", "application/connect+json")
         .header("keepalive-ping-interval", "60")
         .body(envelope(&body))
@@ -404,4 +412,45 @@ async fn disconnected_subscriber_does_not_stop_others() {
     assert!(expected.ends_with(&received), "missing tail of output");
     assert!(received.len() > expected.len() / 2, "{received}");
     assert_eq!(events.last().unwrap()["end"]["status"], "exit status 0");
+}
+
+#[tokio::test]
+async fn processes_start_in_their_cgroup() {
+    let root = std::path::PathBuf::from(format!("/sys/fs/cgroup/envd-contract-{}", std::process::id()));
+    let cgroup2 =
+        nix::sys::statfs::statfs("/sys/fs/cgroup").is_ok_and(|stats| stats.filesystem_type().0 as i64 == 0x6367_7270);
+    if !nix::unistd::geteuid().is_root() || !cgroup2 {
+        eprintln!("skipping: needs root and cgroup2");
+        return;
+    }
+    std::fs::create_dir_all(&root).unwrap();
+    let (addr, state) = spawn_server_with_flags(&["-cgroup-root", root.to_str().unwrap()]).await;
+    let pipes = start_body("/bin/cat", &["/proc/self/cgroup"]);
+    let pty = json!({
+        "process": { "cmd": "/bin/cat", "args": ["/proc/self/cgroup"] },
+        "pty": { "size": { "cols": 80, "rows": 24 } }
+    });
+    let system = json!({ "process": { "cmd": "/bin/cat", "args": ["/proc/self/cgroup"] }, "tag": "_system" });
+
+    let (piped, _) = collect(open(addr, "Start", pipes).await).await;
+    let (terminal, _) = collect(open(addr, "Start", pty).await).await;
+    let (untouched, _) = collect(open(addr, "Start", system).await).await;
+    let unprivileged = json!({ "process": { "cmd": "/bin/cat", "args": ["/proc/self/cgroup"], "cwd": "/" } });
+    let (as_nobody, nobody_trailer) = collect(open_as(addr, "Start", unprivileged, "nobody").await).await;
+    let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+    drop(state);
+    ["user", "ptys", "socats"]
+        .iter()
+        .for_each(|name| drop(std::fs::remove_dir(root.join(name))));
+    let _ = std::fs::remove_dir(&root);
+
+    let name = root.file_name().unwrap().to_str().unwrap();
+    assert_eq!(output(&piped, "stdout"), format!("0::/{name}/user\n"));
+    assert_eq!(output(&terminal, "pty"), format!("0::/{name}/ptys\r\n"));
+    assert_eq!(output(&untouched, "stdout"), own);
+    assert_eq!(
+        output(&as_nobody, "stdout"),
+        format!("0::/{name}/user\n"),
+        "{nobody_trailer:?}"
+    );
 }
