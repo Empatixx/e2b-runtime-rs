@@ -1,3 +1,4 @@
+pub mod collapse;
 pub mod envs;
 pub mod files;
 pub mod filesystem;

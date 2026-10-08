@@ -11,13 +11,26 @@ async fn health_returns_204_no_store() {
 }
 
 #[tokio::test]
-async fn phase2_routes_return_501() {
+async fn collapse_reports_its_work_like_upstream() {
     let (addr, _) = spawn_server_with_state().await;
-    let c = reqwest::Client::new();
-    for p in ["/collapse"] {
-        let res = c.post(format!("http://{addr}{p}")).send().await.unwrap();
-        assert_eq!(res.status(), 501, "{p}");
-    }
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/collapse"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["cache-control"], "no-store");
+    let body = res.text().await.unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let keys: Vec<&str> = parsed.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        ["alreadyHuge", "chunks", "collapsed", "elapsedMs", "regions", "skipped"]
+    );
+    assert!(body.starts_with("{\"alreadyHuge\":") && body.ends_with("}\n"), "{body}");
 }
 
 #[tokio::test]

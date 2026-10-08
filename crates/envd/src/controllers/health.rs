@@ -32,7 +32,3 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
         }
     }
 }
-
-pub async fn not_implemented() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}

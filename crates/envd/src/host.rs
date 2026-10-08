@@ -1,3 +1,4 @@
+pub mod collapse;
 pub mod fsfreeze;
 pub mod hosts;
 pub mod metrics;
