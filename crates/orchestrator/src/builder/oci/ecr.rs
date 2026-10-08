@@ -10,8 +10,9 @@ const TARGET: &str = "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken
 const CONTENT_TYPE: &str = "application/x-amz-json-1.1";
 const BODY: &str = "{}";
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
+const REDACTED: &str = "<redacted>";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AwsCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -19,10 +20,30 @@ pub struct AwsCredentials {
     pub region: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BasicCredentials {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &REDACTED)
+            .field("session_token", &self.session_token.as_ref().map(|_| REDACTED))
+            .field("region", &self.region)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for BasicCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BasicCredentials")
+            .field("username", &self.username)
+            .field("password", &REDACTED)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

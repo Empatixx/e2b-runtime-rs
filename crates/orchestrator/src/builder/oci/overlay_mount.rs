@@ -1,6 +1,7 @@
 use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use nix::libc;
@@ -40,7 +41,7 @@ impl FsContext {
 
     fn set_string(&self, key: &str, value: &Path) -> io::Result<()> {
         let key = c_string(key)?;
-        let value = c_string(&value.to_string_lossy())?;
+        let value = c_path(value)?;
         check(unsafe {
             libc::syscall(
                 libc::SYS_fsconfig,
@@ -76,7 +77,7 @@ impl FsContext {
 
 fn move_mount(mount: &OwnedFd, target: &Path) -> io::Result<()> {
     let empty = c_string("")?;
-    let target = c_string(&target.to_string_lossy())?;
+    let target = c_path(target)?;
     check(unsafe {
         libc::syscall(
             libc::SYS_move_mount,
@@ -92,6 +93,10 @@ fn move_mount(mount: &OwnedFd, target: &Path) -> io::Result<()> {
 
 fn c_string(text: &str) -> io::Result<CString> {
     CString::new(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn c_path(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 fn check(result: libc::c_long) -> io::Result<libc::c_long> {
