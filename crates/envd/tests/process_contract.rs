@@ -418,7 +418,7 @@ async fn disconnected_subscriber_does_not_stop_others() {
 async fn processes_start_in_their_cgroup() {
     let root = std::path::PathBuf::from(format!("/sys/fs/cgroup/envd-contract-{}", std::process::id()));
     let cgroup2 =
-        nix::sys::statfs::statfs("/sys/fs/cgroup").is_ok_and(|stats| stats.filesystem_type().0 as i64 == 0x6367_7270);
+        nix::sys::statfs::statfs("/sys/fs/cgroup").is_ok_and(|stats| stats.filesystem_type().0 == 0x6367_7270);
     if !nix::unistd::geteuid().is_root() || !cgroup2 {
         eprintln!("skipping: needs root and cgroup2");
         return;
