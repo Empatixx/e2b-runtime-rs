@@ -10,7 +10,9 @@ pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod node;
 pub mod registry;
+pub mod retry;
 #[cfg(target_os = "linux")]
 pub mod service;
 pub mod shutdown;
 pub mod status;
+pub mod uploads;
