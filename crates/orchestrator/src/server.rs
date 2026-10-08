@@ -11,6 +11,8 @@ pub mod lifecycle;
 pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod node;
+#[cfg(target_os = "linux")]
+pub mod oom_monitor;
 pub mod registry;
 pub mod retry;
 pub mod scheduling;

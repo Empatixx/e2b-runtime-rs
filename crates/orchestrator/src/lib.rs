@@ -11,6 +11,7 @@ pub mod hoststats;
 pub mod hyperloop;
 pub mod memory;
 pub mod network;
+pub mod oom;
 pub mod phases;
 pub mod proto;
 pub mod routing;

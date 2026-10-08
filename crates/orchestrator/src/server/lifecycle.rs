@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
 use super::node::{Node, event_sandbox, execution, routed_sandbox, stats_identity};
+use super::oom_monitor::OomMonitor;
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
@@ -68,6 +69,7 @@ struct Running {
     commands: mpsc::Receiver<Command>,
     node: Arc<Node>,
     host_stats: Option<HostStatsCollector>,
+    _oom: OomMonitor,
     _work: Work,
 }
 
@@ -82,8 +84,14 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         .get()
         .zip(sandbox.cgroup_stats())
         .map(|(sink, reader)| HostStatsCollector::start(reader, stats_identity(&handle.info.lock()), sink.clone()));
+    let oom = OomMonitor::start(
+        sandbox.envd_address(),
+        handle.info.lock().config.envd_access_token.clone(),
+        sandbox.id().to_owned(),
+    );
     let running = Running {
         host_stats,
+        _oom: oom,
         sandbox,
         slot,
         info: handle.info.clone(),
