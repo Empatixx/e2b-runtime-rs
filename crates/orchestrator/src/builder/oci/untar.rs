@@ -1,40 +1,40 @@
+mod entry;
 mod scoped;
 
-use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::AtFlags;
-use nix::sys::stat::{Mode, SFlag, UtimensatFlags, makedev, mknod, utimensat};
-use nix::sys::time::TimeSpec;
-use nix::unistd::{Gid, Uid, fchownat, mkfifo};
-use tar::{Archive, Entry, EntryType, Header};
+use nix::sys::stat::{Mode, SFlag, makedev, mknod};
+use nix::unistd::{Gid, Uid, fchownat};
+use tar::{Archive, Entry, EntryType};
 
-use scoped::{clean_relative, resolve_dir};
+use entry::{EntryMeta, Times, set_times};
+use scoped::{clean_local, resolve_dir};
 
-const WHITEOUT_PREFIX: &str = ".wh.";
-const OPAQUE_WHITEOUT: &str = ".wh..wh..opq";
+const WHITEOUT_PREFIX: &[u8] = b".wh.";
+const OPAQUE_WHITEOUT: &[u8] = b".wh..wh..opq";
 const OPAQUE_XATTR: &str = "trusted.overlay.opaque";
-const XATTR_PAX_PREFIX: &str = "SCHILY.xattr.";
 const PERMISSION_BITS: u32 = 0o7777;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Owner {
-    uid: u32,
-    gid: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Times {
-    accessed: i64,
-    modified: i64,
-}
+const FILE_PERMISSION_BITS: u32 = 0o777;
 
 struct DirectoryTimes {
     path: PathBuf,
     times: Times,
+}
+
+struct Target {
+    parent: PathBuf,
+    name: std::ffi::OsString,
+}
+
+impl Target {
+    fn path(&self) -> PathBuf {
+        self.parent.join(&self.name)
+    }
 }
 
 pub fn untar(reader: impl Read, root: &Path) -> io::Result<()> {
@@ -48,37 +48,43 @@ pub fn untar(reader: impl Read, root: &Path) -> io::Result<()> {
     }
     directories
         .iter()
-        .rev()
-        .try_for_each(|directory| set_times(&directory.path, directory.times))
+        .try_for_each(|directory| set_times(&directory.path, directory.times, true))
 }
 
 fn apply<R: Read>(entry: &mut Entry<R>, root: &Path) -> io::Result<Option<DirectoryTimes>> {
-    let mut parts = clean_relative(&entry.path()?);
-    let Some(name) = parts.pop() else {
+    let meta = EntryMeta::read(entry)?;
+    if meta.kind == EntryType::XGlobalHeader {
+        return Ok(None);
+    }
+    let raw_name = entry.path_bytes().into_owned();
+    let Some(mut parts) = clean_local(&raw_name).map_err(|()| invalid_entry_name(&raw_name))? else {
         return Ok(None);
     };
-    let header = entry.header().clone();
-    let parent = resolve_dir(root, &parts, true)?;
-    let name_text = name.to_string_lossy().into_owned();
-    if name_text == OPAQUE_WHITEOUT {
-        xattr::set(&parent, OPAQUE_XATTR, b"y")?;
+    let name = parts.pop().ok_or_else(|| invalid_entry_name(&raw_name))?;
+    let target = Target {
+        parent: resolve_dir(root, &parts, true)?,
+        name,
+    };
+    remove_existing(&target.path(), meta.kind)?;
+    if !convert_whiteout(&target, &meta, &raw_name)? {
         return Ok(None);
     }
-    if let Some(hidden) = name_text.strip_prefix(WHITEOUT_PREFIX) {
-        return whiteout(&parent.join(hidden), &owner(&header)?).map(|()| None);
-    }
-    let path = parent.join(&name);
-    remove_conflicting(&path, header.entry_type())?;
-    create(entry, &header, &path, root)?;
-    finish(entry, &header, &path)
+    let link = link_target(entry, &meta, root)?;
+    create(entry, &meta, &target.path(), link.as_deref())?;
+    finish(&meta, &target.path(), link.as_deref())
 }
 
-fn whiteout(path: &Path, owner: &Owner) -> io::Result<()> {
-    mknod(path, SFlag::S_IFCHR, Mode::empty(), makedev(0, 0))?;
-    chown(path, owner)
+fn invalid_entry_name(name: &[u8]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "invalid entry name {}",
+            crate::go_strconv::quote(&String::from_utf8_lossy(name))
+        ),
+    )
 }
 
-fn remove_conflicting(path: &Path, kind: EntryType) -> io::Result<()> {
+fn remove_existing(path: &Path, kind: EntryType) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(existing) if existing.is_dir() && kind == EntryType::Directory => Ok(()),
         Ok(existing) if existing.is_dir() => std::fs::remove_dir_all(path),
@@ -88,20 +94,86 @@ fn remove_conflicting(path: &Path, kind: EntryType) -> io::Result<()> {
     }
 }
 
-fn create<R: Read>(entry: &mut Entry<R>, header: &Header, path: &Path, root: &Path) -> io::Result<()> {
-    let mode = header.mode()? & PERMISSION_BITS;
-    match header.entry_type() {
+fn convert_whiteout(target: &Target, meta: &EntryMeta, raw_name: &[u8]) -> io::Result<bool> {
+    let base = target.name.as_bytes();
+    if [b".wh.".as_slice(), b".wh..", b".wh..."].contains(&base) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid whiteout entry {}",
+                crate::go_strconv::quote(&String::from_utf8_lossy(raw_name))
+            ),
+        ));
+    }
+    if base == OPAQUE_WHITEOUT {
+        return xattr::set(&target.parent, OPAQUE_XATTR, b"y")
+            .map(|()| false)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("fsetxattr('{}', {OPAQUE_XATTR}=y): {e}", target.parent.display()),
+                )
+            });
+    }
+    let Some(hidden) = base.strip_prefix(WHITEOUT_PREFIX) else {
+        return Ok(true);
+    };
+    let path = target.parent.join(std::ffi::OsStr::from_bytes(hidden));
+    mknod(&path, SFlag::S_IFCHR, Mode::empty(), makedev(0, 0)).map_err(|e| {
+        io::Error::new(
+            io::Error::from(e).kind(),
+            format!("failed to mknod('{}', S_IFCHR, 0): {e}", path.display()),
+        )
+    })?;
+    if meta.uid != 0 || meta.gid != 0 {
+        chown(&path, meta)?;
+    }
+    Ok(false)
+}
+
+fn link_target<R: Read>(entry: &Entry<R>, meta: &EntryMeta, root: &Path) -> io::Result<Option<PathBuf>> {
+    let Some(link) = entry.link_name_bytes().map(|name| name.into_owned()) else {
+        return Ok(None);
+    };
+    match meta.kind {
+        EntryType::Link => hard_link_target(&link, root).map(Some),
+        _ => Ok(Some(PathBuf::from(std::ffi::OsStr::from_bytes(&link)))),
+    }
+}
+
+fn hard_link_target(link: &[u8], root: &Path) -> io::Result<PathBuf> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid hardlink target {}",
+                crate::go_strconv::quote(&String::from_utf8_lossy(link))
+            ),
+        )
+    };
+    let mut parts = clean_local(link).map_err(|()| invalid())?.ok_or_else(invalid)?;
+    let name = parts.pop().ok_or_else(invalid)?;
+    resolve_dir(root, &parts, false).map(|parent| parent.join(name))
+}
+
+fn create<R: Read>(entry: &mut Entry<R>, meta: &EntryMeta, path: &Path, link: Option<&Path>) -> io::Result<()> {
+    match meta.kind {
         EntryType::Directory => match path.is_dir() {
             true => Ok(()),
-            false => std::fs::create_dir(path),
+            false => std::fs::DirBuilder::new()
+                .mode(meta.mode & FILE_PERMISSION_BITS)
+                .create(path),
         },
-        EntryType::Regular | EntryType::Continuous => write_file(entry, path, mode),
-        EntryType::Symlink => std::os::unix::fs::symlink(link_name(header)?, path),
-        EntryType::Link => std::fs::hard_link(hard_link_target(header, root)?, path),
-        EntryType::Char => make_device(header, path, SFlag::S_IFCHR, mode),
-        EntryType::Block => make_device(header, path, SFlag::S_IFBLK, mode),
-        EntryType::Fifo => mkfifo(path, Mode::from_bits_truncate(mode)).map_err(io::Error::from),
-        _ => Ok(()),
+        EntryType::Regular | EntryType::GNUSparse => write_file(entry, path, meta.mode & FILE_PERMISSION_BITS),
+        EntryType::Symlink => std::os::unix::fs::symlink(link.unwrap_or(Path::new("")), path),
+        EntryType::Link => std::fs::hard_link(link.unwrap_or(Path::new("")), path),
+        EntryType::Char => make_node(meta, path, SFlag::S_IFCHR),
+        EntryType::Block => make_node(meta, path, SFlag::S_IFBLK),
+        EntryType::Fifo => make_node(meta, path, SFlag::S_IFIFO),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unhandled tar header type {}", other.as_byte()),
+        )),
     }
 }
 
@@ -115,124 +187,69 @@ fn write_file<R: Read>(entry: &mut Entry<R>, path: &Path, mode: u32) -> io::Resu
     io::copy(entry, &mut file).map(drop)
 }
 
-fn make_device(header: &Header, path: &Path, kind: SFlag, mode: u32) -> io::Result<()> {
-    let major = header.device_major()?.unwrap_or_default();
-    let minor = header.device_minor()?.unwrap_or_default();
+fn make_node(meta: &EntryMeta, path: &Path, kind: SFlag) -> io::Result<()> {
     mknod(
         path,
         kind,
-        Mode::from_bits_truncate(mode),
-        makedev(major.into(), minor.into()),
+        Mode::from_bits_truncate(meta.mode & PERMISSION_BITS),
+        makedev(meta.device_major.into(), meta.device_minor.into()),
     )
     .map_err(io::Error::from)
 }
 
-fn link_name(header: &Header) -> io::Result<PathBuf> {
-    header
-        .link_name()?
-        .map(|name| name.into_owned())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "link entry without a target"))
-}
-
-fn hard_link_target(header: &Header, root: &Path) -> io::Result<PathBuf> {
-    let mut parts: Vec<OsString> = clean_relative(&link_name(header)?);
-    let name = parts
-        .pop()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "hard link to the layer root"))?;
-    resolve_dir(root, &parts, false).map(|parent| parent.join(name))
-}
-
-fn finish<R: Read>(entry: &mut Entry<R>, header: &Header, path: &Path) -> io::Result<Option<DirectoryTimes>> {
-    let kind = header.entry_type();
-    chown(path, &owner(header)?)?;
-    if kind != EntryType::Symlink && kind != EntryType::Link {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(header.mode()? & PERMISSION_BITS))?;
-    }
-    apply_xattrs(entry, path)?;
-    let times = times(header)?;
-    match kind {
-        EntryType::Directory => Ok(Some(DirectoryTimes {
-            path: path.to_path_buf(),
-            times,
-        })),
-        EntryType::Link => Ok(None),
-        _ => set_times(path, times).map(|()| None),
-    }
-}
-
-fn apply_xattrs<R: Read>(entry: &mut Entry<R>, path: &Path) -> io::Result<()> {
-    let Some(extensions) = entry.pax_extensions()? else {
-        return Ok(());
+fn finish(meta: &EntryMeta, path: &Path, link: Option<&Path>) -> io::Result<Option<DirectoryTimes>> {
+    chown(path, meta)?;
+    meta.apply_xattrs(path)?;
+    let follows = match meta.kind {
+        EntryType::Symlink => false,
+        EntryType::Link => !link.is_some_and(is_symlink),
+        _ => true,
     };
-    extensions.filter_map(Result::ok).try_for_each(|extension| {
-        let Some(name) = extension.key().ok().and_then(|key| key.strip_prefix(XATTR_PAX_PREFIX)) else {
-            return Ok(());
-        };
-        match xattr::set(path, name, extension.value_bytes()) {
-            Err(e) if name.starts_with("security.") && is_unsupported(&e) => Ok(()),
-            outcome => outcome,
-        }
-    })
-}
-
-fn is_unsupported(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(nix::libc::EOPNOTSUPP) | Some(nix::libc::EPERM)
-    )
-}
-
-fn owner(header: &Header) -> io::Result<Owner> {
-    let raw = header.as_old();
-    Ok(Owner {
-        uid: numeric(header.uid(), &raw.uid)? as u32,
-        gid: numeric(header.gid(), &raw.gid)? as u32,
-    })
-}
-
-fn numeric(parsed: io::Result<u64>, field: &[u8]) -> io::Result<u64> {
-    match parsed {
-        Err(_) if field.iter().all(|byte| matches!(byte, 0 | b' ')) => Ok(0),
-        parsed => parsed,
+    if follows {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(meta.mode & PERMISSION_BITS))?;
+    }
+    match (meta.kind, follows) {
+        (EntryType::Directory, _) => Ok(Some(DirectoryTimes {
+            path: path.to_path_buf(),
+            times: meta.times,
+        })),
+        (EntryType::Symlink, _) => set_times(path, meta.times, false).map(|()| None),
+        (_, true) => set_times(path, meta.times, true).map(|()| None),
+        (_, false) => Ok(None),
     }
 }
 
-fn chown(path: &Path, owner: &Owner) -> io::Result<()> {
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink())
+}
+
+fn chown(path: &Path, meta: &EntryMeta) -> io::Result<()> {
     fchownat(
         None,
         path,
-        Some(Uid::from_raw(owner.uid)),
-        Some(Gid::from_raw(owner.gid)),
+        Some(Uid::from_raw(meta.uid)),
+        Some(Gid::from_raw(meta.gid)),
         AtFlags::AT_SYMLINK_NOFOLLOW,
     )
-    .map_err(io::Error::from)
-}
-
-fn times(header: &Header) -> io::Result<Times> {
-    let modified = numeric(header.mtime(), &header.as_old().mtime)? as i64;
-    let accessed = header
-        .as_gnu()
-        .and_then(|gnu| gnu.atime().ok())
-        .map_or(modified, |atime| atime as i64);
-    Ok(Times { accessed, modified })
-}
-
-fn set_times(path: &Path, times: Times) -> io::Result<()> {
-    utimensat(
-        None,
-        path,
-        &TimeSpec::new(times.accessed, 0),
-        &TimeSpec::new(times.modified, 0),
-        UtimensatFlags::NoFollowSymlink,
-    )
-    .map_err(io::Error::from)
+    .map_err(|e| {
+        io::Error::new(
+            io::Error::from(e).kind(),
+            format!(
+                "failed to Lchown {} for UID {}, GID {}: {}",
+                crate::go_strconv::quote(&path.display().to_string()),
+                meta.uid,
+                meta.gid,
+                crate::go_os::reason(&io::Error::from(e))
+            ),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::FileTypeExt;
 
-    use tar::Builder;
+    use tar::{Builder, Header};
 
     use super::*;
 
@@ -341,8 +358,7 @@ mod tests {
             ("dir/", EntryType::Directory, b"", ""),
             ("dir/.wh..wh..opq", EntryType::Regular, b"", ""),
             ("dir/file", EntryType::Regular, b"data", ""),
-            ("dir/hard", EntryType::Link, b"", "dir/file"),
-            ("../../escape", EntryType::Regular, b"x", ""),
+            ("dir/hard", EntryType::Link, b"", "/dir/file"),
         ]);
 
         untar(layer.as_slice(), root.path()).unwrap();
@@ -352,7 +368,6 @@ mod tests {
             Some(b"y".to_vec())
         );
         assert_eq!(std::fs::read(root.path().join("dir/hard")).unwrap(), b"data");
-        assert!(root.path().join("escape").is_file());
         assert_eq!(
             std::fs::metadata(root.path().join("dir/file"))
                 .unwrap()
@@ -360,6 +375,86 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn escaping_names_and_unknown_types_fail_like_moby() {
+        let root = tempfile::tempdir().unwrap();
+        let escaping = untar(
+            tar(&[("../../escape", EntryType::Regular, b"x", "")]).as_slice(),
+            root.path(),
+        );
+        let continuous = untar(tar(&[("cont", EntryType::Continuous, b"", "")]).as_slice(), root.path());
+        let bad_link = untar(
+            tar(&[("h", EntryType::Link, b"", "../outside")]).as_slice(),
+            root.path(),
+        );
+        let bad_whiteout = untar(tar(&[(".wh..", EntryType::Regular, b"", "")]).as_slice(), root.path());
+
+        assert_eq!(escaping.unwrap_err().to_string(), "invalid entry name \"../../escape\"");
+        assert_eq!(continuous.unwrap_err().to_string(), "unhandled tar header type 55");
+        assert_eq!(
+            bad_link.unwrap_err().to_string(),
+            "invalid hardlink target \"../outside\""
+        );
+        assert_eq!(
+            bad_whiteout.unwrap_err().to_string(),
+            "invalid whiteout entry \".wh..\""
+        );
+        assert!(!root.path().join("escape").exists());
+    }
+
+    #[test]
+    fn long_link_targets_setuid_hardlinks_and_global_headers() {
+        if !is_root() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let long_target = format!("/{}", "deep/".repeat(30));
+        let mut builder = Builder::new(Vec::new());
+        let mut global = Header::new_ustar();
+        global.set_entry_type(EntryType::XGlobalHeader);
+        global.set_size(0);
+        global.set_cksum();
+        builder.append(&global, std::io::empty()).unwrap();
+        let mut file = Header::new_gnu();
+        file.set_entry_type(EntryType::Regular);
+        file.set_mode(0o4755);
+        file.set_uid(0);
+        file.set_gid(0);
+        file.set_size(2);
+        builder.append_data(&mut file, "bin/tool", b"hi".as_slice()).unwrap();
+        let mut hard = Header::new_gnu();
+        hard.set_entry_type(EntryType::Link);
+        hard.set_mode(0o4755);
+        hard.set_uid(0);
+        hard.set_gid(0);
+        hard.set_size(0);
+        builder.append_link(&mut hard, "bin/alias", "bin/tool").unwrap();
+        let mut link = Header::new_gnu();
+        link.set_entry_type(EntryType::Symlink);
+        link.set_mode(0o777);
+        link.set_uid(0);
+        link.set_gid(0);
+        link.set_size(0);
+        builder.append_link(&mut link, "long", &long_target).unwrap();
+        let layer = builder.into_inner().unwrap();
+
+        untar(layer.as_slice(), root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(root.path().join("long")).unwrap(),
+            PathBuf::from(&long_target)
+        );
+        let mode = std::fs::metadata(root.path().join("bin/alias"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o4755);
+        assert_eq!(
+            std::fs::metadata(root.path().join("bin")).unwrap().permissions().mode() & 0o777,
+            0o755
         );
     }
 }

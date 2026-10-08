@@ -1,23 +1,26 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 const MAX_LINKS: usize = 255;
 const NEW_DIR_MODE: u32 = 0o755;
 
-pub fn clean_relative(path: &Path) -> Vec<OsString> {
-    path.components().fold(Vec::new(), |mut parts, component| {
-        match component {
-            Component::Normal(name) => parts.push(name.to_os_string()),
-            Component::ParentDir => {
-                parts.pop();
+pub fn clean_local(raw: &[u8]) -> Result<Option<Vec<OsString>>, ()> {
+    let trimmed = &raw[raw.iter().take_while(|byte| **byte == b'/').count()..];
+    let parts = trimmed
+        .split(|byte| *byte == b'/')
+        .filter(|part| !part.is_empty() && *part != b".")
+        .try_fold(Vec::new(), |mut parts: Vec<OsString>, part| match part {
+            b".." => parts.pop().map(|_| parts).ok_or(()),
+            name => {
+                parts.push(OsString::from(std::ffi::OsStr::from_bytes(name)));
+                Ok(parts)
             }
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-        }
-        parts
-    })
+        })?;
+    Ok((!parts.is_empty()).then_some(parts))
 }
 
 pub fn resolve_dir(root: &Path, parts: &[OsString], create: bool) -> io::Result<PathBuf> {
@@ -58,6 +61,7 @@ pub fn resolve_dir(root: &Path, parts: &[OsString], create: bool) -> io::Result<
             Ok(_) => return Err(io::Error::from_raw_os_error(nix::libc::ENOTDIR)),
             Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
                 std::fs::DirBuilder::new().mode(NEW_DIR_MODE).create(&candidate)?;
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(NEW_DIR_MODE))?;
                 resolved.push(name);
             }
             Err(e) => return Err(e),
@@ -75,12 +79,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cleaning_never_climbs_above_the_root() {
+    fn names_are_cleaned_like_go_and_escapes_are_rejected() {
         assert_eq!(
-            clean_relative(Path::new("/a/../../b/./c")),
-            vec![OsString::from("b"), OsString::from("c")]
+            clean_local(b"/a/./b/../c"),
+            Ok(Some(vec![OsString::from("a"), OsString::from("c")]))
         );
-        assert!(clean_relative(Path::new("./")).is_empty());
+        assert_eq!(clean_local(b"./"), Ok(None));
+        assert_eq!(clean_local(b"/"), Ok(None));
+        assert_eq!(clean_local(b"../../escape"), Err(()));
+        assert_eq!(clean_local(b"a/../../b"), Err(()));
     }
 
     #[test]
@@ -90,8 +97,8 @@ mod tests {
         std::os::unix::fs::symlink("/real", root.path().join("abs")).unwrap();
         std::os::unix::fs::symlink("../../../..", root.path().join("real/up")).unwrap();
 
-        let through_absolute = resolve_dir(root.path(), &clean_relative(Path::new("abs/new")), true).unwrap();
-        let escaping = resolve_dir(root.path(), &clean_relative(Path::new("real/up/etc")), true).unwrap();
+        let through_absolute = resolve_dir(root.path(), &clean_local(b"abs/new").unwrap().unwrap(), true).unwrap();
+        let escaping = resolve_dir(root.path(), &clean_local(b"real/up/etc").unwrap().unwrap(), true).unwrap();
 
         assert_eq!(through_absolute, root.path().join("real/new"));
         assert_eq!(escaping, root.path().join("etc"));
