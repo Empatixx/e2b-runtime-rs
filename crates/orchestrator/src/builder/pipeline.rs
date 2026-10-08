@@ -10,6 +10,7 @@ use super::layer::envd_version;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
 use super::phases::base::{BasePhase, BaseRequest, BaseSource};
+use super::phases::ensure_free_disk::{EnsureFreeDiskPhase, free_disk_size_mb};
 use super::phases::finalize::FinalizePhase;
 use super::phases::optimize::OptimizePhase;
 use super::phases::steps::{StepPhase, StepRole, StepsBuild, force_steps};
@@ -72,6 +73,13 @@ impl PhasePipeline {
             phases.push(Box::new(StepPhase::default_user(steps.clone(), config.force)));
         }
         phases.extend(step_phases(&steps, &config));
+        if self.env.config.ensure_free_disk_space {
+            phases.push(Box::new(EnsureFreeDiskPhase {
+                build: steps.clone(),
+                force: config.force.unwrap_or(false),
+                free_disk_size_mb: free_disk_size_mb(config.free_disk_size_mb, config.disk_size_mb),
+            }));
+        }
         phases.push(Box::new(FinalizePhase {
             build: steps.clone(),
             build_id: config.build_id.clone(),
