@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use super::backend::Storage;
-use super::header::Header;
+use super::header::{Header, Metadata, PAGE_SIZE};
 use super::paths::BuildPaths;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +12,17 @@ pub struct Build {
 }
 
 impl Build {
+    pub fn filesystem_only(build_id: Uuid, rootfs: Header) -> Self {
+        Self {
+            build_id,
+            memfile: Header {
+                metadata: Metadata::template(build_id, PAGE_SIZE, 0),
+                mappings: Vec::new(),
+            },
+            rootfs,
+        }
+    }
+
     pub async fn load(storage: &Storage, build_id: Uuid) -> Result<Self, String> {
         let paths = BuildPaths::new(build_id);
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
@@ -45,6 +56,18 @@ impl Build {
 mod tests {
     use super::*;
     use crate::storage::header::Metadata;
+
+    #[test]
+    fn a_filesystem_only_build_has_no_memory() {
+        let build_id = Uuid::new_v4();
+        let rootfs = Header::new(Metadata::template(build_id, 4096, 16384), Vec::new()).unwrap();
+
+        let build = Build::filesystem_only(build_id, rootfs.clone());
+
+        assert_eq!(build.rootfs, rootfs);
+        assert_eq!(build.memfile.metadata.size, 0);
+        assert!(build.memfile.mappings.is_empty());
+    }
 
     #[tokio::test]
     async fn headers_round_trip_through_storage() {

@@ -115,6 +115,10 @@ impl DiffStore {
         }
     }
 
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
     pub async fn chunker(&self, build_id: Uuid, artifact: Artifact) -> Result<Arc<Chunker>, String> {
         let (cell, pending) = self.cell(DiffKey { build_id, artifact });
         cell.get_or_try_init(|| async {

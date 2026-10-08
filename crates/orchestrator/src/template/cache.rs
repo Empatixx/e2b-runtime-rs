@@ -77,14 +77,22 @@ impl TemplateCache {
         metadata: TemplateMetadata,
         dir: PathBuf,
     ) -> Arc<Template> {
-        let build_id = build.build_id;
-        let template = Arc::new(Template::cached(self.storage.clone(), build, snapfile, metadata, dir));
+        let template = Template::cached(self.storage.clone(), build, snapfile, metadata, dir);
+        self.admit(Arc::new(template))
+    }
+
+    pub fn add_filesystem_layer(&self, build: Build, metadata: TemplateMetadata, dir: PathBuf) -> Arc<Template> {
+        let template = Template::filesystem_layer(self.storage.clone(), build, metadata, dir);
+        self.admit(Arc::new(template))
+    }
+
+    fn admit(&self, template: Arc<Template>) -> Arc<Template> {
         let entry = Entry {
             template: template.clone(),
             expires: Instant::now() + TEMPLATE_EXPIRATION,
             ttl: TEMPLATE_EXPIRATION,
         };
-        if let Some(replaced) = self.entries.lock().insert(build_id, entry) {
+        if let Some(replaced) = self.entries.lock().insert(template.build_id(), entry) {
             self.retire(replaced.template);
         }
         template
@@ -339,6 +347,61 @@ mod tests {
         fixture.cache.evict_expired();
         assert!(!first_dir.exists());
         assert!(second_dir.exists());
+    }
+
+    fn filesystem_only_metadata() -> TemplateMetadata {
+        TemplateMetadata {
+            version: 2,
+            filesystem_only: true,
+            ..TemplateMetadata::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_filesystem_only_layer_loads_from_storage_without_memory_objects() {
+        let fixture = fixture();
+        let build_id = Uuid::new_v4();
+        let rootfs = Header::new(Metadata::template(build_id, 4096, 16384), Vec::new()).unwrap();
+        let paths = BuildPaths::new(build_id);
+        fixture
+            .storage
+            .store_header(&paths.rootfs_header(), &rootfs)
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .put(&paths.metadata(), Bytes::from(filesystem_only_metadata().to_json()))
+            .await
+            .unwrap();
+
+        let template = fixture.cache.get(build_id);
+
+        assert_eq!(
+            template.build().await.unwrap(),
+            Build::filesystem_only(build_id, rootfs)
+        );
+        assert_eq!(template.metadata().await.unwrap(), filesystem_only_metadata());
+    }
+
+    #[tokio::test]
+    async fn a_filesystem_layer_added_locally_has_no_snapfile() {
+        let fixture = fixture();
+        let build_id = Uuid::new_v4();
+        let rootfs = Header::new(Metadata::template(build_id, 4096, 8192), Vec::new()).unwrap();
+        let build = Build::filesystem_only(build_id, rootfs);
+        let dir = fixture.cache.instance_dir(build_id);
+
+        fixture
+            .cache
+            .add_filesystem_layer(build.clone(), filesystem_only_metadata(), dir);
+        let template = fixture.cache.get(build_id);
+
+        assert_eq!(template.build().await.unwrap(), build);
+        assert_eq!(template.metadata().await.unwrap(), filesystem_only_metadata());
+        assert_eq!(
+            template.snapfile().await,
+            Err(TemplateError::NotFound(BuildPaths::new(build_id).snapfile()))
+        );
     }
 
     #[tokio::test(start_paused = true)]

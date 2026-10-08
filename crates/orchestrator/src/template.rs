@@ -72,6 +72,19 @@ impl Template {
         }
     }
 
+    pub fn filesystem_layer(storage: Storage, build: Build, metadata: TemplateMetadata, dir: PathBuf) -> Self {
+        let snapfile = BuildPaths::new(build.build_id).snapfile();
+        Self {
+            build_id: build.build_id,
+            dir,
+            storage,
+            snapfile: OnceCell::new_with(Some(Err(TemplateError::NotFound(snapfile)))),
+            build: OnceCell::new_with(Some(Ok(build))),
+            metadata: OnceCell::new_with(Some(Ok(metadata))),
+            updated_metadata: Mutex::new(None),
+        }
+    }
+
     pub fn build_id(&self) -> Uuid {
         self.build_id
     }
@@ -130,6 +143,12 @@ impl Template {
 
     async fn load_build(&self) -> Result<Build, TemplateError> {
         let paths = self.paths();
+        if self.metadata().await?.filesystem_only {
+            return self
+                .header(&paths.rootfs_header())
+                .await
+                .map(|rootfs| Build::filesystem_only(self.build_id, rootfs));
+        }
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
         let (memfile, rootfs) = tokio::try_join!(self.header(&memfile_header), self.header(&rootfs_header))?;
         Ok(Build {

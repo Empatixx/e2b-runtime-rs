@@ -1,3 +1,5 @@
+mod filesystem;
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -206,10 +208,15 @@ impl LayerExecutor<'_> {
 
     async fn resume(&self, layer: &LayerSandbox<'_>) -> Result<Sandbox, BuildError> {
         let resumed = |e: String| BuildError::Internal(format!("resume sandbox: {e}"));
+        let snapfile = layer
+            .source
+            .snapfile
+            .as_deref()
+            .ok_or_else(|| resumed("the source layer has no snapfile".to_owned()))?;
         let slot = self.lease_slot(layer.sandbox_id, "resume sandbox").await?;
         slot.attach(self.env.node.resume_layer(layer).map_err(resumed)?)
             .envd_timeout(ENVD_WAIT)
-            .resume(&layer.source.snapfile)
+            .resume(snapfile)
             .await
             .map_err(resumed)
     }

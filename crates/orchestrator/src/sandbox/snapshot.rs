@@ -1,3 +1,5 @@
+pub mod filesystem;
+
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
