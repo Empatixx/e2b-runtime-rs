@@ -31,6 +31,7 @@ pub struct SandboxConfig {
     pub prefetch: Option<MemoryPrefetch>,
     pub use_memfd: bool,
     pub hyperloop_ip: Option<String>,
+    pub cgroup_name: String,
 }
 
 #[derive(Default)]
@@ -142,8 +143,10 @@ impl SandboxBuilder {
     }
 
     pub fn build(self) -> Result<SandboxConfig, String> {
+        let id = self.id.ok_or("id is required")?;
         Ok(SandboxConfig {
-            id: self.id.ok_or("id is required")?,
+            cgroup_name: format!("sbx-{id}-{}", uuid::Uuid::new_v4().simple()),
+            id,
             template_id: self.template_id.ok_or("template id is required")?,
             rootfs: self.rootfs.ok_or("rootfs is required")?,
             slot: self.slot.ok_or("slot is required")?,

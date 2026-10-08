@@ -82,7 +82,12 @@ fn nbd_connected_with_size(bytes: u64) -> bool {
 }
 
 fn cgroup_exists(id: &str) -> bool {
-    Path::new("/sys/fs/cgroup/e2b").join(id).exists()
+    let prefix = format!("sbx-{id}-");
+    std::fs::read_dir("/sys/fs/cgroup/e2b")
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
 }
 
 async fn envs(client: &reqwest::Client, base: &str, token: Option<&str>) -> reqwest::Response {
@@ -268,7 +273,7 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
     let without_token = envs(&client, &base, None).await.status();
     let with_token = envs(&client, &base, Some(ACCESS_TOKEN)).await.status();
     let sandbox_id = sandbox_id_from_mmds(&client, &base).await;
-    let cgroup = Path::new("/sys/fs/cgroup/e2b/sbx-contract");
+    let cgroup = sandbox.cgroup_path().unwrap().to_path_buf();
     let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers")).unwrap_or_default();
     let firecracker = std::fs::read_to_string(cgroup.join("cgroup.procs"))
         .unwrap()

@@ -13,10 +13,11 @@ use super::oom_monitor::OomMonitor;
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
+use crate::memory::trace::Trace;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
 use crate::sandbox::Sandbox;
-use crate::sandbox::snapshot::Snapshot;
+use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
 use crate::storage::backend::ObjectMetadata;
 use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
@@ -44,6 +45,13 @@ pub enum Command {
         template_id: String,
         reply: oneshot::Sender<Result<Snapshot, String>>,
     },
+    Checkpoint {
+        build_id: Uuid,
+        reply: oneshot::Sender<Result<LocalSnapshot, String>>,
+    },
+    Trace {
+        reply: oneshot::Sender<Option<Trace>>,
+    },
     Extend,
 }
 
@@ -51,6 +59,12 @@ pub enum Command {
 pub struct SandboxHandle {
     pub info: Arc<Mutex<SandboxInfo>>,
     pub commands: mpsc::Sender<Command>,
+}
+
+impl SandboxHandle {
+    pub fn lifecycle(&self) -> Lifecycle {
+        self.info.lock().lifecycle.clone()
+    }
 }
 
 enum Ending {
@@ -61,6 +75,10 @@ enum Ending {
         build_id: Uuid,
         template_id: String,
         reply: oneshot::Sender<Result<Snapshot, String>>,
+    },
+    Checkpoint {
+        build_id: Uuid,
+        reply: oneshot::Sender<Result<LocalSnapshot, String>>,
     },
 }
 
@@ -109,7 +127,8 @@ impl Running {
     async fn run(mut self) {
         let id = self.sandbox.id().to_owned();
         let ending = self.wait_for_ending().await;
-        self.node.registry.stop(&id);
+        let lifecycle = self.info.lock().lifecycle.clone();
+        self.node.registry.stop(&lifecycle);
         let routed = routed_sandbox(&self.info.lock());
         self.node.routing.on_stopping(&routed).await;
         match ending {
@@ -118,6 +137,7 @@ impl Running {
                 template_id,
                 reply,
             } => self.pause(build_id, template_id, reply).await,
+            Ending::Checkpoint { build_id, reply } => self.checkpoint(build_id, reply).await,
             Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
         }
         if let Some(collector) = self.host_stats.take() {
@@ -126,7 +146,6 @@ impl Running {
         if let Err(e) = self.sandbox.stop().await {
             tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
         }
-        let lifecycle = self.info.lock().lifecycle.clone();
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&lifecycle));
         self.node.network.return_slot(self.slot);
         self.node.registry.finish(&lifecycle);
@@ -150,12 +169,19 @@ impl Running {
         let _ = reply.send(snapshotted.map(|local| local.snapshot));
     }
 
+    async fn checkpoint(&self, build_id: Uuid, reply: oneshot::Sender<Result<LocalSnapshot, String>>) {
+        let parent = self.info.lock().clone();
+        let _ = reply.send(self.node.snapshot_locally(&self.sandbox, &parent, build_id).await);
+    }
+
     async fn wait_for_ending(&mut self) -> Ending {
         loop {
             let deadline = self.deadline();
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::Extend) => continue,
+                    Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
+                    Some(Command::Checkpoint { build_id, reply }) => return Ending::Checkpoint { build_id, reply },
                     Some(Command::Pause { build_id, template_id, reply }) => return Ending::Pause { build_id, template_id, reply },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },

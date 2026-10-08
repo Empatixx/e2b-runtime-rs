@@ -14,8 +14,9 @@ use orchestrator::proto::info_service_client::InfoServiceClient;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
 use orchestrator::proto::template_service_client::TemplateServiceClient;
 use orchestrator::proto::{
-    SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest, SandboxPauseRequest, SandboxUpdateRequest,
-    ServiceInfoStatus, ServiceStatusChangeRequest, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest,
+    SandboxCheckpointRequest, SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest, SandboxPauseRequest,
+    SandboxUpdateRequest, ServiceInfoStatus, ServiceStatusChangeRequest, TemplateConfig, TemplateCreateRequest,
+    TemplateStatusRequest,
 };
 use orchestrator::sandbox::Sandbox;
 use orchestrator::server::app::App;
@@ -187,6 +188,8 @@ fn create_request(id: &str, build: Uuid, lifetime: Duration) -> SandboxCreateReq
             build_id: build.to_string(),
             envd_access_token: Some(TOKEN.to_owned()),
             team_id: "team".to_owned(),
+            execution_id: format!("{id}-execution"),
+            envd_version: "0.5.0".to_owned(),
             vcpu: 2,
             ram_mb: 1024,
             ..SandboxConfig::default()
@@ -194,6 +197,15 @@ fn create_request(id: &str, build: Uuid, lifetime: Duration) -> SandboxCreateReq
         start_time: Some(now.into()),
         end_time: Some((now + lifetime).into()),
         filesystem_boot: None,
+    }
+}
+
+fn checkpoint_request(id: &str, build: Uuid, filesystem_only: bool) -> SandboxCheckpointRequest {
+    SandboxCheckpointRequest {
+        sandbox_id: id.to_owned(),
+        build_id: build.to_string(),
+        metadata: [("template_id".to_owned(), "grpc-template".to_owned())].into(),
+        filesystem_only,
     }
 }
 
@@ -438,6 +450,52 @@ async fn sandbox_lifecycle_over_grpc() {
     println!("same-node resume took {} ms", resume_started.elapsed().as_millis());
     assert_eq!(note(&running_envd(pool).await).await, "before pause");
 
+    let checkpoint_build = Uuid::new_v4();
+    let unknown = cluster
+        .client
+        .checkpoint(checkpoint_request("grpc-nope", checkpoint_build, false))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (unknown.code(), unknown.message()),
+        (Code::NotFound, "sandbox 'grpc-nope' not found")
+    );
+    let filesystem_only = cluster
+        .client
+        .checkpoint(checkpoint_request("grpc-sbx", checkpoint_build, true))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (filesystem_only.code(), filesystem_only.message()),
+        (
+            Code::FailedPrecondition,
+            "filesystem-only checkpoint of sandbox 'grpc-sbx' is disabled"
+        )
+    );
+    put_note(&running_envd(pool).await, "before checkpoint").await;
+    let checkpoint_started = std::time::Instant::now();
+    let checkpointed = cluster
+        .client
+        .checkpoint(checkpoint_request("grpc-sbx", checkpoint_build, false))
+        .await
+        .unwrap()
+        .into_inner();
+    println!("grpc checkpoint took {} ms", checkpoint_started.elapsed().as_millis());
+    assert!(checkpointed.scheduling_metadata.is_some());
+    assert_eq!(
+        cluster.node.uploads.outcome(checkpoint_build),
+        Some(orchestrator::server::uploads::Outcome::Landed)
+    );
+    let listed = cluster.client.list(()).await.unwrap().into_inner().sandboxes;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|sandbox| (sandbox.sandbox_id.as_str(), sandbox.execution_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("grpc-sbx", "grpc-sbx-execution")]
+    );
+    assert_eq!(note(&running_envd(pool).await).await, "before checkpoint");
+
     cluster
         .client
         .delete(SandboxDeleteRequest {
@@ -491,20 +549,22 @@ async fn sandbox_lifecycle_over_grpc() {
 
     cluster.node.close().await;
     let stored = Storage::local(&cluster.dir.path().join("store")).unwrap();
-    let paths = orchestrator::storage::paths::BuildPaths::new(paused_build);
-    for object in [
-        paths.snapfile(),
-        paths.memfile(),
-        paths.memfile_header(),
-        paths.rootfs_header(),
-        paths.metadata(),
-    ] {
-        assert!(stored.exists(&object).await.unwrap(), "{object} was not uploaded");
+    for build in [paused_build, checkpoint_build] {
+        let paths = orchestrator::storage::paths::BuildPaths::new(build);
+        for object in [
+            paths.snapfile(),
+            paths.memfile(),
+            paths.memfile_header(),
+            paths.rootfs_header(),
+            paths.metadata(),
+        ] {
+            assert!(stored.exists(&object).await.unwrap(), "{object} was not uploaded");
+        }
     }
     assert!(
         eventually(Duration::from_secs(20), || pool_namespaces_left(pool).is_empty()
-            && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx").exists()
-            && !Path::new("/sys/fs/cgroup/e2b/grpc-race").exists()
+            && !cgroup_left("grpc-sbx")
+            && !cgroup_left("grpc-race")
             && std::fs::read_dir(cluster.dir.path().join("sandboxes"))
                 .map_or(true, |mut entries| entries.next().is_none())
             && !nbd_connected_with_size(template_size(&host)))
@@ -557,11 +617,7 @@ async fn an_expired_sandbox_is_removed() {
     }
     assert!(emptied, "the expired sandbox is still listed");
     assert!(
-        eventually(Duration::from_secs(20), || !Path::new(
-            "/sys/fs/cgroup/e2b/grpc-expiring"
-        )
-        .exists())
-        .await,
+        eventually(Duration::from_secs(20), || !cgroup_left("grpc-expiring")).await,
         "the expired sandbox left its cgroup"
     );
     cluster.node.close().await;
@@ -569,4 +625,13 @@ async fn an_expired_sandbox_is_removed() {
         eventually(Duration::from_secs(20), || pool_namespaces_left(EXPIRY_POOL).is_empty()).await,
         "closing the pool left a slot"
     );
+}
+
+fn cgroup_left(sandbox_id: &str) -> bool {
+    let prefix = format!("sbx-{sandbox_id}-");
+    std::fs::read_dir("/sys/fs/cgroup/e2b")
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
 }

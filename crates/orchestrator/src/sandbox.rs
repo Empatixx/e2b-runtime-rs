@@ -4,7 +4,7 @@ pub mod resume;
 pub mod snapshot;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::time::Instant;
@@ -62,6 +62,10 @@ impl Sandbox {
 
     pub fn envd_address(&self) -> SocketAddr {
         SocketAddr::from((self.config.slot.host_ip(), ENVD_PORT))
+    }
+
+    pub fn cgroup_path(&self) -> Option<&Path> {
+        self.resources.cgroup.as_ref().map(Cgroup::path)
     }
 
     pub fn cgroup_stats(&self) -> Option<crate::cgroup::CgroupStats> {
@@ -153,7 +157,7 @@ impl Sandbox {
     }
 
     fn create_cgroup(&mut self) -> Option<PathBuf> {
-        Cgroup::create(&self.config.id)
+        Cgroup::create(&self.config.cgroup_name)
             .inspect_err(
                 |e| tracing::warn!(sandbox = %self.config.id, error = %e, "could not create the sandbox cgroup"),
             )

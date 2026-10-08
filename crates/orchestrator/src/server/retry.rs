@@ -14,6 +14,14 @@ pub enum Failure {
     Terminal(String),
 }
 
+impl Failure {
+    pub fn into_message(self) -> String {
+        match self {
+            Failure::Retryable(message) | Failure::Terminal(message) => message,
+        }
+    }
+}
+
 pub fn delays() -> impl Iterator<Item = Duration> {
     std::iter::successors(Some(FIRST_DELAY), |delay| Some((*delay * 2).min(MAX_DELAY)))
 }

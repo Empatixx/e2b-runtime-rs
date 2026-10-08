@@ -1,3 +1,5 @@
+mod checkpoint;
+
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -7,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use tonic::Status;
 use uuid::Uuid;
 
+pub use self::checkpoint::CheckpointRequest;
 use super::admission::Admission;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
@@ -79,6 +82,14 @@ struct ResumeRequest<'a> {
     lifecycle: &'a Lifecycle,
 }
 
+struct StartRequest {
+    template: Arc<Template>,
+    config: SandboxConfig,
+    lifetime: Lifetime,
+    lifecycle: Lifecycle,
+    started_at: SystemTime,
+}
+
 pub struct Lifetime {
     pub start: SystemTime,
     pub end: SystemTime,
@@ -148,29 +159,20 @@ impl Node {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
         let store = self.store.clone();
-        let attempt = move || {
-            let local = local.clone();
-            let storage = storage.clone();
-            let object_metadata = object_metadata.clone();
-            async move {
-                if !local.files.exist() {
-                    return Err(Failure::Terminal("snapshot files are gone".to_owned()));
-                }
-                let metadata = metadata_path(&local);
-                let object = local.snapshot.build.paths().metadata();
-                tokio::try_join!(
-                    local.upload(&storage, &object_metadata),
-                    storage.put_file_with(&object, &metadata, &object_metadata)
-                )
-                .map(|_| ())
-                .map_err(Failure::Retryable)
-            }
-        };
+        let attempt = move || upload_attempt(local.clone(), storage.clone(), object_metadata.clone());
         self.uploads
             .start(build.build_id, parents(&build), attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
                 store.unpin(build.build_id);
             });
+    }
+
+    pub async fn upload_now(&self, local: LocalSnapshot, object_metadata: ObjectMetadata) -> Result<(), String> {
+        let build = local.snapshot.build.clone();
+        let attempt = upload_attempt(local, self.storage.clone(), object_metadata);
+        let uploaded = self.uploads.run(build.build_id, parents(&build), attempt).await;
+        self.store.unpin(build.build_id);
+        uploaded
     }
 
     fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
@@ -264,7 +266,15 @@ impl Node {
         self.registry.reserve(&id).map_err(Status::already_exists)?;
         let started = async {
             let _permit = self.admission.admit(self.registry.running().len()).await?;
-            self.start(config, lifetime, lifecycle.clone()).await
+            let template = self.template_of(&config)?;
+            self.start(StartRequest {
+                template,
+                config,
+                lifetime,
+                lifecycle: lifecycle.clone(),
+                started_at: SystemTime::now(),
+            })
+            .await
         };
         let started = tokio::time::timeout(REQUEST_TIMEOUT, started)
             .await
@@ -294,11 +304,7 @@ impl Node {
         self.registry
             .running()
             .iter()
-            .filter_map(|handle| {
-                self.registry
-                    .stop(&handle.info.lock().config.sandbox_id)
-                    .map(|_| handle)
-            })
+            .filter_map(|handle| self.registry.stop(&handle.lifecycle()).map(|_| handle))
             .for_each(|handle| drop(handle.commands.try_send(Command::Delete)));
         let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
         while !self.registry.is_empty() && tokio::time::Instant::now() < deadline {
@@ -326,13 +332,14 @@ impl Node {
         let _ = std::fs::remove_dir_all(&self.work_dir);
     }
 
-    async fn start(
-        self: &Arc<Self>,
-        config: SandboxConfig,
-        lifetime: Lifetime,
-        lifecycle: Lifecycle,
-    ) -> Result<SandboxHandle, Status> {
-        let template = self.template_of(&config)?;
+    async fn start(self: &Arc<Self>, request: StartRequest) -> Result<SandboxHandle, Status> {
+        let StartRequest {
+            template,
+            config,
+            lifetime,
+            lifecycle,
+            started_at,
+        } = request;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
         let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))?;
         let lease = self.network.lease(egress.as_ref());
@@ -396,7 +403,7 @@ impl Node {
                 slot,
                 template: template.clone(),
                 scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
-                started_at: SystemTime::now(),
+                started_at,
             },
             self.clone(),
         ))
@@ -531,6 +538,24 @@ fn default_user(metadata: Option<&TemplateMetadata>) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .filter(|user| *user == "user")
         .map(str::to_owned)
+}
+
+async fn upload_attempt(
+    local: LocalSnapshot,
+    storage: Storage,
+    object_metadata: ObjectMetadata,
+) -> Result<(), Failure> {
+    if !local.files.exist() {
+        return Err(Failure::Terminal("snapshot files are gone".to_owned()));
+    }
+    let metadata = metadata_path(&local);
+    let object = local.snapshot.build.paths().metadata();
+    tokio::try_join!(
+        local.upload(&storage, &object_metadata),
+        storage.put_file_with(&object, &metadata, &object_metadata)
+    )
+    .map(|_| ())
+    .map_err(Failure::Retryable)
 }
 
 fn metadata_path(local: &LocalSnapshot) -> PathBuf {

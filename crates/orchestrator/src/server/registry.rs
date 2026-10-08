@@ -4,6 +4,12 @@ use parking_lot::Mutex;
 
 const ALREADY_RUNNING: &str = "sandbox is already running on this node";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReserved {
+    InProgress,
+    NotLive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Lifecycle {
     pub sandbox_id: String,
@@ -70,11 +76,21 @@ impl<T: Clone> Registry<T> {
         self.entries.lock().live.get(id).map(|live| live.value.clone())
     }
 
-    pub fn stop(&self, id: &str) -> Option<T> {
+    pub fn stop(&self, lifecycle: &Lifecycle) -> Option<T> {
         let mut entries = self.entries.lock();
-        let live = entries.live.remove(id)?;
-        entries.stopping.insert(live.lifecycle);
-        Some(live.value)
+        entries.take_live(lifecycle)
+    }
+
+    pub fn stop_reserved(&self, lifecycle: &Lifecycle) -> Result<T, StopReserved> {
+        let mut entries = self.entries.lock();
+        if !entries.is_live(lifecycle) {
+            return Err(StopReserved::NotLive);
+        }
+        if entries.reserved.contains(&lifecycle.sandbox_id) {
+            return Err(StopReserved::InProgress);
+        }
+        entries.reserved.insert(lifecycle.sandbox_id.clone());
+        entries.take_live(lifecycle).ok_or(StopReserved::NotLive)
     }
 
     pub fn finish(&self, lifecycle: &Lifecycle) {
@@ -93,6 +109,21 @@ impl<T: Clone> Registry<T> {
     pub fn is_empty(&self) -> bool {
         let entries = self.entries.lock();
         entries.live.is_empty() && entries.reserved.is_empty() && entries.stopping.is_empty()
+    }
+}
+
+impl<T> Entries<T> {
+    fn is_live(&self, lifecycle: &Lifecycle) -> bool {
+        self.live
+            .get(&lifecycle.sandbox_id)
+            .is_some_and(|live| live.lifecycle.lifecycle_id == lifecycle.lifecycle_id)
+    }
+
+    fn take_live(&mut self, lifecycle: &Lifecycle) -> Option<T> {
+        self.is_live(lifecycle).then_some(())?;
+        let live = self.live.remove(&lifecycle.sandbox_id)?;
+        self.stopping.insert(live.lifecycle);
+        Some(live.value)
     }
 }
 
@@ -128,7 +159,7 @@ mod tests {
             "sandbox 'sbx' is already running on this node: sandbox is already running on this node: another create is in flight"
         );
         assert!(registry.running().is_empty());
-        assert_eq!(registry.stop("sbx"), None);
+        assert_eq!(registry.stop(&lifecycle("sbx", "l1")), None);
 
         registry.activate(lifecycle("sbx", "l1"), 7);
         assert_eq!(registry.running(), vec![7]);
@@ -145,14 +176,16 @@ mod tests {
         registry.reserve("sbx").unwrap();
         registry.activate(lifecycle("sbx", "l1"), 7);
 
-        assert_eq!(registry.stop("sbx"), Some(7));
-        assert_eq!(registry.stop("sbx"), None);
+        assert_eq!(registry.stop(&lifecycle("sbx", "l1")), Some(7));
+        assert_eq!(registry.stop(&lifecycle("sbx", "l1")), None);
         registry.reserve("sbx").unwrap();
         registry.activate(lifecycle("sbx", "l2"), 8);
 
         registry.finish(&lifecycle("sbx", "l1"));
         assert_eq!(registry.get("sbx"), Some(8));
-        registry.stop("sbx");
+        assert_eq!(registry.stop(&lifecycle("sbx", "l1")), None);
+        assert_eq!(registry.get("sbx"), Some(8));
+        registry.stop(&lifecycle("sbx", "l2"));
         assert!(!registry.is_empty());
         registry.finish(&lifecycle("sbx", "l2"));
         assert!(registry.is_empty());
@@ -167,5 +200,39 @@ mod tests {
         registry.activate(lifecycle("sbx", "l1"), 7);
         registry.abandon("sbx");
         assert_eq!(registry.get("sbx"), Some(7));
+    }
+
+    #[test]
+    fn a_checkpoint_stops_the_live_lifecycle_and_holds_the_id_until_the_new_one_is_live() {
+        let registry = Registry::new();
+        registry.reserve("sbx").unwrap();
+        registry.activate(lifecycle("sbx", "l1"), 7);
+
+        assert_eq!(
+            registry.stop_reserved(&lifecycle("sbx", "l0")),
+            Err(StopReserved::NotLive)
+        );
+        assert_eq!(registry.stop_reserved(&lifecycle("sbx", "l1")), Ok(7));
+        assert!(registry.get("sbx").is_none());
+        assert!(registry.reserve("sbx").is_err());
+        registry.activate(lifecycle("sbx", "l2"), 8);
+        assert_eq!(registry.get("sbx"), Some(8));
+    }
+
+    #[test]
+    fn a_checkpoint_is_refused_while_another_operation_holds_the_id() {
+        let registry = Registry::new();
+        registry.reserve("sbx").unwrap();
+        registry.activate(lifecycle("sbx", "l1"), 7);
+        registry.stop_reserved(&lifecycle("sbx", "l1")).unwrap();
+        registry.activate(lifecycle("sbx", "l2"), 8);
+
+        registry.entries.lock().reserved.insert("sbx".to_owned());
+
+        assert_eq!(
+            registry.stop_reserved(&lifecycle("sbx", "l2")),
+            Err(StopReserved::InProgress)
+        );
+        assert_eq!(registry.get("sbx"), Some(8));
     }
 }

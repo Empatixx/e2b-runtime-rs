@@ -26,6 +26,10 @@ impl Admission {
                 self.max_sandboxes
             )));
         }
+        self.acquire().await
+    }
+
+    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, Status> {
         tokio::time::timeout(ACQUIRE_TIMEOUT, self.starting.clone().acquire_owned())
             .await
             .ok()

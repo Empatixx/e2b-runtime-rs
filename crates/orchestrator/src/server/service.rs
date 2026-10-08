@@ -5,8 +5,9 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::lifecycle::{Command, SandboxHandle};
-use super::node::{Lifetime, Node, egress_rules, event_sandbox, execution};
+use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
 use super::scheduling::from_headers;
+use crate::envd::version::check_for_snapshot;
 use crate::events::{KILLED, SandboxEvent, UPDATED, rfc3339};
 use crate::proto::sandbox_service_server::SandboxService;
 use crate::proto::{
@@ -127,11 +128,11 @@ impl SandboxService for SandboxServer {
     async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
-        self.running(&id, &format!("sandbox '{id}' not found"))?;
+        let lifecycle = self.running(&id, &format!("sandbox '{id}' not found"))?.lifecycle();
         let handle = self
             .node
             .registry
-            .stop(&id)
+            .stop(&lifecycle)
             .ok_or_else(|| Status::internal(format!("failed to delete sandbox '{id}'")))?;
         let info = handle.info.lock().clone();
         let kill_reason = request.kill_reason.filter(|reason| !reason.is_empty());
@@ -147,13 +148,13 @@ impl SandboxService for SandboxServer {
     async fn pause(&self, request: Request<SandboxPauseRequest>) -> Result<Response<SandboxPauseResponse>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
-        self.running(&id, "sandbox not found")?;
+        let lifecycle = self.running(&id, "sandbox not found")?.lifecycle();
         let build_id = Uuid::parse_str(&request.build_id)
             .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", request.build_id)))?;
         let handle = self
             .node
             .registry
-            .stop(&id)
+            .stop(&lifecycle)
             .ok_or_else(|| Status::internal("failed to pause sandbox"))?;
         let snapshotted = tokio::spawn(pause(handle, build_id, request.template_id))
             .await
@@ -178,9 +179,28 @@ impl SandboxService for SandboxServer {
 
     async fn checkpoint(
         &self,
-        _request: Request<SandboxCheckpointRequest>,
+        request: Request<SandboxCheckpointRequest>,
     ) -> Result<Response<SandboxCheckpointResponse>, Status> {
-        Err(Status::unimplemented("checkpoint is not supported"))
+        let request = request.into_inner();
+        let id = request.sandbox_id;
+        let handle = self.running(&id, &format!("sandbox '{id}' not found"))?;
+        let envd_version = handle.info.lock().config.envd_version.clone();
+        check_for_snapshot(&envd_version).map_err(Status::failed_precondition)?;
+        let build_id = Uuid::parse_str(&request.build_id)
+            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", request.build_id)))?;
+        let checkpoint = CheckpointRequest {
+            build_id,
+            provenance: request.metadata,
+            filesystem_only: request.filesystem_only,
+        };
+        tokio::spawn(self.node.clone().checkpoint(handle, checkpoint))
+            .await
+            .map_err(|e| Status::internal(format!("failed to checkpoint sandbox '{id}': {e}")))?
+            .map(|scheduling_metadata| {
+                Response::new(SandboxCheckpointResponse {
+                    scheduling_metadata: Some(scheduling_metadata),
+                })
+            })
     }
 }
 

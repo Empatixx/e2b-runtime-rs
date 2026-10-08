@@ -22,3 +22,4 @@ pub mod services;
 pub mod shutdown;
 pub mod status;
 pub mod uploads;
+pub mod user_error;

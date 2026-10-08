@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -8,6 +9,8 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use super::retry::{Failure, retry};
+
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -33,20 +36,37 @@ impl Uploads {
         F: FnMut() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), Failure>> + Send,
     {
-        let (sender, receiver) = watch::channel(Outcome::Pending);
-        self.outcomes.lock().insert(build_id, receiver);
+        let sender = self.register(build_id);
         let uploads = self.clone();
         self.tasks.spawn(async move {
-            let outcome = match uploads.upload(build_id, &parents, attempt).await {
-                Ok(()) => Outcome::Landed,
-                Err(e) => {
-                    tracing::error!(build = %build_id, error = %e, "snapshot upload failed; the build stays only in this node's cache");
-                    Outcome::Failed
-                }
-            };
-            sender.send_replace(outcome);
-            finished(outcome);
+            let uploaded = uploads.upload(build_id, &parents, attempt).await;
+            if let Err(e) = &uploaded {
+                tracing::error!(build = %build_id, error = %e, "snapshot upload failed; the build stays only in this node's cache");
+            }
+            finished(settle(&sender, &uploaded));
         });
+    }
+
+    pub async fn run<Fut>(&self, build_id: Uuid, parents: Vec<Uuid>, attempt: Fut) -> Result<(), String>
+    where
+        Fut: Future<Output = Result<(), Failure>>,
+    {
+        let sender = self.register(build_id);
+        let once = async {
+            attempt.await.map_err(Failure::into_message)?;
+            self.wait_parents(build_id, &parents).await
+        };
+        let uploaded = tokio::time::timeout(UPLOAD_TIMEOUT, once)
+            .await
+            .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
+        settle(&sender, &uploaded);
+        uploaded
+    }
+
+    fn register(&self, build_id: Uuid) -> watch::Sender<Outcome> {
+        let (sender, receiver) = watch::channel(Outcome::Pending);
+        self.outcomes.lock().insert(build_id, receiver);
+        sender
     }
 
     pub fn outcome(&self, build_id: Uuid) -> Option<Outcome> {
@@ -75,6 +95,10 @@ impl Uploads {
         Fut: Future<Output = Result<(), Failure>>,
     {
         retry(attempt).await?;
+        self.wait_parents(build_id, parents).await
+    }
+
+    async fn wait_parents(&self, build_id: Uuid, parents: &[Uuid]) -> Result<(), String> {
         for parent in parents.iter().filter(|parent| **parent != build_id) {
             if self.wait(*parent).await == Outcome::Failed {
                 return Err(format!("parent upload {parent} failed"));
@@ -82,6 +106,15 @@ impl Uploads {
         }
         Ok(())
     }
+}
+
+fn settle(sender: &watch::Sender<Outcome>, uploaded: &Result<(), String>) -> Outcome {
+    let outcome = match uploaded {
+        Ok(()) => Outcome::Landed,
+        Err(_) => Outcome::Failed,
+    };
+    sender.send_replace(outcome);
+    outcome
 }
 
 #[cfg(test)]
@@ -94,6 +127,33 @@ mod tests {
 
     fn id(byte: u8) -> Uuid {
         Uuid::from_bytes([byte; 16])
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_synchronous_upload_tries_once_and_records_its_outcome() {
+        let uploads = Arc::new(Uploads::default());
+
+        let failed = uploads
+            .run(id(1), Vec::new(), async {
+                Err(Failure::Retryable("bucket is gone".to_owned()))
+            })
+            .await;
+        let landed = uploads.run(id(2), vec![id(3)], async { Ok(()) }).await;
+
+        assert_eq!(failed, Err("bucket is gone".to_owned()));
+        assert_eq!(uploads.outcome(id(1)), Some(Outcome::Failed));
+        assert_eq!(landed, Ok(()));
+        assert_eq!(uploads.outcome(id(2)), Some(Outcome::Landed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_synchronous_upload_gives_up_after_twenty_minutes() {
+        let uploads = Arc::new(Uploads::default());
+
+        let stalled = uploads.run(id(1), Vec::new(), std::future::pending()).await;
+
+        assert_eq!(stalled, Err("context deadline exceeded".to_owned()));
+        assert_eq!(uploads.outcome(id(1)), Some(Outcome::Failed));
     }
 
     #[tokio::test(start_paused = true)]

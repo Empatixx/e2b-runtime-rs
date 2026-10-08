@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -37,6 +38,7 @@ pub struct Template {
     snapfile: OnceCell<Result<PathBuf, TemplateError>>,
     build: OnceCell<Result<Build, TemplateError>>,
     metadata: OnceCell<Result<TemplateMetadata, TemplateError>>,
+    updated_metadata: Mutex<Option<TemplateMetadata>>,
 }
 
 impl fmt::Debug for Template {
@@ -54,6 +56,7 @@ impl Template {
             snapfile: OnceCell::new(),
             build: OnceCell::new(),
             metadata: OnceCell::new(),
+            updated_metadata: Mutex::new(None),
         }
     }
 
@@ -65,6 +68,7 @@ impl Template {
             snapfile: OnceCell::new_with(Some(Ok(snapfile))),
             build: OnceCell::new_with(Some(Ok(build))),
             metadata: OnceCell::new_with(Some(Ok(metadata))),
+            updated_metadata: Mutex::new(None),
         }
     }
 
@@ -89,7 +93,15 @@ impl Template {
     }
 
     pub async fn metadata(&self) -> Result<TemplateMetadata, TemplateError> {
-        self.metadata.get_or_init(|| self.load_metadata()).await.clone()
+        let updated = self.updated_metadata.lock().clone();
+        match updated {
+            Some(updated) => Ok(updated),
+            None => self.metadata.get_or_init(|| self.load_metadata()).await.clone(),
+        }
+    }
+
+    pub fn update_metadata(&self, metadata: TemplateMetadata) {
+        *self.updated_metadata.lock() = Some(metadata);
     }
 
     async fn load_metadata(&self) -> Result<TemplateMetadata, TemplateError> {

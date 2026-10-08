@@ -5,6 +5,7 @@ fn main() {
                 "../../proto/orchestrator/orchestrator.proto",
                 "../../proto/orchestrator/info.proto",
                 "../../proto/orchestrator/template-manager.proto",
+                "../../proto/orchestrator/volume.proto",
             ],
             &["../../proto/orchestrator/"],
         )
