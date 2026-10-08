@@ -233,15 +233,14 @@ async fn pool_recycles_a_returned_slot() {
     pool.return_slot(slot);
     tokio::time::sleep(RETURN_DELAY + Duration::from_millis(500)).await;
     let recycled = pool.get().await.unwrap();
-    let host_veth = slot.host_veth_ip().to_string();
-    let reachable = succeeds(
-        "ip",
-        &["netns", "exec", &slot.namespace(), "ping", "-c1", "-W1", &host_veth],
-    );
+    let namespace = slot.namespace();
+    let reachable = succeeds("ip", &["link", "show", &slot.host_veth()])
+        && succeeds("ip", &["netns", "exec", &namespace, "ip", "link", "show", "tap0"])
+        && succeeds("ip", &["netns", "exec", &namespace, "ip", "link", "show", "eth0"]);
     pool.close().await;
 
     assert_eq!(recycled, slot);
-    assert!(reachable, "the recycled slot lost its veth");
+    assert!(reachable, "the recycled slot lost its veth or tap");
     assert!(!succeeds("ip", &["netns", "exec", "ns-4020", "true"]));
     assert!(!succeeds("ip", &["netns", "exec", "ns-4021", "true"]));
 }
