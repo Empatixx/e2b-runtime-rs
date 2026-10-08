@@ -30,6 +30,7 @@ pub struct SandboxConfig {
     pub envd_timeout: Duration,
     pub prefetch: Option<MemoryPrefetch>,
     pub use_memfd: bool,
+    pub hyperloop_ip: Option<String>,
 }
 
 #[derive(Default)]
@@ -50,6 +51,7 @@ pub struct SandboxBuilder {
     envd_timeout: Option<Duration>,
     prefetch: Option<MemoryPrefetch>,
     use_memfd: Option<bool>,
+    hyperloop_ip: Option<String>,
 }
 
 impl SandboxBuilder {
@@ -134,6 +136,11 @@ impl SandboxBuilder {
         self
     }
 
+    pub fn hyperloop_ip(mut self, hyperloop_ip: &str) -> Self {
+        self.hyperloop_ip = Some(hyperloop_ip.to_owned());
+        self
+    }
+
     pub fn build(self) -> Result<SandboxConfig, String> {
         Ok(SandboxConfig {
             id: self.id.ok_or("id is required")?,
@@ -152,6 +159,7 @@ impl SandboxBuilder {
             envd_timeout: self.envd_timeout.unwrap_or(DEFAULT_ENVD_TIMEOUT),
             prefetch: self.prefetch,
             use_memfd: self.use_memfd.unwrap_or(true),
+            hyperloop_ip: self.hyperloop_ip,
         })
     }
 }

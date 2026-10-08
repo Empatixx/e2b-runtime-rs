@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -25,6 +26,8 @@ pub struct SandboxInfo {
     pub end: SystemTime,
     pub metadata: Option<TemplateMetadata>,
     pub lifecycle: Lifecycle,
+    pub host_ip: Ipv4Addr,
+    pub started_at: SystemTime,
 }
 
 pub enum Command {

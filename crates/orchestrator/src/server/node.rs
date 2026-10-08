@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -16,7 +17,8 @@ use super::status::NodeStatus;
 use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
-use crate::envd::EnvdInit;
+use crate::envd::{EnvdInit, VolumeMount};
+use crate::hyperloop::logs::SourceSandbox;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::SandboxConfig;
@@ -54,6 +56,7 @@ pub struct Node {
     build_cache_max_usage: f64,
     prefetch_from_trace: bool,
     use_memfd: bool,
+    orchestrator_ip: String,
 }
 
 pub struct Lifetime {
@@ -85,6 +88,7 @@ impl Node {
             build_cache_max_usage: config.build_cache_max_usage,
             prefetch_from_trace: config.prefetch_from_trace,
             use_memfd: config.use_memfd,
+            orchestrator_ip: config.orchestrator_ip.clone(),
         })
     }
 
@@ -171,6 +175,21 @@ impl Node {
             }),
             Err(_) => TemplateMetadata::v1(),
         }
+    }
+
+    pub fn source_of(&self, ip: IpAddr) -> Option<SourceSandbox> {
+        self.registry
+            .running()
+            .iter()
+            .map(|handle| handle.info.lock().clone())
+            .find(|info| IpAddr::V4(info.host_ip) == ip)
+            .map(|info| SourceSandbox {
+                sandbox_id: info.config.sandbox_id,
+                template_id: info.config.template_id,
+                team_id: info.config.team_id,
+                build_id: info.config.build_id,
+                lifecycle_started_at: Some(info.started_at),
+            })
     }
 
     pub fn running_configs(&self) -> Vec<SandboxConfig> {
@@ -290,8 +309,18 @@ impl Node {
             .prefetch_from_trace
             .then(|| metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned())
             .flatten();
+        let init = EnvdInit {
+            access_token: config.envd_access_token.clone(),
+            env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),
+            lifecycle_id: Some(lifecycle.lifecycle_id.clone()),
+            hyperloop_ip: Some(self.orchestrator_ip.clone()),
+            volume_mounts: volume_mounts(&config, &self.orchestrator_ip)
+                .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?,
+            default_user: default_user(metadata.as_ref()),
+            ..EnvdInit::default()
+        };
         let sandbox = self
-            .resume(&config, &build, &snapfile, prefetch, slot)
+            .resume(&config, &build, &snapfile, prefetch, slot, init)
             .await
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
         let slot = lease
@@ -306,6 +335,8 @@ impl Node {
                 end: lifetime.end,
                 metadata,
                 lifecycle,
+                host_ip: slot.host_ip(),
+                started_at: SystemTime::now(),
             },
             self.clone(),
         ))
@@ -324,6 +355,7 @@ impl Node {
         snapfile: &Path,
         prefetch: Option<MemoryPrefetch>,
         slot: Slot,
+        init: EnvdInit,
     ) -> Result<Sandbox, String> {
         let work_dir = self.work_dir_of(&config.sandbox_id);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
@@ -351,14 +383,35 @@ impl Node {
             .envd_timeout(self.envd_timeout)
             .prefetch(prefetch)
             .use_memfd(self.use_memfd)
-            .envd(EnvdInit {
-                access_token: config.envd_access_token.clone(),
-                env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),
-                ..EnvdInit::default()
-            })
+            .hyperloop_ip(&self.orchestrator_ip)
+            .envd(init)
             .resume(snapfile)
             .await
     }
+}
+
+fn volume_mounts(config: &SandboxConfig, orchestrator_ip: &str) -> Result<Vec<VolumeMount>, String> {
+    config
+        .volume_mounts
+        .iter()
+        .map(|mount| {
+            Uuid::parse_str(&mount.id)
+                .map(|_| VolumeMount {
+                    nfs_target: format!("{orchestrator_ip}:/{}", mount.name),
+                    path: mount.path.clone(),
+                })
+                .map_err(|e| format!("failed to convert volume mounts: invalid volume id {:?}: {e}", mount.id))
+        })
+        .collect()
+}
+
+fn default_user(metadata: Option<&TemplateMetadata>) -> Option<String> {
+    metadata
+        .and_then(|metadata| metadata.start.as_ref())
+        .and_then(|start| start.pointer("/context/user"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|user| *user == "user")
+        .map(str::to_owned)
 }
 
 fn metadata_path(local: &LocalSnapshot) -> PathBuf {

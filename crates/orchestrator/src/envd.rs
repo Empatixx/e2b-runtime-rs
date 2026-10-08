@@ -23,6 +23,15 @@ pub struct EnvdInit {
     pub default_user: Option<String>,
     pub default_workdir: Option<String>,
     pub env_vars: BTreeMap<String, String>,
+    pub lifecycle_id: Option<String>,
+    pub hyperloop_ip: Option<String>,
+    pub volume_mounts: Vec<VolumeMount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VolumeMount {
+    pub nfs_target: String,
+    pub path: String,
 }
 
 impl EnvdInit {
@@ -35,6 +44,8 @@ impl EnvdInit {
             ("accessToken", &self.access_token),
             ("defaultUser", &self.default_user),
             ("defaultWorkdir", &self.default_workdir),
+            ("lifecycleID", &self.lifecycle_id),
+            ("hyperloopIP", &self.hyperloop_ip),
         ]
         .into_iter()
         .filter_map(|(key, value)| {
@@ -44,6 +55,9 @@ impl EnvdInit {
                 .map(|value| (key, value))
         })
         .for_each(|(key, value)| body[key] = json!(value));
+        if !self.volume_mounts.is_empty() {
+            body["volumeMounts"] = json!(self.volume_mounts);
+        }
         body
     }
 }
@@ -174,6 +188,7 @@ mod tests {
             default_user: Some("user".into()),
             default_workdir: Some("/home/user".into()),
             env_vars: BTreeMap::from([("A".into(), "1".into())]),
+            ..EnvdInit::default()
         }
     }
 
@@ -200,6 +215,29 @@ mod tests {
                 "envVars": {},
                 "timestamp": "2026-10-09T10:00:00.000000001Z"
             })
+        );
+    }
+
+    #[test]
+    fn lifecycle_hyperloop_and_volume_mounts_are_sent_when_set() {
+        let timestamp = Utc.timestamp_opt(1_791_540_000, 1).unwrap();
+        let init = EnvdInit {
+            lifecycle_id: Some("l1".to_owned()),
+            hyperloop_ip: Some("192.0.2.1".to_owned()),
+            volume_mounts: vec![VolumeMount {
+                nfs_target: "192.0.2.1:/data".to_owned(),
+                path: "/mnt/data".to_owned(),
+            }],
+            ..EnvdInit::default()
+        };
+
+        let body = init.body(timestamp);
+
+        assert_eq!(body["lifecycleID"], "l1");
+        assert_eq!(body["hyperloopIP"], "192.0.2.1");
+        assert_eq!(
+            body["volumeMounts"],
+            json!([{"nfs_target": "192.0.2.1:/data", "path": "/mnt/data"}])
         );
     }
 

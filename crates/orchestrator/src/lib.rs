@@ -5,6 +5,7 @@ pub mod cgroup;
 pub mod envd;
 pub mod exposure;
 pub mod firecracker;
+pub mod hyperloop;
 pub mod memory;
 pub mod network;
 pub mod phases;

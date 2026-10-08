@@ -38,6 +38,22 @@ mod serve {
                 .with_graceful_shutdown(async move { drop(stopped.await) })
                 .into_future(),
         );
+        let lookup_node = node.clone();
+        let hyperloop = orchestrator::hyperloop::server::router(
+            Arc::new(move |ip| lookup_node.source_of(ip)),
+            config.logs_collector.clone(),
+        );
+        let hyperloop_address = SocketAddr::from(([0, 0, 0, 0], config.hyperloop_port));
+        let hyperloop_listener = tokio::net::TcpListener::bind(hyperloop_address)
+            .await
+            .map_err(|e| format!("listen on {hyperloop_address}: {e}"))?;
+        tokio::spawn(
+            axum::serve(
+                hyperloop_listener,
+                hyperloop.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
         let mut signals = Signals::new()?;
         signals.next().await;
         tracing::info!("shutting down: draining sandboxes");

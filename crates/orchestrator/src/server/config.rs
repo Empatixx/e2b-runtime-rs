@@ -14,6 +14,8 @@ const DEFAULT_MAX_SANDBOXES: i64 = 200;
 const DEFAULT_MAX_STARTING: usize = 3;
 const DEFAULT_DRAIN_SLEEP_MS: u64 = 15_000;
 const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
+const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
+const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {
@@ -50,6 +52,9 @@ pub struct NodeConfig {
     pub prefetch_from_trace: bool,
     pub use_memfd: bool,
     pub services: Services,
+    pub orchestrator_ip: String,
+    pub hyperloop_port: u16,
+    pub logs_collector: String,
 }
 
 impl NodeConfig {
@@ -103,6 +108,9 @@ impl NodeConfig {
             prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
             use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
             services: Services::parse(var("ORCHESTRATOR_SERVICES").as_deref()),
+            orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
+            hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
+            logs_collector: var("LOGS_COLLECTOR_ADDRESS").unwrap_or_default(),
         })
     }
 
@@ -181,6 +189,10 @@ mod tests {
         assert_eq!(config.drain_sleep, Duration::from_secs(15));
         assert!(config.prefetch_from_trace);
         assert!(config.use_memfd);
+        assert_eq!(
+            (config.orchestrator_ip.as_str(), config.hyperloop_port),
+            ("192.0.2.1", 5010)
+        );
         assert!(!prefetch_source(Some("off")));
         assert!(prefetch_source(Some("unknown")));
         assert!(config.labels.is_empty());

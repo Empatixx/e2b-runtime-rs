@@ -172,7 +172,12 @@ impl Sandbox {
         MmdsMetadata {
             sandbox_id: self.config.id.clone(),
             template_id: self.config.template_id.clone(),
-            logs_collector_address: String::new(),
+            logs_collector_address: self
+                .config
+                .hyperloop_ip
+                .as_ref()
+                .map(|ip| format!("http://{ip}/logs"))
+                .unwrap_or_default(),
             access_token_hash: Some(envd::hash_access_token(
                 self.config.envd.access_token.as_deref().unwrap_or_default(),
             )),

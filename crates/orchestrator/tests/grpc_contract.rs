@@ -152,6 +152,9 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         prefetch_from_trace: true,
         use_memfd: true,
         services: Services::parse(Some("orchestrator,template-manager")),
+        orchestrator_ip: "192.0.2.1".to_owned(),
+        hyperloop_port: 0,
+        logs_collector: String::new(),
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());
