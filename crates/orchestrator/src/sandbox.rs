@@ -66,6 +66,19 @@ impl Sandbox {
             .map_or(0, |memory| memory.faults_served())
     }
 
+    pub async fn died(&mut self) -> String {
+        let Resources { vm, memory, disk, .. } = &mut self.resources;
+        tokio::select! {
+            exited = async { match vm.as_mut() { Some(vm) => vm.exited().await, None => std::future::pending().await } } => exited,
+            () = async { match memory.as_ref() { Some(memory) => memory.ended().await, None => std::future::pending().await } } => {
+                "the memory server stopped".to_owned()
+            }
+            () = async { match disk.as_ref() { Some(disk) => disk.ended().await, None => std::future::pending().await } } => {
+                "the rootfs nbd server stopped".to_owned()
+            }
+        }
+    }
+
     pub async fn stop(mut self) -> Result<(), String> {
         std::mem::take(&mut self.resources).release().await
     }

@@ -2,6 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const ROOT: &str = "/sys/fs/cgroup/e2b";
+const CONTROLLERS: &str = "+cpu +memory";
 
 pub struct Cgroup {
     path: PathBuf,
@@ -9,6 +10,8 @@ pub struct Cgroup {
 
 impl Cgroup {
     pub fn create(name: &str) -> io::Result<Self> {
+        std::fs::create_dir_all(ROOT)?;
+        std::fs::write(Path::new(ROOT).join("cgroup.subtree_control"), CONTROLLERS)?;
         let path = Path::new(ROOT).join(name);
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })

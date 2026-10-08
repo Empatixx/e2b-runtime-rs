@@ -28,8 +28,8 @@ impl FirecrackerProcess {
         let console_err = console_file
             .try_clone()
             .map_err(|e| format!("clone console {}: {e}", console.display()))?;
-        let child = Command::new("unshare")
-            .args(["-m", "--", "sh", "-c"])
+        let child = Command::new("setsid")
+            .args(["unshare", "-m", "--", "sh", "-c"])
             .arg(launch.script())
             .stdin(Stdio::null())
             .stdout(console_file)
@@ -64,7 +64,10 @@ impl FirecrackerProcess {
     }
 
     pub async fn kill(mut self) -> Result<(), String> {
-        self.child.kill().await.map_err(|e| format!("kill firecracker: {e}"))
+        match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => self.child.kill().await.map_err(|e| format!("kill firecracker: {e}")),
+        }
     }
 
     async fn wait_until_ready(&mut self) -> Result<(), String> {

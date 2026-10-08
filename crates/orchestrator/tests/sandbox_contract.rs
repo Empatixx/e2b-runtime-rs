@@ -268,6 +268,16 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
     let without_token = envs(&client, &base, None).await.status();
     let with_token = envs(&client, &base, Some(ACCESS_TOKEN)).await.status();
     let sandbox_id = sandbox_id_from_mmds(&client, &base).await;
+    let cgroup = Path::new("/sys/fs/cgroup/e2b/sbx-contract");
+    let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers")).unwrap_or_default();
+    let firecracker = std::fs::read_to_string(cgroup.join("cgroup.procs"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let session = std::fs::read_to_string(format!("/proc/{firecracker}/stat"))
+        .unwrap()
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(3).map(str::to_owned));
 
     sandbox.stop().await.unwrap();
 
@@ -275,6 +285,15 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
     assert_eq!(without_token, 401);
     assert_eq!(with_token, 200);
     assert_eq!(sandbox_id.as_deref(), Some("sbx-contract"));
+    assert!(
+        controllers.contains("cpu") && controllers.contains("memory"),
+        "{controllers}"
+    );
+    assert_eq!(
+        session.as_deref(),
+        Some(firecracker.as_str()),
+        "firecracker is not a session leader"
+    );
     assert!(!namespace_exists(&slot), "slot namespace left behind");
     assert!(!cgroup_exists("sbx-contract"), "cgroup left behind");
 }

@@ -139,3 +139,37 @@ async fn concurrent_exposures_get_distinct_devices_and_close_together() {
     assert!(closed.is_ok(), "closing four devices on two worker threads timed out");
     assert!(closed.unwrap().into_iter().all(|result| result.is_ok()));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_an_exposure_disconnects_the_device() {
+    if !ready() {
+        eprintln!("skipping: needs root and the nbd kernel module");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::local(&dir.path().join("store")).unwrap();
+    let template_id = Uuid::new_v4();
+    storage
+        .put(
+            &Artifact::Rootfs.object(template_id),
+            Bytes::from(vec![0; SIZE as usize]),
+        )
+        .await
+        .unwrap();
+    let template = Header::new(Metadata::template(template_id, 4096, SIZE), Vec::new()).unwrap();
+    let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+    let overlay = overlay_over(template, store, &dir.path().join("overlay")).await;
+    let exposure = expose(overlay).await.unwrap();
+    let pid = Path::new("/sys/block")
+        .join(exposure.path().file_name().unwrap())
+        .join("pid");
+    assert!(pid.exists());
+
+    drop(exposure);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while pid.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!pid.exists(), "a dropped exposure left its nbd device connected");
+}

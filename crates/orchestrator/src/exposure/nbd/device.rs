@@ -44,10 +44,31 @@ impl Drop for Claim {
 }
 
 pub struct NbdDevice {
+    index: u32,
+    attached: Option<Attached>,
+}
+
+struct Attached {
     control: File,
-    _kernel_socket: UnixStream,
+    kernel_socket: UnixStream,
     worker: JoinHandle<io::Result<()>>,
     claim: Claim,
+}
+
+impl Attached {
+    fn finish(self) -> io::Result<()> {
+        let Self {
+            control,
+            kernel_socket,
+            worker,
+            claim,
+        } = self;
+        let served = worker.join().map_err(|_| io::Error::other("nbd worker panicked"));
+        drop(kernel_socket);
+        drop(control);
+        drop(claim);
+        served?
+    }
 }
 
 impl NbdDevice {
@@ -63,10 +84,13 @@ impl NbdDevice {
         }
         let worker = spawn_worker(control.try_clone()?);
         let device = Self {
-            control,
-            _kernel_socket: kernel_socket,
-            worker,
-            claim,
+            index: claim.index,
+            attached: Some(Attached {
+                control,
+                kernel_socket,
+                worker,
+                claim,
+            }),
         };
         match device.wait_until_connected(size).await {
             Ok(()) => Ok(device),
@@ -75,32 +99,32 @@ impl NbdDevice {
     }
 
     pub fn index(&self) -> u32 {
-        self.claim.index
+        self.index
     }
 
     pub fn path(&self) -> PathBuf {
-        device_path(self.claim.index)
+        device_path(self.index)
     }
 
     pub fn request_disconnect(&self) -> io::Result<()> {
-        ioctl::disconnect(&self.control)
+        self.attached
+            .as_ref()
+            .map_or(Ok(()), |attached| ioctl::disconnect(&attached.control))
     }
 
-    pub async fn wait(self) -> io::Result<()> {
-        let Self {
-            control,
-            _kernel_socket: kernel_socket,
-            worker,
-            claim,
-        } = self;
-        let served = tokio::task::spawn_blocking(move || worker.join())
+    pub async fn wait(mut self) -> io::Result<()> {
+        let Some(attached) = self.attached.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || attached.finish())
             .await
             .map_err(io::Error::other)?
-            .map_err(|_| io::Error::other("nbd worker panicked"))?;
-        drop(kernel_socket);
-        drop(control);
-        drop(claim);
-        served
+    }
+
+    fn is_finished(&self) -> bool {
+        self.attached
+            .as_ref()
+            .is_none_or(|attached| attached.worker.is_finished())
     }
 
     async fn wait_until_connected(&self, size: u64) -> io::Result<()> {
@@ -108,7 +132,7 @@ impl NbdDevice {
             if pid_path(self.index()).exists() && self.reported_size() == Some(size) {
                 return Ok(());
             }
-            if self.worker.is_finished() {
+            if self.is_finished() {
                 return Err(io::Error::other(format!(
                     "nbd{} stopped before connecting",
                     self.index()
@@ -131,9 +155,20 @@ impl NbdDevice {
     }
 
     async fn abandon(self) -> io::Result<()> {
-        let _ = ioctl::disconnect(&self.control);
-        reset(&self.control);
+        if let Some(attached) = self.attached.as_ref() {
+            let _ = ioctl::disconnect(&attached.control);
+            reset(&attached.control);
+        }
         self.wait().await
+    }
+}
+
+impl Drop for NbdDevice {
+    fn drop(&mut self) {
+        if let Some(attached) = self.attached.take() {
+            let _ = ioctl::disconnect(&attached.control);
+            std::thread::spawn(move || drop(attached.finish()));
+        }
     }
 }
 

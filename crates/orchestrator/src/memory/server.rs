@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use roaring::RoaringBitmap;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::region::Regions;
@@ -20,6 +20,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(1);
 
 pub struct MemoryServer {
     stop: oneshot::Sender<()>,
+    running: watch::Receiver<()>,
     task: JoinHandle<Result<(), String>>,
     state: Arc<SharedState>,
 }
@@ -57,8 +58,18 @@ impl MemoryServer {
             state: state.clone(),
         };
         let (stop, stopped) = oneshot::channel();
-        let task = tokio::spawn(serving.run(stopped));
-        Ok(Self { stop, task, state })
+        let (alive, running) = watch::channel(());
+        let task = tokio::spawn(async move {
+            let served = serving.run(stopped).await;
+            drop(alive);
+            served
+        });
+        Ok(Self {
+            stop,
+            running,
+            task,
+            state,
+        })
     }
 
     pub fn faults_served(&self) -> u64 {
@@ -71,6 +82,11 @@ impl MemoryServer {
 
     pub fn removed_pages(&self) -> RoaringBitmap {
         self.state.removed.lock().clone()
+    }
+
+    pub async fn ended(&self) {
+        let mut running = self.running.clone();
+        while running.changed().await.is_ok() {}
     }
 
     pub fn is_finished(&self) -> bool {
@@ -370,6 +386,24 @@ mod tests {
 
         assert_eq!(fixture.server.removed_pages().iter().collect::<Vec<_>>(), vec![1]);
         fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ended_resolves_when_the_server_stops_on_an_error() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let fixture = fixture(4, 2).await;
+        let address = fixture.pages.address() + 3 * PAGE;
+        let reader = std::thread::spawn(move || Pages::read_byte(address));
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), fixture.server.ended()).await;
+        let error = fixture.server.stop().await.unwrap_err();
+        let _ = reader.join();
+
+        assert!(ended.is_ok(), "ended() did not resolve");
+        assert!(error.starts_with("serve page at"), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
