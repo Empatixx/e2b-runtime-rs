@@ -7,14 +7,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestrator::builder::config::BuilderConfig;
+use orchestrator::network::settings::NetworkSettings;
 use orchestrator::proto::template_config::Source;
 use orchestrator::proto::template_service_client::TemplateServiceClient;
-use orchestrator::proto::{TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest};
+use orchestrator::proto::{
+    FromTemplateConfig, TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest,
+};
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::spec::StorageSpec;
+use orchestrator::tcpfirewall::proxy::TcpFirewall;
 use uuid::Uuid;
 
 const SLOTS: std::ops::RangeInclusive<u32> = 4106..=4109;
@@ -143,6 +147,12 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
     });
     let app = App::new(node.clone(), setup).unwrap();
     app.start_background();
+    let firewall_node = node.clone();
+    let settings = NetworkSettings::current();
+    TcpFirewall::new(Arc::new(move |ip| firewall_node.firewall_source(ip)), settings)
+        .start(settings)
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app.router()).into_future());
@@ -150,25 +160,9 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
         .await
         .unwrap();
     let template_id = format!("t{}", Uuid::new_v4().simple());
-    let build_id = Uuid::new_v4().to_string();
+    let image = Source::FromImage(BASE_IMAGE.to_owned());
 
-    templates
-        .template_create(TemplateCreateRequest {
-            template: Some(TemplateConfig {
-                template_id: template_id.clone(),
-                build_id: build_id.clone(),
-                memory_mb: 1024,
-                v_cpu_count: 2,
-                disk_size_mb: 2048,
-                source: Some(Source::FromImage(BASE_IMAGE.to_owned())),
-                team_id: "team".to_owned(),
-                ..TemplateConfig::default()
-            }),
-            ..TemplateCreateRequest::default()
-        })
-        .await
-        .unwrap();
-    let (state, logs, metadata, reason) = wait_for_build(&mut templates, &template_id, &build_id).await;
+    let (state, logs, metadata, reason) = build(&mut templates, &template_id, image.clone()).await;
 
     eprintln!("build logs:\n{}", logs.join("\n"));
     assert_eq!(state, TemplateBuildState::Completed as i32, "build failed: {reason}");
@@ -204,4 +198,56 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
     for file in ["metadata.json", "rootfs.ext4.header", "memfile.header", "snapfile"] {
         assert!(base_dir.join(file).is_file(), "missing {file}");
     }
+
+    let (cached_state, cached_logs, _, _) = build(&mut templates, &template_id, image).await;
+    let base_build_id = base_build["template"]["build_id"].as_str().unwrap().to_owned();
+    let from_template = Source::FromTemplate(FromTemplateConfig {
+        alias: "base".to_owned(),
+        build_id: base_build_id,
+    });
+    let (derived_state, derived_logs, _, _) = build(&mut templates, &template_id, from_template).await;
+
+    assert_eq!(cached_state, TemplateBuildState::Completed as i32);
+    assert!(
+        cached_logs
+            .iter()
+            .any(|log| log.starts_with(&format!("CACHED [base] FROM {BASE_IMAGE} [")))
+    );
+    assert!(!cached_logs.iter().any(|log| log == "Provisioning sandbox template"));
+    assert_eq!(derived_state, TemplateBuildState::Completed as i32);
+    assert!(
+        derived_logs
+            .iter()
+            .any(|log| log.starts_with("CACHED [base] FROM TEMPLATE base ["))
+    );
+}
+
+async fn build(
+    templates: &mut TemplateServiceClient<tonic::transport::Channel>,
+    template_id: &str,
+    source: Source,
+) -> (
+    i32,
+    Vec<String>,
+    Option<orchestrator::proto::TemplateBuildMetadata>,
+    String,
+) {
+    let build_id = Uuid::new_v4().to_string();
+    templates
+        .template_create(TemplateCreateRequest {
+            template: Some(TemplateConfig {
+                template_id: template_id.to_owned(),
+                build_id: build_id.clone(),
+                memory_mb: 1024,
+                v_cpu_count: 2,
+                disk_size_mb: 2048,
+                source: Some(source),
+                team_id: "team".to_owned(),
+                ..TemplateConfig::default()
+            }),
+            ..TemplateCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    wait_for_build(templates, template_id, &build_id).await
 }

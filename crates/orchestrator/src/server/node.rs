@@ -1,7 +1,9 @@
 mod checkpoint;
 
-use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr};
+
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -60,6 +62,7 @@ pub struct Node {
     pub services: Services,
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
+    build_network: Arc<Mutex<HashMap<Ipv4Addr, String>>>,
     pub routing: RoutingPublisher,
     pub events: EventsService,
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
@@ -122,6 +125,17 @@ impl StartFailure {
     }
 }
 
+pub struct BuildNetwork {
+    map: Arc<Mutex<HashMap<Ipv4Addr, String>>>,
+    host_ip: Ipv4Addr,
+}
+
+impl Drop for BuildNetwork {
+    fn drop(&mut self) {
+        self.map.lock().remove(&self.host_ip);
+    }
+}
+
 pub struct Lifetime {
     pub start: SystemTime,
     pub end: SystemTime,
@@ -137,6 +151,7 @@ impl Node {
             services: config.services.clone(),
             status: Arc::default(),
             uploads: Arc::default(),
+            build_network: Arc::default(),
             events: EventsService::default(),
             host_stats: OnceLock::new(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
@@ -276,7 +291,25 @@ impl Node {
             })
     }
 
+    pub fn assign_build_network(&self, host_ip: Ipv4Addr, sandbox_id: &str) -> BuildNetwork {
+        self.build_network.lock().insert(host_ip, sandbox_id.to_owned());
+        BuildNetwork {
+            map: self.build_network.clone(),
+            host_ip,
+        }
+    }
+
     pub fn firewall_source(&self, ip: IpAddr) -> Option<FirewallSandbox> {
+        let build = match ip {
+            IpAddr::V4(v4) => self.build_network.lock().get(&v4).cloned(),
+            IpAddr::V6(_) => None,
+        };
+        if let Some(sandbox_id) = build {
+            return Some(FirewallSandbox {
+                sandbox_id,
+                egress: None,
+            });
+        }
         self.registry
             .running()
             .iter()

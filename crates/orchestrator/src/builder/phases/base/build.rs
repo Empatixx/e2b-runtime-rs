@@ -17,6 +17,7 @@ use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
 use crate::proto::LogLevel;
 use crate::sandbox::Sandbox;
+use crate::sandbox::config::SandboxBuilder;
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
@@ -140,8 +141,9 @@ impl BaseBuild<'_> {
             .slot()
             .ok_or_else(|| BuildError::Internal("error creating sandbox: no network slot".to_owned()))?;
         let (console, lines) = unbounded_channel();
-        let sandbox = self
-            .sandbox_builder()
+        let (sandbox_id, builder) = self.sandbox_builder();
+        let _network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
+        let sandbox = builder
             .pooled_slot(slot)
             .rootfs_file(rootfs)
             .init_path(BUSYBOX_INIT_PATH)
@@ -174,21 +176,24 @@ impl BaseBuild<'_> {
         Ok(())
     }
 
-    fn sandbox_builder(&self) -> crate::sandbox::config::SandboxBuilder {
+    fn sandbox_builder(&self) -> (String, SandboxBuilder) {
         let id: String = Uuid::new_v4()
             .simple()
             .to_string()
             .chars()
             .take(SANDBOX_ID_LEN)
             .collect();
-        self.phase
+        let sandbox_id = format!("b{id}");
+        let builder = self
+            .phase
             .env
             .node
-            .build_sandbox(&format!("b{id}"), &self.phase.request.template_id)
-            .vcpus(self.phase.request.vcpus.max(1) as u32)
-            .memory_mib(self.phase.request.memory_mb.max(1) as u32)
+            .build_sandbox(&sandbox_id, &self.phase.request.template_id)
+            .vcpus(self.phase.request.vcpus as u32)
+            .memory_mib(self.phase.request.memory_mb as u32)
             .io_engine(IO_ENGINE)
-            .without_mmds()
+            .without_mmds();
+        (sandbox_id, builder)
     }
 
     async fn check_provisioned(&self, ext4: &Ext4) -> Result<(), BuildError> {
@@ -270,8 +275,9 @@ impl BaseBuild<'_> {
         let slot = lease
             .slot()
             .ok_or_else(|| BuildError::Internal("create sandbox: no network slot".to_owned()))?;
-        let sandbox = self
-            .sandbox_builder()
+        let (sandbox_id, builder) = self.sandbox_builder();
+        let _network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
+        let sandbox = builder
             .pooled_slot(slot)
             .rootfs_file(&ext4.file)
             .init_path(SYSTEMD_INIT)
