@@ -105,8 +105,8 @@ impl NbdDevice {
 
     async fn wait_until_connected(&self, size: u64) -> io::Result<()> {
         for _ in 0..CONNECT_POLLS {
-            if pid_path(self.index()).exists() {
-                return self.check_size(size);
+            if pid_path(self.index()).exists() && self.reported_size() == Some(size) {
+                return Ok(());
             }
             if self.worker.is_finished() {
                 return Err(io::Error::other(format!(
@@ -116,21 +116,18 @@ impl NbdDevice {
             }
             tokio::time::sleep(CONNECT_POLL_INTERVAL).await;
         }
-        Err(io::Error::other(format!("nbd{} did not connect", self.index())))
+        Err(io::Error::other(format!(
+            "nbd{} did not connect with {size} bytes (reports {:?})",
+            self.index(),
+            self.reported_size()
+        )))
     }
 
-    fn check_size(&self, expected: u64) -> io::Result<()> {
-        let reported = std::fs::read_to_string(sys_path(self.index()).join("size"))
+    fn reported_size(&self) -> Option<u64> {
+        std::fs::read_to_string(sys_path(self.index()).join("size"))
             .ok()
             .and_then(|sectors| sectors.trim().parse::<u64>().ok())
-            .map(|sectors| sectors * 512);
-        match reported {
-            Some(bytes) if bytes == expected => Ok(()),
-            other => Err(io::Error::other(format!(
-                "nbd{} reports {other:?} bytes instead of {expected} after connecting",
-                self.index()
-            ))),
-        }
+            .map(|sectors| sectors * 512)
     }
 
     async fn abandon(self) -> io::Result<()> {
