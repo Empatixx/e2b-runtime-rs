@@ -69,9 +69,6 @@ impl InfoServer {
             service_status_changed_at: Some(state.changed_at.into()),
             outstanding_work: self.status.outstanding_work(),
             max_sandboxes: self.max_sandboxes,
-            metric_vcpu_used: allocated.vcpus as i64,
-            metric_memory_used_mb: allocated.memory_mb as i64,
-            metric_disk_mb: allocated.disk_mb as i64,
             metric_sandboxes_running: allocated.sandboxes,
             metric_cpu_percent: host.cpu_percent,
             metric_memory_used_bytes: host.memory_used_bytes,
@@ -85,6 +82,7 @@ impl InfoServer {
             metric_hugepages_used: host.hugepages.used,
             metric_hugepages_reserved: host.hugepages.reserved,
             metric_hugepage_size_bytes: host.hugepages.size_bytes,
+            ..ServiceInfoResponse::default()
         }
     }
 }
@@ -152,10 +150,6 @@ mod tests {
                 info.metric_disk_allocated_bytes
             ),
             (2, 6, 1536 * MIB, 8000 * MIB)
-        );
-        assert_eq!(
-            (info.metric_vcpu_used, info.metric_memory_used_mb, info.metric_disk_mb),
-            (6, 1536, 8000)
         );
         assert_eq!(info.service_roles, vec![ServiceInfoRole::Orchestrator as i32]);
         assert_eq!(info.service_status, ServiceInfoStatus::Healthy as i32);
