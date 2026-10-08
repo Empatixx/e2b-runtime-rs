@@ -7,7 +7,7 @@ A self-hosted [E2B](https://e2b.dev) runtime written in Rust, aimed at bare-meta
 | Component | What it does | State |
 |---|---|---|
 | **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume and pause work end to end in CI (M0–M7); gRPC server next ([spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume, pause and the gRPC `SandboxService` work end to end in CI (M0–M8); ublk and template build next ([spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
 | template build | OCI image → ext4 → snapshot | planned |
 | api | REST API for the SDK, node selection | planned |
 | client-proxy | `https://<port>-<sandbox>.<domain>` routing | planned |
@@ -76,6 +76,16 @@ scripts/sdk-tests.sh
 - `cargo test --workspace` runs on macOS: unit and contract tests, minus the Linux-only ones.
 - `scripts/test-linux.sh` runs the full suite in a Linux container (PTY, inotify, setuid).
 - `scripts/sdk-tests.sh` runs the official E2B JS SDK tests against envd in Docker.
+
+### Orchestrator gRPC server (Linux, KVM, root)
+
+```bash
+E2B_FIRECRACKER=/opt/e2b/firecracker E2B_KERNEL=/opt/e2b/vmlinux \
+E2B_STORAGE_DIR=/srv/e2b/builds GRPC_PORT=5008 \
+sudo -E cargo run --release -p orchestrator
+```
+
+It serves upstream's `SandboxService` (`/SandboxService/Create`, `Update`, `List`, `Delete`, `Pause`). Create resumes a build from storage (`E2B_STORAGE_DIR`, or `E2B_S3_BUCKET` / `E2B_S3_ENDPOINT` / `E2B_S3_KEY` / `E2B_S3_SECRET`). Sandboxes are removed at `end_time`. `crates/orchestrator/tests/grpc_contract.rs` shows the whole lifecycle.
 
 ### SDK against a microVM (Linux, KVM)
 

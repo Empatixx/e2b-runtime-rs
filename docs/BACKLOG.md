@@ -42,8 +42,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The server has no request length cap or range check (upstream caps writes at 32 MiB) | M8 |
 | A truncated request header is treated as a clean EOF | any |
 | Blocking file I/O in server writes (`write_at` / `write_zeroes_at`) | M6 |
-| No `Drop` cleanup for `Exposure` / `NbdDevice` | M8 |
-| Death of the server task is not signalled until `close`; the lifecycle should watch the `JoinHandle` | M8 |
 | `nbd_contract` leaves mounts and devices behind when it panics | any |
 | ublk exposure (M3b): needs a bare-metal node with kernel 6.12+ | M3b |
 
@@ -52,10 +50,8 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Host `ip_forward` sysctl is set on every slot create; make it a startup check | M8 |
-| Cgroup silently reuses stale directories and enables no controllers (cpu/memory limits, `memory.peak`) | M8 |
 | Firecracker joins the cgroup after spawn instead of `CLONE_INTO_CGROUP` | M8 |
 | The Firecracker console file grows without bound; send it to a logger | M8 |
-| Firecracker does not get its own session (`setsid`) | M8 |
 | `vm_contract` has no cleanup guard when it panics | any |
 | `MAX_SLOT` is 16383 vs upstream 32766 (deliberate; revisit for large nodes) | M8 |
 
@@ -79,7 +75,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | M8 |
 | Prefetch from a build-time page trace (needs template build) | template build |
 | Firecracker `use_memfd` (memfd copy-out instead of `process_vm_readv`) and `use_sync_wp` (synchronous WP events) are not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty` | M8 |
-| A memory server that dies while the sandbox runs is only noticed at `stop()`; watch it and stop the sandbox | M8 |
 | Rate limiter reset `PATCH`es after snapshot load (upstream sends empty limiters) | M8 |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
 | `resume` builds the memfile `BuildFile` in the caller; a template cache should own it | M8 |
@@ -108,4 +103,18 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `Sandbox::snapshot` is public but leaves the VM paused; make it crate-private or resume after | M8 |
 | The server's 1 ms retry sleep is rebuilt on every completion; keep one timer across iterations | M8 |
 | No KVM test with multiple memory regions (guests above the MMIO gap) | M8 |
+
+## Orchestrator: gRPC (M8)
+
+| Item | Target |
+|---|---|
+| Network slots are created per sandbox; upstream pre-creates 32 and recycles returned ones after 3 s | next |
+| `InfoService`, `TemplateService`, `VolumeService`, `ChunkService`, gRPC health and the cmux HTTP side are not served | next |
+| `SchedulingMetadata` and `resolved_firecracker_version` are left empty in responses | next |
+| Local expiry at `end_time` (upstream leaves expiry to the API evictor); revisit when the API exists | API |
+| `RunningSandbox.config` (deprecated upstream) is not filled | API |
+| Pause uploads synchronously inside the RPC; upstream returns after the snapshot and uploads in the background | next |
+| Sandbox work dirs (`E2B_WORK_DIR/<id>`) are not removed after stop | next |
+| No max-running / max-starting admission limits (`ResourceExhausted` texts upstream) | next |
+| Cgroup directories of a crashed orchestrator are reused, not cleaned at startup | next |
 
