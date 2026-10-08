@@ -279,3 +279,38 @@ async fn absolute_paths_are_kept_verbatim() {
     assert_eq!(body["entry"]["path"], with_slash);
     assert_eq!(body["entry"]["name"], "made");
 }
+
+#[tokio::test]
+async fn the_old_python_sdk_gets_only_the_fields_it_knew() {
+    let (addr, _) = spawn_server_with_state().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let file = std::fs::canonicalize(tmp.path()).unwrap().join("file.txt");
+    std::fs::write(&file, b"Hello").unwrap();
+    let call = |method: &'static str, agent: &'static str, body: Value| {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/filesystem.Filesystem/{method}"))
+            .header("content-type", "application/json")
+            .header("user-agent", agent)
+            .header(
+                "authorization",
+                format!("Basic {}", STANDARD.encode(format!("{}:", current_user()))),
+            )
+            .json(&body)
+            .send()
+    };
+
+    let legacy = call("Stat", "connect-python", json!({ "path": file })).await.unwrap();
+    let modern = call("Stat", "connect-es/1.0", json!({ "path": file })).await.unwrap();
+    let missing = call("Stat", "connect-python", json!({ "path": "/nope/x" }))
+        .await
+        .unwrap();
+
+    assert_eq!(legacy.headers()["x-e2b-legacy-sdk"], "true");
+    let entry: Value = legacy.json().await.unwrap();
+    assert_eq!(
+        entry,
+        json!({ "entry": { "name": "file.txt", "type": "FILE_TYPE_FILE", "path": file.to_str().unwrap() } })
+    );
+    assert!(!modern.headers().contains_key("x-e2b-legacy-sdk"));
+    assert!(!missing.headers().contains_key("x-e2b-legacy-sdk"));
+}

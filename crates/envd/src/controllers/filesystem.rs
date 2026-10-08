@@ -1,4 +1,5 @@
 mod entry;
+mod legacy;
 mod ops;
 mod watch;
 
@@ -6,11 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tokio_stream::StreamExt;
 
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 
 use crate::app::AppState;
 use crate::auth::request_user;
+use crate::middleware::legacy_sdk::LegacySdk;
 use crate::proto::filesystem::*;
 use crate::user::User;
 use crate::util::keepalive::keepalive_interval;
@@ -33,7 +36,7 @@ impl Filesystem for FilesystemService {
 
         let entry = entry_info(&path)?;
         Response::ok(StatResponse {
-            entry: entry.into(),
+            entry: shaped(&ctx, entry).into(),
             ..Default::default()
         })
     }
@@ -50,7 +53,7 @@ impl Filesystem for FilesystemService {
 
         let entry = ops::make_dir(&path, &user)?;
         Response::ok(MakeDirResponse {
-            entry: entry.into(),
+            entry: shaped(&ctx, entry).into(),
             ..Default::default()
         })
     }
@@ -69,7 +72,7 @@ impl Filesystem for FilesystemService {
 
         let entry = ops::rename(&source, &destination, &user)?;
         Response::ok(MoveResponse {
-            entry: entry.into(),
+            entry: shaped(&ctx, entry).into(),
             ..Default::default()
         })
     }
@@ -89,7 +92,7 @@ impl Filesystem for FilesystemService {
             .await
             .map_err(|e| ConnectError::internal(e.to_string()))??;
         Response::ok(ListDirResponse {
-            entries,
+            entries: entries.into_iter().map(|entry| shaped(&ctx, entry)).collect(),
             ..Default::default()
         })
     }
@@ -123,7 +126,10 @@ impl Filesystem for FilesystemService {
 
         let interval = keepalive_interval(ctx.headers());
         let stream = watch::stream_events(path, request.recursive, request.include_entry, interval)?;
-        Response::ok(stream)
+        match is_legacy(&ctx) {
+            true => Response::ok(Box::pin(stream.map(|response| response.map(legacy::watch_response)))),
+            false => Response::ok(stream),
+        }
     }
 
     async fn create_watcher(
@@ -157,7 +163,7 @@ impl Filesystem for FilesystemService {
 
     async fn get_watcher_events(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, GetWatcherEventsRequest>,
     ) -> ServiceResult<GetWatcherEventsResponse> {
         let watchers = self.watchers.lock();
@@ -169,7 +175,13 @@ impl Filesystem for FilesystemService {
         match pending.error.clone() {
             Some(error) => Err(ConnectError::internal(error)),
             None => Response::ok(GetWatcherEventsResponse {
-                events: std::mem::take(&mut pending.events),
+                events: std::mem::take(&mut pending.events)
+                    .into_iter()
+                    .map(|event| match is_legacy(&ctx) {
+                        true => legacy::event(&event),
+                        false => event,
+                    })
+                    .collect(),
                 ..Default::default()
             }),
         }
@@ -185,6 +197,17 @@ impl Filesystem for FilesystemService {
             .remove(request.watcher_id)
             .ok_or_else(|| watcher_not_found(request.watcher_id))?;
         Response::ok(RemoveWatcherResponse::default())
+    }
+}
+
+fn is_legacy(ctx: &RequestContext) -> bool {
+    ctx.extensions().get::<LegacySdk>().is_some()
+}
+
+fn shaped(ctx: &RequestContext, entry: EntryInfo) -> EntryInfo {
+    match is_legacy(ctx) {
+        true => legacy::entry(&entry),
+        false => entry,
     }
 }
 

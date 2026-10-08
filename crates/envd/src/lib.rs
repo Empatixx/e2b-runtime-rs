@@ -5,6 +5,7 @@ pub mod config;
 pub mod controllers;
 pub mod envvars;
 pub mod host;
+pub mod logs;
 pub mod middleware;
 pub mod port;
 pub mod proto;

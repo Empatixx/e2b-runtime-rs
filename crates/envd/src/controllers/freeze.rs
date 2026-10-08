@@ -6,12 +6,15 @@ use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use tokio::time::Instant;
 
 use crate::app::AppState;
 use crate::cgroups::freeze::{FreezeMode, FreezeOptions, FreezeResult};
 use crate::util::error_response::ErrorResponse;
 use crate::util::go_json;
 use crate::util::query::parse_int;
+
+const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +38,7 @@ pub async fn post_freeze(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ErrorResponse> {
+    let handler_start = Instant::now();
     let max_cgroups = query
         .get("maxCgroups")
         .map(|value| parse_int("maxCgroups", value))
@@ -63,6 +67,13 @@ pub async fn post_freeze(
         })?;
     if !errors.is_empty() {
         tracing::error!(error = %errors.join("\n"), failed = result.failed, "some cgroups failed to freeze; reporting them in the result");
+    }
+    let flush_budget = match report {
+        true => LOG_FLUSH_TIMEOUT.min(options.max_wait.saturating_sub(handler_start.elapsed())),
+        false => Duration::ZERO,
+    };
+    if let Err(e) = state.flush_logs(flush_budget).await {
+        tracing::warn!(error = %e, "flush and purge logs before pause");
     }
     if !report {
         return Ok(StatusCode::NO_CONTENT.into_response());

@@ -11,7 +11,7 @@ pub fn float32<S: Serializer>(value: &f32, serializer: S) -> Result<S::Ok, S::Er
     }
 }
 
-fn escape_html(json: &str) -> String {
+pub fn escape_html(json: &str) -> String {
     json.chars()
         .fold(String::with_capacity(json.len()), |mut escaped, character| {
             match character {

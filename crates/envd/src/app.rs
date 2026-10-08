@@ -12,8 +12,10 @@ use crate::config::Config;
 use crate::envvars::EnvVars;
 use crate::host::cacerts::CaCertInstaller;
 use crate::host::metrics::{CpuUsage, read_metrics};
+use crate::host::mmds::MmdsOpts;
 use crate::host::nfs::NfsMounts;
 use crate::host::oom::OomWatcher;
+use crate::logs::exporter::LogExporter;
 
 #[derive(Debug, Clone)]
 pub struct Defaults {
@@ -48,6 +50,7 @@ pub struct AppState {
     pub ca_certs: CaCertInstaller,
     pub nfs: NfsMounts,
     pub hyperloop_lock: Mutex<()>,
+    pub log_exporter: Option<Arc<LogExporter>>,
 }
 
 impl AppState {
@@ -61,6 +64,7 @@ impl AppState {
             ca_certs: CaCertInstaller::default(),
             nfs: NfsMounts::default(),
             hyperloop_lock: Mutex::new(()),
+            log_exporter: (!config.is_not_fc).then(Arc::default),
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
             freezer,
@@ -77,6 +81,21 @@ impl AppState {
 
     pub fn defaults(&self) -> Defaults {
         self.defaults.read().clone()
+    }
+
+    pub fn deliver_mmds(&self, opts: Option<MmdsOpts>) {
+        if let (Some(exporter), Some(opts)) = (&self.log_exporter, opts)
+            && !opts.logs_collector_address.is_empty()
+        {
+            exporter.set_opts(opts);
+        }
+    }
+
+    pub async fn flush_logs(&self, budget: std::time::Duration) -> Result<(), String> {
+        match &self.log_exporter {
+            Some(exporter) => exporter.flush_and_purge(budget).await,
+            None => Ok(()),
+        }
     }
 
     pub fn access_token(&self) -> Option<String> {

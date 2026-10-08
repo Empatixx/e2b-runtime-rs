@@ -107,7 +107,10 @@ async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
 fn initialized(state: &Arc<AppState>) -> Response {
     state.initialized.store(true, Ordering::SeqCst);
     let poller = state.clone();
-    tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars, Some(MMDS_POLL_LIMIT)).await });
+    tokio::spawn(async move {
+        let opts = host::mmds::poll_for_opts(&poller.env_vars, Some(MMDS_POLL_LIMIT)).await;
+        poller.deliver_mmds(opts);
+    });
     let defaults = state.defaults();
     let effective = EffectiveDefaults {
         user: defaults.user,
