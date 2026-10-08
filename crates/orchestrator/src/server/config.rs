@@ -9,6 +9,8 @@ use crate::storage::backend::Storage;
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
 const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_MAX_SANDBOXES: i64 = 200;
+const DEFAULT_MAX_STARTING: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {
@@ -37,6 +39,9 @@ pub struct NodeConfig {
     pub slots: RangeInclusive<u32>,
     pub local_expiry: bool,
     pub envd_timeout: Duration,
+    pub labels: Vec<String>,
+    pub max_sandboxes: i64,
+    pub max_starting: usize,
 }
 
 impl NodeConfig {
@@ -71,6 +76,17 @@ impl NodeConfig {
                 .map(|ms| ms.parse().map_err(|_| format!("ENVD_TIMEOUT_MS is not a number: {ms}")))
                 .transpose()?
                 .map_or(Duration::from_millis(DEFAULT_ENVD_TIMEOUT_MS), Duration::from_millis),
+            labels: var("NODE_LABELS")
+                .map(|labels| {
+                    labels
+                        .split(',')
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
+            max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
         })
     }
 
@@ -110,6 +126,12 @@ fn storage_config(vars: &HashMap<String, String>) -> Result<StorageConfig, Strin
     }
 }
 
+fn number<T: std::str::FromStr>(vars: &HashMap<String, String>, name: &str) -> Result<Option<T>, String> {
+    vars.get(name)
+        .map(|value| value.parse().map_err(|_| format!("{name} is not a number: {value}")))
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +157,8 @@ mod tests {
         assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
+        assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
+        assert!(config.labels.is_empty());
         assert_eq!(
             config.storage,
             StorageConfig::Local {

@@ -31,6 +31,8 @@ pub struct Node {
     pub network: Arc<NetworkPool<HostSlots>>,
     pub local_expiry: bool,
     pub templates: Arc<TemplateCache>,
+    pub labels: Vec<String>,
+    pub max_sandboxes: i64,
     store: Arc<DiffStore>,
     firecracker: PathBuf,
     kernel: PathBuf,
@@ -49,6 +51,8 @@ impl Node {
         Ok(Self {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
+            labels: config.labels.clone(),
+            max_sandboxes: config.max_sandboxes,
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
             registry: Registry::new(),
@@ -64,6 +68,14 @@ impl Node {
     pub fn start_background(&self) {
         self.network.start();
         tokio::spawn(self.templates.clone().run_eviction());
+    }
+
+    pub fn running_configs(&self) -> Vec<SandboxConfig> {
+        self.registry
+            .running()
+            .iter()
+            .map(|handle| handle.info.lock().config.clone())
+            .collect()
     }
 
     pub async fn close(&self) {

@@ -14,10 +14,9 @@ mod serve {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use orchestrator::proto::sandbox_service_server::SandboxServiceServer;
+    use orchestrator::server::app::App;
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::node::Node;
-    use orchestrator::server::service::SandboxServer;
     use tokio::signal::unix::{SignalKind, signal};
 
     pub async fn run() -> Result<(), String> {
@@ -25,12 +24,15 @@ mod serve {
         let config = NodeConfig::from_env()?;
         let node = Arc::new(Node::new(&config)?);
         node.sweep().await;
-        node.start_background();
+        let app = App::new(node.clone());
+        app.start_background();
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(|e| format!("listen on {address}: {e}"))?;
         tracing::info!(%address, node = %config.node_id, "orchestrator listening");
-        let served = tonic::transport::Server::builder()
-            .add_service(SandboxServiceServer::new(SandboxServer::new(node.clone())))
-            .serve_with_shutdown(address, shutdown_requested())
+        let served = axum::serve(listener, app.router())
+            .with_graceful_shutdown(shutdown_requested())
             .await
             .map_err(|e| e.to_string());
         tracing::info!("stopping every sandbox");

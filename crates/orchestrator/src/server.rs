@@ -1,4 +1,7 @@
+#[cfg(target_os = "linux")]
+pub mod app;
 pub mod config;
+pub mod health;
 pub mod info;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;

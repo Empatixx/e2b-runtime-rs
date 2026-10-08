@@ -10,15 +10,16 @@ use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
 use orchestrator::envd::{ENVD_PORT, EnvdInit};
 use orchestrator::network::slot::Slot;
+use orchestrator::proto::info_service_client::InfoServiceClient;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
-use orchestrator::proto::sandbox_service_server::SandboxServiceServer;
 use orchestrator::proto::{
     SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest, SandboxPauseRequest, SandboxUpdateRequest,
+    ServiceInfoStatus, ServiceStatusChangeRequest,
 };
 use orchestrator::sandbox::Sandbox;
+use orchestrator::server::app::App;
 use orchestrator::server::config::{NodeConfig, StorageConfig};
 use orchestrator::server::node::Node;
-use orchestrator::server::service::SandboxServer;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::header::{Header, Metadata};
 use tonic::Code;
@@ -58,6 +59,7 @@ struct Host {
 
 struct Cluster {
     node: Arc<Node>,
+    address: SocketAddr,
     dir: tempfile::TempDir,
     client: SandboxServiceClient<Channel>,
     template_build: Uuid,
@@ -140,21 +142,22 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
         slots: pool.indices(),
         local_expiry,
         envd_timeout: Duration::from_secs(10),
+        labels: Vec::new(),
+        max_sandboxes: 200,
+        max_starting: 3,
     };
     let node = Arc::new(Node::new(&config).unwrap());
-    node.start_background();
+    let app = App::new(node.clone());
+    app.start_background();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(
-        tonic::transport::Server::builder()
-            .add_service(SandboxServiceServer::new(SandboxServer::new(node.clone())))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
-    );
+    tokio::spawn(axum::serve(listener, app.router()).into_future());
     let client = SandboxServiceClient::connect(format!("http://{address}"))
         .await
         .unwrap();
     Cluster {
         node,
+        address,
         dir,
         client,
         template_build,
@@ -185,6 +188,41 @@ fn envd(slot: u32) -> String {
         "http://{}",
         SocketAddr::from((Slot::new(slot).unwrap().host_ip(), ENVD_PORT))
     )
+}
+
+async fn check_node_services(cluster: &Cluster) {
+    let mut info = InfoServiceClient::connect(format!("http://{}", cluster.address))
+        .await
+        .unwrap();
+    let service = info.service_info(()).await.unwrap().into_inner();
+    assert_eq!(
+        (
+            service.node_id.as_str(),
+            service.metric_sandboxes_running,
+            service.metric_cpu_allocated,
+            service.metric_memory_allocated_bytes
+        ),
+        ("grpc-node", 1, 2, 1024 * 1024 * 1024)
+    );
+    let health = || async {
+        let response = reqwest::get(format!("http://{}/health", cluster.address))
+            .await
+            .unwrap();
+        (response.status().as_u16(), response.text().await.unwrap())
+    };
+    assert_eq!(
+        health().await,
+        (200, "{\"status\":\"healthy\",\"version\":\"unknown\"}\n".to_owned())
+    );
+    let draining = ServiceStatusChangeRequest {
+        service_status: ServiceInfoStatus::Draining.into(),
+    };
+    info.service_status_override(draining).await.unwrap();
+    assert_eq!(health().await.1, "{\"status\":\"draining\",\"version\":\"unknown\"}\n");
+    let healthy = ServiceStatusChangeRequest {
+        service_status: ServiceInfoStatus::Healthy.into(),
+    };
+    info.service_status_override(healthy).await.unwrap();
 }
 
 async fn running_envd(pool: Pool) -> String {
@@ -294,6 +332,7 @@ async fn sandbox_lifecycle_over_grpc() {
     assert_eq!(created.client_id, "grpc-node");
     let base = running_envd(pool).await;
     put_note(&base, "before pause").await;
+    check_node_services(&cluster).await;
 
     let listed = cluster.client.list(()).await.unwrap().into_inner().sandboxes;
     assert_eq!(
