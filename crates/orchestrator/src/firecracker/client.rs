@@ -36,7 +36,7 @@ impl FirecrackerClient {
         self
     }
 
-    pub async fn boot(&self, config: &VmConfig, metadata: &MmdsMetadata) -> Result<(), String> {
+    pub async fn boot(&self, config: &VmConfig, metadata: Option<&MmdsMetadata>) -> Result<(), String> {
         self.put(
             "/machine-config",
             json!({ "vcpu_count": config.vcpus, "mem_size_mib": config.memory_mib }),
@@ -44,25 +44,23 @@ impl FirecrackerClient {
         .await?;
         self.put(
             "/boot-source",
-            json!({ "kernel_image_path": config.kernel, "boot_args": config.boot_args() }),
+            json!({ "kernel_image_path": config.kernel, "boot_args": config.boot_args }),
         )
         .await?;
-        self.put(
-            "/drives/rootfs",
-            json!({ "drive_id": "rootfs", "path_on_host": config.rootfs, "is_root_device": true, "is_read_only": false }),
-        )
-        .await?;
+        self.put("/drives/rootfs", root_drive(config)).await?;
         self.put(
             "/network-interfaces/eth0",
             json!({ "iface_id": "eth0", "host_dev_name": TAP_NAME, "guest_mac": GUEST_MAC }),
         )
         .await?;
-        self.put(
-            "/mmds/config",
-            json!({ "version": "V2", "network_interfaces": ["eth0"] }),
-        )
-        .await?;
-        self.set_mmds(metadata).await?;
+        if let Some(metadata) = metadata {
+            self.put(
+                "/mmds/config",
+                json!({ "version": "V2", "network_interfaces": ["eth0"] }),
+            )
+            .await?;
+            self.set_mmds(metadata).await?;
+        }
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
     }
 
@@ -182,6 +180,15 @@ impl FirecrackerClient {
     }
 }
 
+fn root_drive(config: &VmConfig) -> serde_json::Value {
+    let mut drive =
+        json!({ "drive_id": "rootfs", "path_on_host": config.rootfs, "is_root_device": true, "is_read_only": false });
+    if let Some(io_engine) = &config.io_engine {
+        drive["io_engine"] = json!(io_engine);
+    }
+    drive
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -293,7 +300,7 @@ mod tests {
         let calls = fake_firecracker(socket.clone(), Faults::default()).await;
 
         FirecrackerClient::new(socket)
-            .boot(&config(), &metadata())
+            .boot(&config(), Some(&metadata()))
             .await
             .unwrap();
 
@@ -330,6 +337,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_build_boot_skips_mmds_and_sets_the_io_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .io_engine(Some("Sync"))
+            .build()
+            .unwrap();
+
+        FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
+
+        let calls = calls.lock().clone();
+        let paths: Vec<&str> = calls.iter().map(|call| call.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/machine-config",
+                "/boot-source",
+                "/drives/rootfs",
+                "/network-interfaces/eth0",
+                "/actions"
+            ]
+        );
+        assert_eq!(calls[2].body["io_engine"], json!("Sync"));
+    }
+
+    #[tokio::test]
     async fn api_errors_name_the_call_status_and_body() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("fc.sock");
@@ -340,7 +376,7 @@ mod tests {
         let _calls = fake_firecracker(socket.clone(), faults).await;
 
         let error = FirecrackerClient::new(socket)
-            .boot(&config(), &metadata())
+            .boot(&config(), Some(&metadata()))
             .await
             .unwrap_err();
         assert_eq!(

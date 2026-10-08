@@ -8,7 +8,9 @@ use roaring::RoaringBitmap;
 use uuid::Uuid;
 
 use super::Sandbox;
+use super::config::Rootfs;
 use crate::block::build_file::{Ready, ready_now};
+use crate::block::file_diff::export_file_diff;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::server::MemoryServer;
@@ -16,6 +18,8 @@ use crate::memory::snapshot::{GuestMemory, diff_metadata, export_pages, memfile_
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
+
+const ROOTFS_BLOCK_SIZE: u64 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -243,12 +247,15 @@ impl Sandbox {
     }
 
     async fn flush_disk(&self) -> Result<(), String> {
-        let device = self
-            .resources
-            .disk
-            .as_ref()
-            .map(|disk| disk.path())
-            .ok_or("rootfs is not exposed")?;
+        let device = match &self.config.rootfs {
+            Rootfs::File(path) => path.clone(),
+            Rootfs::Overlay(_) => self
+                .resources
+                .disk
+                .as_ref()
+                .map(|disk| disk.path())
+                .ok_or("rootfs is not exposed")?,
+        };
         tokio::task::spawn_blocking(move || File::open(&device).and_then(|disk| disk.sync_all()))
             .await
             .map_err(|e| format!("flush rootfs device: {e}"))?
@@ -256,14 +263,34 @@ impl Sandbox {
     }
 
     async fn export_rootfs(&self, path: &Path, build_id: Uuid) -> Result<Exported, String> {
-        let overlay = self.config.rootfs.clone();
-        let path = path.to_path_buf();
-        let diff = blocking("export rootfs", move || {
-            File::create(&path).and_then(|mut out| overlay.export_diff(&mut out))
-        })
-        .await?;
-        exported(&diff, self.config.rootfs.base().header(), build_id)
+        match &self.config.rootfs {
+            Rootfs::Overlay(overlay) => {
+                let overlay = overlay.clone();
+                let parent = overlay.base().header().clone();
+                let path = path.to_path_buf();
+                let diff = blocking("export rootfs", move || {
+                    File::create(&path).and_then(|mut out| overlay.export_diff(&mut out))
+                })
+                .await?;
+                exported(&diff, &parent, build_id)
+            }
+            Rootfs::File(source) => export_file(source.clone(), path.to_path_buf(), build_id).await,
+        }
     }
+}
+
+async fn export_file(source: PathBuf, path: PathBuf, build_id: Uuid) -> Result<Exported, String> {
+    let size = std::fs::metadata(&source)
+        .map_err(|e| format!("stat rootfs {}: {e}", source.display()))?
+        .len();
+    let diff = blocking("export rootfs", move || {
+        let mut out = BufWriter::new(File::create(&path)?);
+        let diff = export_file_diff(&source, &mut out, ROOTFS_BLOCK_SIZE)?;
+        out.flush().map(|()| diff)
+    })
+    .await?;
+    let parent = Header::new(Metadata::template(build_id, ROOTFS_BLOCK_SIZE, size), Vec::new())?;
+    exported(&diff, &parent, build_id)
 }
 
 fn write_pages(memory: &GuestMemory, pages: &MemoryPages, path: &Path) -> io::Result<DiffMetadata> {

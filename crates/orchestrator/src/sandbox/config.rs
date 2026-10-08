@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::envd::EnvdInit;
+use crate::firecracker::kernel_args::BootOptions;
 use crate::network::slot::Slot;
 use crate::template::metadata::MemoryPrefetch;
 
@@ -13,16 +16,26 @@ const DEFAULT_VCPUS: u32 = 2;
 const DEFAULT_MEMORY_MIB: u32 = 1024;
 const DEFAULT_ENVD_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Clone)]
+pub enum Rootfs {
+    Overlay(Arc<Overlay>),
+    File(PathBuf),
+}
+
 pub struct SandboxConfig {
     pub id: String,
     pub template_id: String,
-    pub rootfs: Arc<Overlay>,
+    pub rootfs: Rootfs,
     pub slot: Slot,
     pub slot_ready: bool,
     pub firecracker: PathBuf,
     pub kernel: Option<PathBuf>,
     pub memfile: Option<Arc<BuildFile>>,
-    pub init_path: String,
+    pub boot: BootOptions,
+    pub mmds: bool,
+    pub io_engine: Option<String>,
+    pub console: Option<UnboundedSender<String>>,
+    pub wait_for_envd: bool,
     pub vcpus: u32,
     pub memory_mib: u32,
     pub work_dir: PathBuf,
@@ -34,17 +47,32 @@ pub struct SandboxConfig {
     pub cgroup_name: String,
 }
 
+impl SandboxConfig {
+    pub fn overlay(&self) -> Result<Arc<Overlay>, String> {
+        match &self.rootfs {
+            Rootfs::Overlay(overlay) => Ok(overlay.clone()),
+            Rootfs::File(path) => Err(format!("rootfs {} is a plain file, not an overlay", path.display())),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SandboxBuilder {
     id: Option<String>,
     template_id: Option<String>,
-    rootfs: Option<Arc<Overlay>>,
+    rootfs: Option<Rootfs>,
     slot: Option<Slot>,
     slot_ready: bool,
     firecracker: Option<PathBuf>,
     kernel: Option<PathBuf>,
     memfile: Option<Arc<BuildFile>>,
     init_path: Option<String>,
+    kernel_logs: Option<bool>,
+    kvm_clock: Option<bool>,
+    without_mmds: bool,
+    io_engine: Option<String>,
+    console: Option<UnboundedSender<String>>,
+    skip_envd: bool,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     work_dir: Option<PathBuf>,
@@ -67,7 +95,42 @@ impl SandboxBuilder {
     }
 
     pub fn rootfs(mut self, rootfs: Arc<Overlay>) -> Self {
-        self.rootfs = Some(rootfs);
+        self.rootfs = Some(Rootfs::Overlay(rootfs));
+        self
+    }
+
+    pub fn rootfs_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.rootfs = Some(Rootfs::File(path.into()));
+        self
+    }
+
+    pub fn kernel_logs(mut self, kernel_logs: bool) -> Self {
+        self.kernel_logs = Some(kernel_logs);
+        self
+    }
+
+    pub fn kvm_clock(mut self, kvm_clock: bool) -> Self {
+        self.kvm_clock = Some(kvm_clock);
+        self
+    }
+
+    pub fn without_mmds(mut self) -> Self {
+        self.without_mmds = true;
+        self
+    }
+
+    pub fn console(mut self, console: UnboundedSender<String>) -> Self {
+        self.console = Some(console);
+        self
+    }
+
+    pub fn skip_envd(mut self) -> Self {
+        self.skip_envd = true;
+        self
+    }
+
+    pub fn io_engine(mut self, io_engine: &str) -> Self {
+        self.io_engine = Some(io_engine.to_owned());
         self
     }
 
@@ -154,7 +217,15 @@ impl SandboxBuilder {
             firecracker: self.firecracker.ok_or("firecracker is required")?,
             kernel: self.kernel,
             memfile: self.memfile,
-            init_path: self.init_path.unwrap_or_else(|| DEFAULT_INIT_PATH.to_owned()),
+            boot: BootOptions {
+                kernel_logs: self.kernel_logs.unwrap_or(true),
+                kvm_clock: self.kvm_clock.unwrap_or(true),
+                ..BootOptions::new(self.init_path.as_deref().unwrap_or(DEFAULT_INIT_PATH))
+            },
+            mmds: !self.without_mmds,
+            io_engine: self.io_engine,
+            console: self.console,
+            wait_for_envd: !self.skip_envd,
             vcpus: self.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             work_dir: self.work_dir.ok_or("work dir is required")?,

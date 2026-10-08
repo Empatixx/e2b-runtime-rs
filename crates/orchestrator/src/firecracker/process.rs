@@ -8,7 +8,10 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
+use tokio::sync::mpsc::UnboundedReceiver;
+
 use super::client::FirecrackerClient;
+use super::console::ConsoleTap;
 use super::launch::Launch;
 
 const READY_POLLS: u32 = 500;
@@ -19,6 +22,7 @@ pub struct FirecrackerProcess {
     child: Child,
     socket: PathBuf,
     console: PathBuf,
+    console_tap: ConsoleTap,
 }
 
 impl FirecrackerProcess {
@@ -26,30 +30,32 @@ impl FirecrackerProcess {
         remove_stale_socket(&launch.socket)?;
         let console = &launch.console;
         let console_file = File::create(console).map_err(|e| format!("create console {}: {e}", console.display()))?;
-        let console_err = console_file
-            .try_clone()
-            .map_err(|e| format!("clone console {}: {e}", console.display()))?;
         let mut command = Command::new("setsid");
         command
             .args(["unshare", "-m", "--", "sh", "-c"])
             .arg(launch.script())
             .stdin(Stdio::null())
-            .stdout(console_file)
-            .stderr(console_err)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let cgroup_procs = launch
             .cgroup
             .as_deref()
             .map(|cgroup| join_cgroup_on_exec(&mut command, cgroup))
             .transpose()?;
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
         drop(cgroup_procs);
+        let console_tap = ConsoleTap::open();
+        if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) {
+            console_tap.pump(stdout, stderr, console_file);
+        }
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
             console: console.clone(),
+            console_tap,
         };
         process.wait_until_ready().await?;
         Ok(process)
@@ -62,6 +68,10 @@ impl FirecrackerProcess {
             .await
             .map_or_else(|e| format!("wait failed: {e}"), |status| status.to_string());
         format!("firecracker exited: {status}: {}", self.console_tail())
+    }
+
+    pub fn console_lines(&self) -> UnboundedReceiver<String> {
+        self.console_tap.subscribe()
     }
 
     pub fn pid(&self) -> Option<u32> {

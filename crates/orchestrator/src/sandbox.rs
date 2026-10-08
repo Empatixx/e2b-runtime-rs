@@ -7,10 +7,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
-use self::config::{SandboxBuilder, SandboxConfig};
+use self::config::{Rootfs, SandboxBuilder, SandboxConfig};
 use self::resources::Resources;
+use crate::builder::config::host_arch;
 use crate::cgroup::Cgroup;
 use crate::envd::{self, ENVD_PORT};
 use crate::exposure::nbd::expose;
@@ -116,15 +118,47 @@ impl Sandbox {
         }
     }
 
+    pub async fn shut_down(mut self) -> Result<(), String> {
+        let client = self.resources.vm.as_ref().ok_or("firecracker is not running")?.client();
+        client.pause().await.map_err(|e| format!("failed to pause VM: {e}"))?;
+        let snapfile = self.config.work_dir.join("shutdown.snapfile");
+        client
+            .create_snapshot(&snapfile)
+            .await
+            .map_err(|e| format!("error creating snapshot: {e}"))?;
+        let _ = std::fs::remove_file(&snapfile);
+        let rootfs = self.config.rootfs.clone();
+        std::mem::take(&mut self.resources)
+            .release()
+            .await
+            .map_err(|e| format!("error stopping sandbox: {e}"))?;
+        match rootfs {
+            Rootfs::File(path) => sync_file(path)
+                .await
+                .map_err(|e| format!("error stopping sandbox: {e}")),
+            Rootfs::Overlay(_) => Ok(()),
+        }
+    }
+
     async fn start(&mut self) -> Result<(), String> {
         let rootfs = self.attach_disk_and_slot().await?;
         let client = self.spawn_firecracker(rootfs).await?;
         self.boot(&client).await?;
-        self.init_envd().await
+        match self.config.wait_for_envd {
+            true => self.init_envd().await,
+            false => Ok(()),
+        }
     }
 
     async fn attach_disk_and_slot(&mut self) -> Result<PathBuf, String> {
-        let (disk, created) = tokio::join!(expose(self.config.rootfs.clone()), self.own_slot());
+        let overlay = match &self.config.rootfs {
+            Rootfs::Overlay(overlay) => overlay.clone(),
+            Rootfs::File(path) => {
+                let path = path.clone();
+                return self.own_slot().await.map(|()| path);
+            }
+        };
+        let (disk, created) = tokio::join!(expose(overlay), self.own_slot());
         let exposed = disk
             .map(|exposure| self.resources.disk.insert(exposure).path())
             .map_err(|e| format!("expose rootfs: {e}"));
@@ -153,6 +187,9 @@ impl Sandbox {
             .cgroup(cgroup)
             .build()?;
         let vm = FirecrackerProcess::spawn(&launch).await?;
+        if let Some(console) = self.config.console.clone() {
+            forward_console(vm.console_lines(), console);
+        }
         Ok(self.resources.vm.insert(vm).client())
     }
 
@@ -171,9 +208,11 @@ impl Sandbox {
             .rootfs(GUEST_ROOTFS)
             .vcpus(self.config.vcpus)
             .memory_mib(self.config.memory_mib)
-            .extra_boot_args(&format!("init={}", self.config.init_path))
+            .boot_args(&self.config.boot.kernel_args(host_arch()))
+            .io_engine(self.config.io_engine.as_deref())
             .build()?;
-        client.boot(&vm_config, &self.mmds_metadata()).await
+        let metadata = self.config.mmds.then(|| self.mmds_metadata());
+        client.boot(&vm_config, metadata.as_ref()).await
     }
 
     fn mmds_metadata(&self) -> MmdsMetadata {
@@ -212,4 +251,21 @@ impl Sandbox {
             .map(FirecrackerProcess::console_tail)
             .unwrap_or_default()
     }
+}
+
+fn forward_console(mut lines: UnboundedReceiver<String>, sink: UnboundedSender<String>) {
+    tokio::spawn(async move {
+        while let Some(line) = lines.recv().await {
+            if sink.send(line).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+async fn sync_file(path: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || std::fs::File::open(&path).and_then(|file| file.sync_all()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }

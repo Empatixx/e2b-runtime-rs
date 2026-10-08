@@ -1,17 +1,13 @@
 use std::path::PathBuf;
 
-use crate::network::slot::{GUEST_IP, TAP_IP};
-
-const BASE_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw";
-const GUEST_NETMASK: &str = "255.255.255.252";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmConfig {
     pub vcpus: u32,
     pub memory_mib: u32,
     pub kernel: PathBuf,
     pub rootfs: PathBuf,
-    pub extra_boot_args: String,
+    pub boot_args: String,
+    pub io_engine: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -20,21 +16,13 @@ pub struct VmConfigBuilder {
     memory_mib: Option<u32>,
     kernel: Option<PathBuf>,
     rootfs: Option<PathBuf>,
-    extra_boot_args: String,
+    boot_args: String,
+    io_engine: Option<String>,
 }
 
 impl VmConfig {
     pub fn builder() -> VmConfigBuilder {
         VmConfigBuilder::default()
-    }
-
-    pub fn boot_args(&self) -> String {
-        let network = format!("ip={GUEST_IP}::{TAP_IP}:{GUEST_NETMASK}::eth0:off");
-        [BASE_BOOT_ARGS, network.as_str(), self.extra_boot_args.as_str()]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 }
 
@@ -59,8 +47,13 @@ impl VmConfigBuilder {
         self
     }
 
-    pub fn extra_boot_args(mut self, args: &str) -> Self {
-        self.extra_boot_args = args.to_owned();
+    pub fn boot_args(mut self, args: &str) -> Self {
+        self.boot_args = args.to_owned();
+        self
+    }
+
+    pub fn io_engine(mut self, io_engine: Option<&str>) -> Self {
+        self.io_engine = io_engine.map(str::to_owned);
         self
     }
 
@@ -70,7 +63,8 @@ impl VmConfigBuilder {
             memory_mib: self.memory_mib.unwrap_or(256),
             kernel: self.kernel.ok_or("kernel is required")?,
             rootfs: self.rootfs.ok_or("rootfs is required")?,
-            extra_boot_args: self.extra_boot_args,
+            boot_args: self.boot_args,
+            io_engine: self.io_engine,
         })
     }
 }
@@ -93,14 +87,12 @@ mod tests {
         let config = VmConfig::builder()
             .kernel("/opt/vmlinux")
             .rootfs("/dev/nbd3")
-            .extra_boot_args("init=/bin/sleep -- 3600")
+            .boot_args("init=/sbin/init")
             .build()
             .unwrap();
         assert_eq!(config.vcpus, 1);
         assert_eq!(config.memory_mib, 256);
-        assert_eq!(
-            config.boot_args(),
-            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=169.254.0.21::169.254.0.22:255.255.255.252::eth0:off init=/bin/sleep -- 3600"
-        );
+        assert_eq!(config.boot_args, "init=/sbin/init");
+        assert_eq!(config.io_engine, None);
     }
 }

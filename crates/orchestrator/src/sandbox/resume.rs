@@ -103,7 +103,8 @@ impl Sandbox {
     async fn launch_with_rootfs(&mut self) -> Result<FirecrackerClient, String> {
         let link = self.config.work_dir.join("rootfs.link");
         point_link(&link, Path::new(NO_DEVICE)).map_err(|e| format!("link {}: {e}", link.display()))?;
-        let (disk, client) = tokio::join!(expose(self.config.rootfs.clone()), self.spawn_in_slot(link.clone()));
+        let overlay = self.config.overlay()?;
+        let (disk, client) = tokio::join!(expose(overlay), self.spawn_in_slot(link.clone()));
         let device = self.keep_disk(disk)?;
         let client = client?;
         point_link(&link, &device).map_err(|e| format!("link {} to {}: {e}", link.display(), device.display()))?;

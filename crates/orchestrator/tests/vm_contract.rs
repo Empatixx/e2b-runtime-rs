@@ -8,9 +8,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
+use orchestrator::builder::config::host_arch;
 use orchestrator::cgroup::Cgroup;
 use orchestrator::exposure::nbd::expose;
 use orchestrator::firecracker::config::VmConfig;
+use orchestrator::firecracker::kernel_args::BootOptions;
 use orchestrator::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use orchestrator::firecracker::mmds::MmdsMetadata;
 use orchestrator::firecracker::process::FirecrackerProcess;
@@ -113,7 +115,14 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     let config = VmConfig::builder()
         .kernel(GUEST_KERNEL)
         .rootfs(GUEST_ROOTFS)
-        .extra_boot_args("init=/bin/sleep -- 3600")
+        .boot_args(&format!(
+            "{} -- 3600",
+            BootOptions {
+                kernel_logs: true,
+                ..BootOptions::new("/bin/sleep")
+            }
+            .kernel_args(host_arch())
+        ))
         .build()
         .unwrap();
     let metadata = MmdsMetadata {
@@ -122,7 +131,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
         logs_collector_address: String::new(),
         access_token_hash: None,
     };
-    vm.client().boot(&config, &metadata).await.unwrap();
+    vm.client().boot(&config, Some(&metadata)).await.unwrap();
 
     let reachable = pings(&slot.host_ip().to_string(), Duration::from_secs(30)).await;
     let console_log = std::fs::read_to_string(&console).unwrap_or_default();
