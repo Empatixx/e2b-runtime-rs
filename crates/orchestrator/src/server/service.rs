@@ -124,12 +124,12 @@ impl SandboxServer {
             client_id: self.node.node_id.clone(),
             start_time: Some(info.start.into()),
             end_time: Some(info.end.into()),
-            sandbox_id: info.config.sandbox_id.clone(),
-            team_id: info.config.team_id.clone(),
-            execution_id: info.config.execution_id.clone(),
+            sandbox_id: info.config.sandbox_id,
+            team_id: info.config.team_id,
+            execution_id: info.config.execution_id,
             vcpu: info.config.vcpu,
             ram_mb: info.config.ram_mb,
-            config: Some(info.config),
+            ..RunningSandbox::default()
         }
     }
 }
