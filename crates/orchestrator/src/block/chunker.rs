@@ -113,12 +113,15 @@ impl Chunker {
     }
 
     async fn ensure(&self, chunk: u64, wanted: Range<u64>) -> Result<(), String> {
+        if self.source.is_cached(&wanted) {
+            return Ok(());
+        }
         let mut progress = self.session(chunk);
         loop {
+            let state = progress.borrow_and_update().clone();
             if self.source.is_cached(&wanted) {
                 return Ok(());
             }
-            let state = progress.borrow_and_update().clone();
             match state {
                 FetchState::Failed(e) => return Err(e),
                 FetchState::Done => return self.cached_after_fetch(&wanted),
@@ -203,16 +206,16 @@ impl Source {
                 state.send_modify(|_| {});
             }
         }
-        let filled = self.fill(filled, pending.freeze()).await?;
-        match filled == range.end {
-            true => Ok(()),
-            false => Err(format!(
+        let received = filled + pending.len() as u64;
+        if received != range.end {
+            return Err(format!(
                 "get {} {range:?}: got {} of {} bytes",
                 self.object,
-                filled - range.start,
+                received - range.start,
                 range.end - range.start
-            )),
+            ));
         }
+        self.fill(filled, pending.freeze()).await.map(|_| ())
     }
 
     async fn fill(&self, offset: u64, bytes: Bytes) -> Result<u64, String> {
@@ -434,5 +437,21 @@ mod tests {
         assert!(!chunker.source.is_cached(&(0..4 * MIB)));
         assert!(!streaming.is_finished());
         streaming.abort();
+    }
+
+    #[tokio::test]
+    async fn a_short_stream_marks_no_partial_page_as_cached() {
+        let (dir, storage, _) = setup(4 * MIB).await;
+        let chunker = chunker(&dir, storage).await;
+        let short = Bytes::from(vec![7; 4096 + 100]);
+        let (state, _progress) = watch::channel(FetchState::Running);
+
+        let streamed = chunker
+            .source
+            .stream_from(0..4 * MIB, futures::stream::iter([Ok(short)]), &state)
+            .await;
+
+        assert!(streamed.unwrap_err().contains("got 4196 of 4194304 bytes"));
+        assert!(!chunker.source.is_cached(&(4096..8192)));
     }
 }

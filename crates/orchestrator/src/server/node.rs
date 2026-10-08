@@ -90,10 +90,19 @@ impl Node {
         tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }
 
-    pub async fn pause_locally(&self, sandbox: Sandbox, parent: &str, build_id: Uuid) -> Result<LocalSnapshot, String> {
+    pub async fn pause_locally(
+        &self,
+        sandbox: Sandbox,
+        parent: &SandboxInfo,
+        build_id: Uuid,
+    ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
         let local = sandbox.pause_into(&dir, build_id).await?;
-        let metadata = self.parent_metadata(parent).await.same_version(build_id);
+        let metadata = match &parent.metadata {
+            Some(metadata) => metadata.clone(),
+            None => self.parent_metadata(&parent.config.build_id).await,
+        }
+        .same_version(build_id);
         if let Err(e) = self.cache_snapshot(&local, metadata, dir) {
             tracing::warn!(build = %build_id, error = %e, "the paused snapshot is not cached on this node");
         }
@@ -227,7 +236,7 @@ impl Node {
 
     async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
-        let files = async { tokio::try_join!(template.build(), template.snapfile(), template.metadata()) };
+        let files = async { tokio::try_join!(template.build(), template.snapfile()) };
         let slot = tokio::time::timeout(REQUEST_TIMEOUT, self.network.get());
         tokio::pin!(files, slot);
         let (files, slot) = tokio::select! {
@@ -240,13 +249,18 @@ impl Node {
         let slot = slot
             .unwrap_or_else(|_| Err("request timed out".to_owned()))
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
-        let (build, snapfile, metadata) = files.map_err(|e| {
+        let (build, snapfile) = files.map_err(|e| {
             self.network.return_slot(slot);
             template_status(&config, e)
         })?;
+        let metadata = template
+            .metadata()
+            .await
+            .inspect_err(|e| tracing::warn!(build = %build.build_id, error = %e, "metadata.json is unreadable; resuming without prefetch"))
+            .ok();
         let prefetch = self
             .prefetch_from_trace
-            .then(|| metadata.memory_prefetch().cloned())
+            .then(|| metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned())
             .flatten();
         match self.resume(&config, &build, &snapfile, prefetch, slot).await {
             Ok(sandbox) => Ok(lifecycle::spawn(
@@ -256,6 +270,7 @@ impl Node {
                     config,
                     start: lifetime.start,
                     end: lifetime.end,
+                    metadata,
                 },
                 self.clone(),
             )),

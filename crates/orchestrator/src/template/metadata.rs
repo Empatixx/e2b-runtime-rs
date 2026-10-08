@@ -10,7 +10,9 @@ const DEPRECATED_VERSION: u64 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TemplateMetadata {
     pub version: u64,
+    #[serde(default)]
     pub template: TemplateVersions,
+    #[serde(default)]
     pub context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<Value>,
@@ -20,7 +22,11 @@ pub struct TemplateMetadata {
     pub from_template: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefetch: Option<Prefetch>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub cmdline_args: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balloon: Option<Value>,
@@ -47,7 +53,11 @@ pub struct Context {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub env_vars: BTreeMap<String, String>,
 }
 
@@ -58,9 +68,19 @@ pub struct Prefetch {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryPrefetch {
+    #[serde(default, deserialize_with = "null_as_default")]
     pub indices: Vec<u64>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub access_types: Vec<String>,
     pub block_size: i64,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 impl TemplateMetadata {
@@ -189,5 +209,17 @@ mod tests {
 
         assert_eq!(next.template.build_id, build.to_string());
         assert_eq!((next.context, next.prefetch), (paused().context, None));
+    }
+
+    #[test]
+    fn go_style_nulls_and_missing_objects_are_accepted() {
+        let lenient = TemplateMetadata::from_json(
+            br#"{"version":2,"context":{"env_vars":null},"cmdline_args":null,"prefetch":{"memory":{"indices":null,"access_types":null,"block_size":4096}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(lenient.template, TemplateVersions::default());
+        assert!(lenient.context.env_vars.is_empty());
+        assert_eq!(lenient.memory_prefetch().map(|memory| memory.indices.len()), Some(0));
     }
 }

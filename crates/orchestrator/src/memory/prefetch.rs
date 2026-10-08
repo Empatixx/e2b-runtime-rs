@@ -44,55 +44,74 @@ pub async fn prefetch<I: Installer>(
     stats: Arc<PrefetchStats>,
 ) -> Result<(), String> {
     let block_size = u64::try_from(mapping.block_size).map_err(|_| "negative prefetch block size".to_owned())?;
-    let (pages, mut fetched) = mpsc::channel(mapping.indices.len().max(1));
-    let fetching = tokio::spawn(fetch(mapping.indices, block_size, memfile, pages, stats.clone()));
+    let (warmed, mut ready) = mpsc::unbounded_channel();
+    let warming = tokio::spawn(warm(
+        mapping.indices,
+        block_size,
+        memfile.clone(),
+        warmed,
+        stats.clone(),
+    ));
     let Some(installer) = installer.await else {
-        fetching.abort();
+        warming.abort();
         return Ok(());
     };
     if installer.page_size() != block_size {
-        fetching.abort();
+        warming.abort();
         return Err(format!(
             "prefetch block size {block_size} differs from the page size {}",
             installer.page_size()
         ));
     }
-    let copies = futures::stream::poll_fn(|context| fetched.poll_recv(context));
-    copies
-        .for_each_concurrent(COPY_WORKERS, |(offset, data)| {
+    futures::stream::poll_fn(|context| ready.poll_recv(context))
+        .for_each_concurrent(COPY_WORKERS, |offset| {
             let installer = installer.clone();
+            let memfile = memfile.clone();
             let stats = stats.clone();
-            async move { install(&*installer, offset, &data, &stats) }
+            async move {
+                let mut data = vec![0; block_size as usize];
+                match memfile.read_at(offset, &mut data).await {
+                    Ok(()) => install(&*installer, offset, &data, &stats),
+                    Err(_) => {
+                        stats.skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
         })
         .await;
     Ok(())
 }
 
-async fn fetch(
+async fn warm(
     indices: Vec<u64>,
     block_size: u64,
     memfile: Arc<BuildFile>,
-    pages: mpsc::Sender<(u64, Vec<u8>)>,
+    warmed: mpsc::UnboundedSender<u64>,
     stats: Arc<PrefetchStats>,
 ) {
     let size = memfile.size();
     let reads = futures::stream::iter(indices)
-        .map(|index| index * block_size)
-        .filter(|offset| std::future::ready(offset + block_size <= size))
+        .filter_map(|index| {
+            std::future::ready(
+                index
+                    .checked_mul(block_size)
+                    .filter(|offset| offset.checked_add(block_size).is_some_and(|end| end <= size)),
+            )
+        })
         .map(|offset| {
             let memfile = memfile.clone();
             async move {
                 let mut data = vec![0; block_size as usize];
-                memfile.read_at(offset, &mut data).await.map(|()| (offset, data))
+                memfile.read_at(offset, &mut data).await.map(|()| offset)
             }
         })
         .buffered(FETCH_WORKERS);
     futures::pin_mut!(reads);
     while let Some(read) = reads.next().await {
         match read {
-            Ok(page) => {
+            Ok(offset) => {
                 stats.fetched.fetch_add(1, Ordering::Relaxed);
-                if pages.send(page).await.is_err() {
+                if warmed.send(offset).is_err() {
                     return;
                 }
             }
@@ -179,7 +198,7 @@ mod tests {
         let stats = Arc::new(PrefetchStats::default());
 
         prefetch(
-            mapping(vec![3, 2, 0, 99], PAGE as i64),
+            mapping(vec![3, 2, 0, 99, u64::MAX], PAGE as i64),
             memfile(&dir, 4).await,
             std::future::ready(Some(guest.clone())),
             stats.clone(),

@@ -12,6 +12,7 @@ use crate::network::slot::Slot;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::Snapshot;
+use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
 
@@ -20,6 +21,7 @@ pub struct SandboxInfo {
     pub config: SandboxConfig,
     pub start: SystemTime,
     pub end: SystemTime,
+    pub metadata: Option<TemplateMetadata>,
 }
 
 pub enum Command {
@@ -81,7 +83,7 @@ impl Running {
         self.node.registry.stop(&id);
         let paused = match ending {
             Ending::Pause { build_id, reply } => {
-                let parent = self.info.lock().config.build_id.clone();
+                let parent = self.info.lock().clone();
                 Some((self.node.pause_locally(self.sandbox, &parent, build_id).await, reply))
             }
             Ending::Stop { reason } => {

@@ -162,4 +162,13 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
 | Stream batches are 256 KiB; upstream reads `max(block size, MinChunkerReadSizeKB)` | API |
 | Kernel and Firecracker versions in `metadata.json` are copied from the parent; nothing probes the binaries | template build |
+| A panicking chunk fetch task leaves its session entry; later readers get "ended without the data" (M12 review) | API |
+| Prefault copies run on tokio workers one after another; use blocking workers for real parallel `UFFDIO_COPY` | API |
+| Prefetch keeps trying every page after the guest memory is gone; upstream cancels on `ErrClosed` | API |
+| A prefault can pass the untouched check just before a REMOVE batch is recorded and bring back a freed page (the snapshot still exports it as empty) | API |
+| `metadata.json` nested `Value` objects serialize with sorted keys; Go writes struct order; `{"version":1.5}` reads as V1 where Go errors | API |
+| A failed `metadata.json` write also skips caching the diffs, and uploads then retry against a missing file | API |
+| `collect_prefetch` returns the mapping; writing `metadata.json`, invalidating the template and log-only failure belong to the template build | template build |
+| Prefault installs zero pages that upstream skips | API |
+| `use_memfd` is sent whenever `USE_MEMFD` is on; upstream also gates it on the Firecracker version | API |
 
