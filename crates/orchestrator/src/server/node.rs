@@ -27,6 +27,7 @@ use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
+use crate::tcpfirewall::proxy::FirewallSandbox;
 use crate::template::cache::TemplateCache;
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
 use crate::template::{Template, TemplateError};
@@ -190,6 +191,18 @@ impl Node {
                 team_id: info.config.team_id,
                 build_id: info.config.build_id,
                 lifecycle_started_at: Some(info.started_at),
+            })
+    }
+
+    pub fn firewall_source(&self, ip: IpAddr) -> Option<FirewallSandbox> {
+        self.registry
+            .running()
+            .iter()
+            .map(|handle| handle.info.lock().clone())
+            .find(|info| IpAddr::V4(info.host_ip) == ip)
+            .map(|info| FirewallSandbox {
+                egress: info.config.network.and_then(|network| network.egress),
+                sandbox_id: info.config.sandbox_id,
             })
     }
 

@@ -19,11 +19,13 @@ mod linux {
     use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
     use orchestrator::block::overlay::Overlay;
     use orchestrator::envd::{ENVD_PORT, EnvdInit};
+    use orchestrator::network::settings::NetworkSettings;
     use orchestrator::network::slot::Slot;
     use orchestrator::sandbox::Sandbox;
     use orchestrator::sandbox::config::SandboxBuilder;
     use orchestrator::storage::backend::Storage;
     use orchestrator::storage::header::{Header, Metadata};
+    use orchestrator::tcpfirewall::proxy::{FirewallSandbox, TcpFirewall};
     use orchestrator::template::cache::TemplateCache;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::signal::unix::{SignalKind, signal};
@@ -62,6 +64,18 @@ mod linux {
     pub async fn run() -> Result<(), String> {
         let assets = assets()?;
         let template = Template::upload(&assets.rootfs).await?;
+        let settings = NetworkSettings::current();
+        TcpFirewall::new(
+            Arc::new(|_| {
+                Some(FirewallSandbox {
+                    sandbox_id: "local".to_owned(),
+                    egress: None,
+                })
+            }),
+            settings,
+        )
+        .start(settings)
+        .await?;
         let listener = TcpListener::bind(("127.0.0.1", ENVD_PORT))
             .await
             .map_err(|e| format!("bind 127.0.0.1:{ENVD_PORT}: {e}"))?;

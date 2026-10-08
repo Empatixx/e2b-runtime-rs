@@ -54,6 +54,14 @@ mod serve {
             )
             .into_future(),
         );
+        let firewall_node = node.clone();
+        let settings = orchestrator::network::settings::NetworkSettings::current();
+        orchestrator::tcpfirewall::proxy::TcpFirewall::new(
+            Arc::new(move |ip| firewall_node.firewall_source(ip)),
+            settings,
+        )
+        .start(settings)
+        .await?;
         let mut signals = Signals::new()?;
         signals.next().await;
         tracing::info!("shutting down: draining sandboxes");
