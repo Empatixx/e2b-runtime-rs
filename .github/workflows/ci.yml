@@ -10,6 +10,7 @@ jobs:
       E2B_TEST_S3_ENDPOINT: http://127.0.0.1:9000
     steps:
       - uses: actions/checkout@v4
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: dtolnay/rust-toolchain@master
         with:
