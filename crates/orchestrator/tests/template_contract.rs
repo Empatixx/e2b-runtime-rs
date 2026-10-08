@@ -33,6 +33,9 @@ const LOG_PAGE: u32 = 100;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const V2_VERSION: &str = "v2.1.0";
 const FILES_HASH: &str = "contract-files";
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const GROWN_DISK_MB: i32 = 4096;
+const BASE_DISK_MB: i64 = 2048;
 const START_COMMAND: &str = "echo \"Starting with TEST_VAR=$TEST_VAR\"; echo 'Initialization complete'; sleep infinity";
 
 struct BuildRequest {
@@ -41,6 +44,7 @@ struct BuildRequest {
     version: &'static str,
     start_command: &'static str,
     ready_command: &'static str,
+    free_disk_size_mb: Option<i32>,
 }
 
 impl BuildRequest {
@@ -51,6 +55,7 @@ impl BuildRequest {
             version: "",
             start_command: "",
             ready_command: "",
+            free_disk_size_mb: None,
         }
     }
 
@@ -60,6 +65,13 @@ impl BuildRequest {
 
     fn version(self, version: &'static str) -> Self {
         Self { version, ..self }
+    }
+
+    fn free_disk(self, free_disk_size_mb: i32) -> Self {
+        Self {
+            free_disk_size_mb: Some(free_disk_size_mb),
+            ..self
+        }
     }
 
     fn start(self, start_command: &'static str, ready_command: &'static str) -> Self {
@@ -123,8 +135,9 @@ fn host() -> Option<Host> {
     host
 }
 
-fn node_config(host: &Host, dir: &Path) -> NodeConfig {
+fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
     let mut builder_vars = host.builder_vars.clone();
+    builder_vars.insert("BUILD_ENSURE_FREE_DISK_SPACE".to_owned(), ensure_free_disk.to_string());
     builder_vars.insert(
         "TEMPLATES_DIR".to_owned(),
         dir.join("build-templates").display().to_string(),
@@ -195,12 +208,12 @@ async fn wait_for_build(
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_debian_image_becomes_a_provisioned_base_layer() {
-    let Some(host) = host() else {
-        eprintln!("skipped: needs root, KVM and the build assets");
-        return;
-    };
+struct Running {
+    address: SocketAddr,
+    templates: TemplateServiceClient<tonic::transport::Channel>,
+}
+
+async fn start_builder(host: &Host, dir: &Path, ensure_free_disk: bool) -> Running {
     SLOTS.for_each(|index| {
         drop(
             Command::new("ip")
@@ -208,8 +221,7 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
                 .status(),
         )
     });
-    let dir = tempfile::tempdir().unwrap();
-    let config = node_config(&host, dir.path());
+    let config = node_config(host, dir, ensure_free_disk);
     let node = Arc::new(Node::new(&config).unwrap());
     let setup = config.open_build_storage().unwrap().map(|build| TemplateManagerSetup {
         build,
@@ -227,9 +239,21 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app.router()).into_future());
-    let mut templates = TemplateServiceClient::connect(format!("http://{address}"))
+    let templates = TemplateServiceClient::connect(format!("http://{address}"))
         .await
         .unwrap();
+    Running { address, templates }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_debian_image_becomes_a_provisioned_base_layer() {
+    let _serial = SERIAL.lock().await;
+    let Some(host) = host() else {
+        eprintln!("skipped: needs root, KVM and the build assets");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Running { address, mut templates } = start_builder(&host, dir.path(), false).await;
     let template_id = format!("t{}", Uuid::new_v4().simple());
     let image = Source::FromImage(BASE_IMAGE.to_owned());
 
@@ -371,6 +395,117 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
         "start command failed: error running start command: exit status 3"
     );
     assert!(failed.has("Template is ready"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ensure_free_disk_phase_grows_the_rootfs_before_finalize() {
+    let _serial = SERIAL.lock().await;
+    let Some(host) = host() else {
+        eprintln!("skipped: needs root, KVM and the build assets");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Running { address, mut templates } = start_builder(&host, dir.path(), true).await;
+    let template_id = format!("t{}", Uuid::new_v4().simple());
+    let index = dir.path().join("build-cache").join(&template_id).join("index");
+    let store = dir.path().join("store");
+    let grown_request = || {
+        BuildRequest::new(Source::FromImage(BASE_IMAGE.to_owned()))
+            .version(V2_VERSION)
+            .start(START_COMMAND, "sleep 2")
+            .free_disk(GROWN_DISK_MB)
+    };
+
+    let grown = build(&mut templates, &template_id, grown_request()).await;
+
+    eprintln!("grown build logs:\n{}", grown.logs.join("\n"));
+    assert_eq!(
+        grown.state,
+        TemplateBuildState::Completed as i32,
+        "grown build failed: {}",
+        grown.reason
+    );
+    assert!(grown.has_prefix("[resize-disk] Resizing disk ["));
+    assert!(!grown.has_prefix("CACHED [resize-disk]"));
+    assert!(grown.last("[resize-disk] Resizing disk [") < grown.last("[finalize] Finalizing template build ["));
+    let (free_before, free_after) = resized_free(&grown);
+    assert!(free_before < i64::from(GROWN_DISK_MB), "{free_before} MiB free already");
+    assert!(free_after > free_before, "free went {free_before} -> {free_after} MiB");
+    let grown_size = i64::from(grown.metadata.clone().unwrap().rootfs_size_key);
+    assert!(
+        grown_size >= BASE_DISK_MB + i64::from(GROWN_DISK_MB) - free_before - 1,
+        "rootfs is {grown_size} MB after {free_before} -> {free_after} MiB free"
+    );
+    let layers = filesystem_only_layers(&store, &indexed_builds(&index));
+    assert_eq!(layers.len(), 1, "filesystem-only layers: {layers:?}");
+    let grown_layer = store.join(&layers[0]);
+    for file in ["metadata.json", "rootfs.ext4.header", "rootfs.ext4"] {
+        assert!(grown_layer.join(file).is_file(), "missing {file}");
+    }
+    for file in ["snapfile", "memfile", "memfile.header"] {
+        assert!(!grown_layer.join(file).exists(), "unexpected {file}");
+    }
+    let layer_metadata = read_json(&grown_layer.join("metadata.json"));
+    assert_eq!(layer_metadata["filesystem_only"], true);
+    assert!(layer_metadata["version"].as_u64().unwrap() >= 2);
+    check_final_sandbox(address, &template_id, &grown).await;
+
+    let cached = build(&mut templates, &template_id, grown_request()).await;
+    assert_eq!(cached.state, TemplateBuildState::Completed as i32, "{}", cached.reason);
+    assert!(cached.has_prefix("CACHED [resize-disk] Resizing disk ["));
+    assert!(!cached.has_prefix("resize-disk: "));
+
+    let unchanged = build(&mut templates, &template_id, grown_request().free_disk(1)).await;
+    eprintln!("unchanged build logs:\n{}", unchanged.logs.join("\n"));
+    assert_eq!(
+        unchanged.state,
+        TemplateBuildState::Completed as i32,
+        "unchanged build failed: {}",
+        unchanged.reason
+    );
+    assert!(unchanged.has_prefix("[resize-disk] Resizing disk ["));
+    assert!(
+        unchanged.logs.iter().any(|log| log.starts_with("resize-disk: ")
+            && log.ends_with(" MiB free already >= target 1 MiB, no resize needed")),
+        "no unchanged line in {:?}",
+        unchanged.logs
+    );
+    let unchanged_size = i64::from(unchanged.metadata.clone().unwrap().rootfs_size_key);
+    assert!(
+        unchanged_size < grown_size,
+        "{unchanged_size} MB is not below {grown_size} MB"
+    );
+    let layers_after = filesystem_only_layers(&store, &indexed_builds(&index));
+    let unchanged_layers: Vec<&String> = layers_after.iter().filter(|id| !layers.contains(id)).collect();
+    assert_eq!(unchanged_layers.len(), 1, "filesystem-only layers: {layers_after:?}");
+    let unchanged_layer = store.join(unchanged_layers[0]);
+    for file in ["metadata.json", "rootfs.ext4.header"] {
+        assert!(unchanged_layer.join(file).is_file(), "missing {file}");
+    }
+    for file in ["rootfs.ext4", "snapfile", "memfile", "memfile.header"] {
+        assert!(!unchanged_layer.join(file).exists(), "unexpected {file}");
+    }
+}
+
+fn resized_free(built: &Built) -> (i64, i64) {
+    let line = built
+        .logs
+        .iter()
+        .find_map(|log| log.strip_prefix("resize-disk: free "))
+        .unwrap_or_else(|| panic!("no resize line in {:?}", built.logs));
+    let (before, after) = line
+        .strip_suffix(" MiB")
+        .and_then(|numbers| numbers.split_once(" -> "))
+        .unwrap_or_else(|| panic!("unexpected resize line {line:?}"));
+    (before.parse().unwrap(), after.parse().unwrap())
+}
+
+fn filesystem_only_layers(store: &Path, builds: &[String]) -> Vec<String> {
+    builds
+        .iter()
+        .filter(|build| read_json(&store.join(build).join("metadata.json"))["filesystem_only"] == true)
+        .cloned()
+        .collect()
 }
 
 fn indexed_builds(index: &Path) -> Vec<String> {
@@ -560,6 +695,7 @@ async fn build(
                 steps: request.steps,
                 start_command: request.start_command.to_owned(),
                 ready_command: request.ready_command.to_owned(),
+                free_disk_size_mb: request.free_disk_size_mb,
                 ..TemplateConfig::default()
             }),
             version: Some(request.version.to_owned()).filter(|version| !version.is_empty()),

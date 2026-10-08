@@ -49,7 +49,9 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (LayerExecutor: resume or cold boot, update_envd, pause and upload), sandbox_command.rs
                        (logStream adapter), commands.rs + commands/ (RUN, ENV, WORKDIR, USER, COPY; script.rs
                        renders the embedded assets/template/commands/*.sh), phases/ (base, steps: steps and default user,
-                       finalize: configure.sh, start/ready, CA bundle from assets/template/finalize/, optimize: prefetch)
+                       finalize: configure.sh, start/ready, CA bundle from assets/template/finalize/, optimize: prefetch,
+                       ensure_free_disk: BUILD_ENSURE_FREE_DISK_SPACE rootfs grow over NBD, with sizing.rs, measure.rs,
+                       resize.rs, offline.rs (NBD device guard), grow.rs; layer/filesystem.rs persists its VM-less layer)
   src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
@@ -66,7 +68,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        envd/process.rs (Connect process.Start client, bash -l -c as a user)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
-                       snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
+                       snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload;
+                       snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff),
                        resume.rs (snapshot load over uffd)
   src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution),
                        upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
