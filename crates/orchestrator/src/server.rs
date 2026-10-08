@@ -1,8 +1,11 @@
 pub mod config;
+pub mod info;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;
+pub mod metrics;
 #[cfg(target_os = "linux")]
 pub mod node;
 pub mod registry;
 #[cfg(target_os = "linux")]
 pub mod service;
+pub mod status;
