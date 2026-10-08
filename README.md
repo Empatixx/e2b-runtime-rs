@@ -7,8 +7,8 @@ A self-hosted [E2B](https://e2b.dev) runtime written in Rust, aimed at bare-meta
 | Component | What it does | State |
 |---|---|---|
 | **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume, pause and the gRPC `SandboxService` work end to end in CI (M0–M8); ublk and template build next ([spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
-| template build | OCI image → ext4 → snapshot | planned |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume (~0.5 s with prefetch), pause, checkpoint and the gRPC `SandboxService` and `InfoService` work end to end in CI; egress firewall, Redis routing, events, ClickHouse stats at upstream parity ([parity](docs/PARITY.md), [spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
+| template build | OCI image → ext4 → snapshot (template-manager role of the orchestrator) | 🚧 `TemplateService` RPCs and build cache done; build phases next ([spec](docs/superpowers/specs/2026-10-17-template-builder-design.md)) |
 | api | REST API for the SDK, node selection | planned |
 | client-proxy | `https://<port>-<sandbox>.<domain>` routing | planned |
 | Kubernetes deployment | Helm chart: orchestrator DaemonSet, API, proxy, S3, Postgres | planned |

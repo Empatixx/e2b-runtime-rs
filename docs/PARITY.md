@@ -1,4 +1,4 @@
-# Parity audit: orchestrator vs upstream Go (2026-10-08)
+# Parity: orchestrator vs upstream Go
 
 An opus audit compared our Rust orchestrator with upstream E2B Go, covering RPCs, resume, pause, lifecycle, pools, node services and the hot path.
 
@@ -10,28 +10,45 @@ An opus audit compared our Rust orchestrator with upstream E2B Go, covering RPCs
 - `/init` sent `"accessToken": ""`, `"defaultUser": ""` and `"defaultWorkdir": ""`. Go envd rejects the empty token with 400. Empty fields are now omitted (R `envd.rs`).
 - MMDS `accessTokenHash` was omitted without a token. It is now always `hash(token or "")`, as G `fc/process.go:668`.
 - The build cache disk threshold default is now 85 %, as G `featureflags/flags.go:550` (was 90 %).
-- `Update` with `egress` silently returned OK. It now returns `Unimplemented` until the slot firewall exists.
+- `Update` with `egress` silently returned OK. It now applies the egress rules to the slot firewall (see below).
 - Answered: admission `Count()` upstream counts live sandboxes only, so ours matches.
 
-## Open, by impact
+## Closed by the parity milestone
 
-| # | Difference | Upstream | Ours | Impact |
-|---|---|---|---|---|
-| 1 | Network egress / internet access in `SandboxConfig` on Create | applied to the slot firewall | ignored | **High** (security) |
-| 2 | Redis routing record `sandbox:routing:{id}` for client-proxy | published on running and stopping | absent | **High** if client-proxy relies on it |
-| 3 | Pause reply timing | after snapshot + cache; VM stopped in the background | after the full teardown | Med |
-| 4 | Create deadline | 60 s over the whole Create | 60 s on the slot wait only | Med |
-| 5 | Lifecycle events (created/resumed/updated/paused/killed + kill_reason) and per-sandbox host stats | Redis streams, ClickHouse | absent | Med–High |
-| 6 | Checkpoint | implemented (resume-fresh default) | `Unimplemented` | Med–High if the API uses snapshots |
-| 7 | `/init` lifecycleID, hyperloopIP, caBundle, volumeMounts; defaultUser from template metadata | sent | not sent | Med |
-| 8 | Create response `SchedulingMetadata`, `ResolvedFirecrackerVersion` | filled | empty | Med |
-| 9 | memfd background copy on pause | on | synchronous | Med (pause latency) |
-| 10 | Template pinned while a sandbox runs; TTL `max(25h, max_sandbox_length + 1h)` | yes | `Arc` only during start, fixed 25 h | Low–Med |
-| 11 | Error texts: AlreadyExists inner phrase, `error snapshotting sandbox:` inner prefix, lost Delete/Pause race → Internal | Go texts | shorter / NotFound | Low |
-| 12 | Same-id Create while the old one is still stopping | allowed | `AlreadyExists "sandbox is still stopping"` | Low–Med |
-| 13 | Missing `start_time` / `end_time` | Unix epoch | now | Low |
-| 14 | Metadata kernel/firecracker versions on pause | from the sandbox config | copied from the parent | Low |
-| 15 | Upload object metadata (team/template/origin); empty diffs skipped | yes | no | Low |
+Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of the original audit table is now done:
+
+| # | Difference | Now |
+|---|---|---|
+| 1 | Network egress on Create and Update | nftables `slot-firewall` with upstream sets and DSCP, host REDIRECTs, TCP firewall proxy on 5016/5017/5018, Update egress with rollback, BYOP gate |
+| 2 | Redis routing record | `sandbox:routing:{id}` on insert and stopping, tombstones, `fred` client |
+| 3 | Pause reply timing | reply after snapshot and cache, teardown in the background |
+| 4 | Create deadline | 60 s over the whole Create |
+| 5 | Lifecycle events and host stats | Redis stream (`wh:{team}` gate), ClickHouse `sandbox_events` and `sandbox_host_stats`, OOM watermark |
+| 6 | Checkpoint | resume-fresh with upstream texts, synchronous upload, `checkpointed` event |
+| 7 | `/init` fields | lifecycleID, hyperloopIP, volumeMounts, defaultUser rule; hyperloop server on 5010 |
+| 8 | `SchedulingMetadata`, `ResolvedFirecrackerVersion` | filled on Create, Pause and Checkpoint |
+| 9 | memfd background copy on pause | metadata at once, copy in the background, readers and upload wait for it |
+| 10 | Template pinning and TTL | pinned for the sandbox's life, TTL `max(25h, max_sandbox_length + 1h)` |
+| 11 | Error texts | upstream texts for AlreadyExists, snapshot, lost races, Delete, Pause, Checkpoint |
+| 12 | Same-id Create while stopping | allowed, Go map semantics with lifecycle ids |
+| 13 | Missing `start_time` / `end_time` | Unix epoch |
+| 14 | Metadata versions on pause | from the sandbox config |
+| 15 | Upload object metadata, empty diffs | `team_id`, `template_id`, `build_origin`; empty diffs skip the body |
+
+Also: cgroups are named `sbx-<id>-<random>` as upstream, so a same-id resume or checkpoint never shares the old sandbox's cgroup.
+
+## Still different (flag-gated or not ported)
+
+These paths are off by default upstream. We follow the default:
+
+- in-place checkpoint (`in-place-checkpoint`, needs sync write-protect and FC >= 0.2.0);
+- filesystem-only checkpoint (`filesystem-only-checkpoint`), refused with the upstream `UserError`;
+- pause/checkpoint admission grace (`pause-admission-grace-milliseconds` = -1);
+- async peer-to-peer checkpoint upload (`peer-to-peer-async-checkpoint`);
+- ClickHouse alternate endpoints are parsed and logged only;
+- resume-time envd live upgrade.
+
+Not ported yet: the template builder phases (M14–M16) and the envd `oom_kills` metric in envd-rs.
 
 ## Same as upstream (checked)
 

@@ -72,7 +72,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | M8 |
 | Prefetch from a build-time page trace (needs template build) | template build |
-| Firecracker `use_memfd` (memfd copy-out instead of `process_vm_readv`) and `use_sync_wp` (synchronous WP events) are not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty` | M8 |
+| Firecracker `use_sync_wp` (synchronous WP events) is not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty`, so the in-place checkpoint stays off | M8 |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
 | Huge pages: `MAX_RUN_PAGES` counts pages, so a 2 MiB-page run can exceed `process_vm_readv`'s MAX_RW_COUNT; cap runs by bytes | M8 |
 | A failed `PUT /snapshot/load` still waits up to 10 s for the uffd handshake; cancel it when the load fails | M8 |

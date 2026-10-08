@@ -15,39 +15,58 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
                        pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
-  src/network/         slot.rs (netns, veth, tap, iptables per slot; HostSlots), pool.rs (NetworkPool: 32 new,
-                       100 reused, 3s return delay), storage.rs (SlotStorage: index allocation, leaked namespaces)
+  src/network/         slot.rs (netns, veth, tap, host REDIRECTs per slot; HostSlots), pool.rs (NetworkPool: 32 new,
+                       100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
+                       leaked namespaces), firewall.rs (nftables slot-firewall: sets, DSCP, EgressRules),
+                       settings.rs (SANDBOX_* network env)
+  src/tcpfirewall/     egress TCP proxy on 5016/5017/5018: rules.rs (domain/CIDR allow-deny), sniff.rs (HTTP Host,
+                       TLS SNI), proxy.rs (SO_ORIGINAL_DST, 30s dial)
+  src/hyperloop/       hyperloop server on 5010 for the guest: server.rs (/me, /logs), logs.rs (SourceSandbox)
+  src/routing/         publisher.rs (RoutingPublisher: sandbox:routing:{id} on insert/stopping, tombstones),
+                       redis.rs (fred client: Redis::connect, RoutingCatalog, EventStream, RedisSettings)
+  src/events.rs        SandboxEvent, EventsService fan-out to EventSinks (Redis stream gated by wh:{team})
+  src/clickhouse/      batcher.rs (1000 rows / 1000 queue / 1s), endpoint.rs (DSN, native writer with TLS),
+                       rows.rs (sandbox_events, sandbox_host_stats), sinks.rs
+  src/hoststats.rs     per-sandbox host stats sampler (StatsIdentity, cgroup CPU/memory)
+  src/oom.rs           OOM kill watermark from envd /metrics
+  src/builder/         template-manager role: service.rs (TemplateService RPCs, TemplateBuilder trait), builds.rs
+                       (BuildCache, 10 min TTL), logs.rs (BuildLog), phase.rs (Phase trait, run_phases, BuildError),
+                       pipeline.rs (PhasePipeline), hash.rs (HashKeys), index.rs (LayerIndex)
   src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
-  src/cgroup.rs        cgroup v2 per sandbox
+  src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset
   src/firecracker/     config (VmConfig builder), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
                        pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
                        trace.rs (PrefetchTracker, Trace intersection), prefetch.rs (init-trace prefetcher)
-  src/envd.rs          envd POST /init client (upstream retry semantics)
+  src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
                        resume.rs (snapshot load over uffd)
   src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, network pool, template cache),
-                       lifecycle.rs (task per sandbox: commands, end_time expiry, death watch), service.rs (SandboxService),
-                       registry.rs, status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
+                       node/checkpoint.rs (Checkpoint resume-fresh), lifecycle.rs (task per sandbox: commands, end_time
+                       expiry, death watch), service.rs (SandboxService), registry.rs (Go map semantics: reserve,
+                       lifecycle-aware stop, stop_reserved), services.rs (ORCHESTRATOR_SERVICES roles),
+                       scheduling.rs (SchedulingMetadata from headers), user_error.rs (UserError status details),
+                       host_stats.rs and oom_monitor.rs (per-sandbox collectors), status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
                        metrics poller, /proc parsers), info.rs (InfoService), health.rs (/health on the tonic router),
                        admission.rs (max sandboxes, starting semaphore), shutdown.rs (drain), app.rs (App: one axum
                        router for SandboxService, InfoService, grpc health and /health), retry.rs (upload retry
                        policy), uploads.rs (Uploads: background snapshot uploads, parents land first)
-  src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/orchestrator.proto (no package upstream)
+  src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/*.proto (no package upstream)
   src/main.rs          orchestrator binary: NodeConfig::from_env, App served by axum on GRPC_PORT (5008), upstream shutdown order
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
   tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
 docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
-scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh
+scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh, kvm-spike.sh
+scripts/clippy-linux.sh clippy of the whole workspace in Docker (rust:1.98) to catch Linux-only compile errors on a Mac
 proto/envd/            envd .proto copied from upstream E2B (never edit)
-proto/orchestrator/    orchestrator.proto and info.proto copied from upstream E2B (never edit), UPSTREAM_COMMIT
+proto/orchestrator/    orchestrator, info, template-manager and volume .proto copied from upstream E2B (never edit), UPSTREAM_COMMIT
 crates/envd/build.rs   codegen from ../../proto/envd
 crates/envd/reference/ upstream envd OpenAPI + pinned commit
 crates/envd/src/

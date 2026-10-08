@@ -92,10 +92,22 @@ impl<F: SlotFactory> NetworkPool<F> {
             pool: self.clone(),
             slot: Some(slot),
         };
-        if let Some(rules) = egress {
-            self.configure(slot, rules).await?;
+        let Some(rules) = egress else {
+            return Ok(lease);
+        };
+        match self.configure(slot, rules).await {
+            Ok(()) => Ok(lease),
+            Err(e) => {
+                self.return_now(lease);
+                Err(e)
+            }
         }
-        Ok(lease)
+    }
+
+    fn return_now(self: &Arc<Self>, lease: SlotLease<F>) {
+        if let Some(slot) = lease.keep() {
+            self.return_after(slot, Duration::ZERO);
+        }
     }
 
     pub async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
@@ -104,10 +116,14 @@ impl<F: SlotFactory> NetworkPool<F> {
     }
 
     pub fn return_slot(self: &Arc<Self>, slot: Slot) {
+        self.return_after(slot, RETURN_DELAY);
+    }
+
+    fn return_after(self: &Arc<Self>, slot: Slot, delay: Duration) {
         let pool = self.clone();
         self.tasks.spawn(async move {
             tokio::select! {
-                () = tokio::time::sleep(RETURN_DELAY) => pool.recycle(slot).await,
+                () = tokio::time::sleep(delay) => pool.recycle(slot).await,
                 () = pool.done.cancelled() => pool.cleanup(slot).await,
             }
         });
@@ -200,6 +216,7 @@ mod tests {
         destroyed: Mutex<BTreeSet<u32>>,
         failures: Mutex<u32>,
         configured: Mutex<Vec<(u32, EgressRules)>>,
+        configure_failures: Mutex<u32>,
     }
 
     impl SlotFactory for Arc<FakeSlots> {
@@ -220,7 +237,14 @@ mod tests {
 
         async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
             self.configured.lock().push((slot.index, rules.clone()));
-            Ok(())
+            let mut failures = self.configure_failures.lock();
+            match *failures {
+                0 => Ok(()),
+                _ => {
+                    *failures -= 1;
+                    Err("nft: rule rejected".to_owned())
+                }
+            }
         }
     }
 
@@ -336,5 +360,28 @@ mod tests {
             vec![(slot.index, rules), (slot.index, EgressRules::default())]
         );
         assert_eq!(pool.get().await.unwrap(), slot);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slot_whose_egress_failed_goes_back_without_the_return_delay() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+        let rules = EgressRules {
+            byop: false,
+            allowed: Vec::new(),
+            denied: vec!["0.0.0.0/0".to_owned()],
+        };
+        *slots.configure_failures.lock() = 1;
+
+        let failed = pool.lease(Some(&rules)).await.map(|lease| lease.slot());
+        settle().await;
+
+        assert_eq!(failed, Err("nft: rule rejected".to_owned()));
+        let slot = slots.configured.lock()[0].0;
+        assert_eq!(
+            slots.configured.lock().clone(),
+            vec![(slot, rules), (slot, EgressRules::default())]
+        );
+        assert_eq!(pool.get().await.unwrap().index, slot);
     }
 }
