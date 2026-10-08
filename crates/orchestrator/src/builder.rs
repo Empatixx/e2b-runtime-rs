@@ -7,6 +7,7 @@ pub mod logs;
 pub mod oci;
 pub mod phase;
 pub mod pipeline;
+pub mod provision;
 #[cfg(target_os = "linux")]
 pub mod rootfs;
 pub mod service;
