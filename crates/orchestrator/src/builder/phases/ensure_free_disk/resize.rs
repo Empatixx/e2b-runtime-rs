@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
+use super::deadline::Deadline;
 use super::offline::with_device;
 use crate::block::overlay::Overlay;
 
-pub async fn resize_offline(overlay: Arc<Overlay>, new_size: i64, block_size: i64) -> Result<i64, String> {
-    with_device(overlay, async |device| {
+pub async fn resize_offline(
+    overlay: Arc<Overlay>,
+    new_size: i64,
+    block_size: i64,
+    deadline: Deadline,
+) -> Result<i64, String> {
+    with_device(overlay, deadline, async |device| {
         let ext4 = device.ext4();
         ext4.check_integrity(true)
             .await

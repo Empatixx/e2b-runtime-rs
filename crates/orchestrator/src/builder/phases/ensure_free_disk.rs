@@ -1,3 +1,4 @@
+mod deadline;
 pub mod grow;
 mod measure;
 mod offline;
@@ -11,6 +12,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use uuid::Uuid;
 
+use self::deadline::Deadline;
 use self::grow::{FreeSpace, GrownRootfs, RootfsDiff, RootfsGrower};
 use super::steps::StepsBuild;
 use crate::builder::hash::ensure_free_disk_hash;
@@ -30,7 +32,6 @@ const FILESYSTEM_ONLY_VERSION: u64 = CURRENT_VERSION;
 const MB_SHIFT: u32 = 20;
 
 const METADATA_FILE: &str = "metadata.json";
-const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
 
 pub struct EnsureFreeDiskPhase {
     pub build: Arc<StepsBuild>,
@@ -51,17 +52,6 @@ impl EnsureFreeDiskPhase {
         .await
     }
 
-    async fn resize_within_deadline(
-        &self,
-        log: &ScopedLog<'_>,
-        source: &LayerResult,
-        current: LayerResult,
-    ) -> Result<LayerResult, BuildError> {
-        tokio::time::timeout(RESIZE_DISK_TIMEOUT, self.resize_disk(log, source, current))
-            .await
-            .unwrap_or_else(|_| Err(BuildError::Internal(format!("resize disk: {DEADLINE_EXCEEDED}"))))
-    }
-
     async fn resize_disk(
         &self,
         log: &ScopedLog<'_>,
@@ -69,13 +59,14 @@ impl EnsureFreeDiskPhase {
         current: LayerResult,
     ) -> Result<LayerResult, BuildError> {
         let node = &self.build.env.node;
+        let deadline = Deadline::after(RESIZE_DISK_TIMEOUT);
         let source_id = Uuid::parse_str(&source.metadata.template.build_id)
             .map_err(|e| BuildError::Internal(format!("get source template: failed to parse build id: {e}")))?;
         let template = node.templates.get(source_id);
-        let source_build = template
-            .build()
+        let source_build = deadline
+            .bound(async { template.build().await.map_err(|e| e.to_string()) })
             .await
-            .map_err(|e| BuildError::Internal(format!("get source rootfs: {e}")))?;
+            .map_err(source_template_failure)?;
         let layer_id = Uuid::parse_str(&current.metadata.template.build_id)
             .map_err(|e| BuildError::Internal(format!("parse resize-disk layer build id: {e}")))?;
         let dir = node.layer_dir(layer_id);
@@ -84,6 +75,7 @@ impl EnsureFreeDiskPhase {
             layer_id,
             scratch_dir: node.scratch_dir().to_owned(),
             dir: dir.clone(),
+            deadline,
         };
         let layer = self
             .grow_and_persist(log, &grower, &current, &dir)
@@ -167,6 +159,10 @@ impl LayerLookup<'_> {
     }
 }
 
+fn source_template_failure(error: String) -> BuildError {
+    BuildError::Internal(format!("get source template: {error}"))
+}
+
 fn log_outcome(log: &ScopedLog<'_>, free: &FreeSpace) {
     if free.before >= free.target {
         return log.push(LogLevel::Info, no_resize_needed(free.before, free.target));
@@ -232,7 +228,7 @@ impl Phase for EnsureFreeDiskPhase {
         source: &'a LayerResult,
         current: LayerResult,
     ) -> BoxFuture<'a, Result<LayerResult, BuildError>> {
-        async move { self.resize_within_deadline(&log, source, current).await }.boxed()
+        async move { self.resize_disk(&log, source, current).await }.boxed()
     }
 }
 
@@ -293,6 +289,14 @@ mod tests {
 
     use super::*;
     use crate::storage::backend::Storage;
+
+    #[test]
+    fn a_source_template_failure_reads_like_upstream() {
+        assert!(matches!(
+            source_template_failure("boom".to_owned()),
+            BuildError::Internal(message) if message == "get source template: boom"
+        ));
+    }
 
     #[test]
     fn the_phase_reads_like_upstream() {

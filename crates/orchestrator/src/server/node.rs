@@ -167,12 +167,7 @@ impl Node {
             registry: Registry::new(),
             network: NetworkPool::new(HostSlots, host_slot_storage(config.slots.clone())),
             local_expiry: config.local_expiry,
-            binaries: Binaries::from_vars(
-                &std::env::vars().collect(),
-                &config.builder.target_arch,
-                &config.firecracker,
-                &config.kernel,
-            ),
+            binaries: config.binaries.clone(),
             build_kernel_version: config.builder.kernel_version.clone(),
             build_firecracker_version: config.builder.firecracker_version.clone(),
             work_dir: config.work_dir.clone(),
@@ -211,12 +206,11 @@ impl Node {
             kernel_version: parent.config.kernel_version.clone(),
             firecracker_version: parent.config.firecracker_version.clone(),
         });
-        self.cache_snapshot(&local, metadata, dir.clone())
-            .map_err(|e| format!("error adding snapshot to template cache: {e}"))
-            .inspect_err(|_| {
-                self.store.unpin(build_id);
-                discard_snapshot_dir(&dir);
-            })?;
+        if let Err(e) = self.cache_snapshot(&local, metadata, dir.clone()) {
+            let _ = local.memfile_ready.clone().await;
+            discard_snapshot_dir(&dir);
+            return Err(format!("error adding snapshot to template cache: {e}"));
+        }
         Ok(local)
     }
 
@@ -273,17 +267,10 @@ impl Node {
     }
 
     fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
-        let build_id = local.snapshot.build.build_id;
         let metadata_file = metadata_path(local);
         std::fs::write(&metadata_file, metadata.to_json())
             .map_err(|e| format!("write {}: {e}", metadata_file.display()))?;
-        self.store.add_local_when(
-            build_id,
-            Artifact::Memfile,
-            &local.files.memfile,
-            local.memfile_ready.clone(),
-        );
-        self.store.add_local(build_id, Artifact::Rootfs, &local.files.rootfs)?;
+        register_local_diffs(&self.store, local)?;
         self.templates.add_snapshot(
             local.snapshot.build.clone(),
             local.files.snapfile.clone(),
@@ -723,6 +710,19 @@ fn parents(build: &Build) -> Vec<Uuid> {
         .collect()
 }
 
+fn register_local_diffs(store: &DiffStore, local: &LocalSnapshot) -> Result<(), String> {
+    let build_id = local.snapshot.build.build_id;
+    store.add_local_when(
+        build_id,
+        Artifact::Memfile,
+        &local.files.memfile,
+        local.memfile_ready.clone(),
+    );
+    store
+        .add_local(build_id, Artifact::Rootfs, &local.files.rootfs)
+        .inspect_err(|_| store.remove(build_id))
+}
+
 fn discard_snapshot_dir(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -747,6 +747,9 @@ fn sweep_cgroups(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::build_file::ready_now;
+    use crate::sandbox::snapshot::{Snapshot, SnapshotFiles};
+    use crate::storage::header::{Header, Metadata};
     use crate::template::metadata::{Context, Start};
 
     fn metadata(context_user: Option<&str>, start_user: &str) -> TemplateMetadata {
@@ -764,6 +767,59 @@ mod tests {
             }),
             ..TemplateMetadata::default()
         }
+    }
+
+    fn local_snapshot(dir: &Path, build_id: Uuid) -> LocalSnapshot {
+        let header = || Header::new(Metadata::template(build_id, 4096, 4096), Vec::new()).unwrap();
+        LocalSnapshot {
+            snapshot: Snapshot {
+                build: Build {
+                    build_id,
+                    memfile: header(),
+                    rootfs: header(),
+                },
+                memfile_bytes: 0,
+                memory_bytes: 0,
+                rootfs_bytes: 0,
+                tracked_writes: false,
+            },
+            files: SnapshotFiles {
+                snapfile: dir.join("snapfile"),
+                memfile: dir.join("memfile"),
+                rootfs: dir.join("rootfs"),
+            },
+            memfile_ready: ready_now(),
+        }
+    }
+
+    fn store(dir: &Path) -> DiffStore {
+        DiffStore::new(Storage::local(&dir.join("store")).unwrap(), dir.join("cache"))
+    }
+
+    #[test]
+    fn a_failed_rootfs_registration_leaves_no_memfile_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let build_id = Uuid::new_v4();
+        let store = store(dir.path());
+
+        let registered = register_local_diffs(&store, &local_snapshot(dir.path(), build_id));
+
+        assert!(registered.is_err());
+        assert!(!store.contains(build_id, Artifact::Memfile));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn registered_diffs_are_found_in_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let build_id = Uuid::new_v4();
+        let store = store(dir.path());
+        std::fs::write(dir.path().join("rootfs"), vec![0; 4096]).unwrap();
+
+        register_local_diffs(&store, &local_snapshot(dir.path(), build_id)).unwrap();
+
+        assert!(store.contains(build_id, Artifact::Memfile));
+        assert!(store.contains(build_id, Artifact::Rootfs));
     }
 
     #[test]

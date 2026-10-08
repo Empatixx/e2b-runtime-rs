@@ -152,6 +152,14 @@ impl DiffStore {
         Ok(())
     }
 
+    pub fn remove(&self, build_id: Uuid) {
+        self.entries.lock().retain(|key, _| key.build_id != build_id);
+    }
+
+    pub fn contains(&self, build_id: Uuid, artifact: Artifact) -> bool {
+        self.entries.lock().contains_key(&DiffKey { build_id, artifact })
+    }
+
     pub fn unpin(&self, build_id: Uuid) {
         self.entries
             .lock()

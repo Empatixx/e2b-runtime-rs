@@ -24,6 +24,7 @@ mod write_protect;
 
 const MAX_FAULTS_IN_FLIGHT: usize = 4096;
 const RETRY_DELAY: Duration = Duration::from_millis(1);
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const STOPPED: &str = "the memory server has stopped";
 
 type Settled = oneshot::Sender<()>;
@@ -49,6 +50,15 @@ pub struct Prefaulter {
     uffd: Arc<AsyncFd<Uffd>>,
     regions: Regions,
     state: Arc<SharedState>,
+}
+
+async fn request_settle(settles: &mpsc::UnboundedSender<Settled>, timeout: Duration) -> Result<(), String> {
+    let (settled, reply) = oneshot::channel();
+    settles.send(settled).map_err(|_| STOPPED.to_owned())?;
+    tokio::time::timeout(timeout, reply)
+        .await
+        .map_err(|_| format!("timed out after {timeout:?} waiting for the memory server to settle"))?
+        .map_err(|_| STOPPED.to_owned())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,9 +146,7 @@ impl MemoryServer {
     }
 
     pub async fn settle(&self) -> Result<(), String> {
-        let (settled, reply) = oneshot::channel();
-        self.settles.send(settled).map_err(|_| STOPPED.to_owned())?;
-        reply.await.map_err(|_| STOPPED.to_owned())
+        request_settle(&self.settles, SETTLE_TIMEOUT).await
     }
 
     pub fn watch(&self) -> MemoryWatch {
@@ -681,6 +689,25 @@ mod tests {
 
         assert_eq!(fixture.server.removed_pages().iter().collect::<Vec<_>>(), vec![1]);
         fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_settle_nobody_answers_times_out() {
+        let (settles, _unanswered) = mpsc::unbounded_channel();
+
+        let error = request_settle(&settles, Duration::from_secs(60)).await.unwrap_err();
+
+        assert_eq!(error, "timed out after 60s waiting for the memory server to settle");
+    }
+
+    #[tokio::test]
+    async fn a_settle_to_a_dropped_server_reports_it_stopped() {
+        let (settles, dropped) = mpsc::unbounded_channel();
+        drop(dropped);
+
+        let error = request_settle(&settles, Duration::from_secs(60)).await.unwrap_err();
+
+        assert_eq!(error, STOPPED);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

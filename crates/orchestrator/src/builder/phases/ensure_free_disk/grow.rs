@@ -5,6 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::RESIZE_DISK;
+use super::deadline::Deadline;
 use super::measure::measure_free;
 use super::resize::resize_offline;
 use super::sizing::{compute_grown_size, validate_source_geometry};
@@ -41,6 +42,7 @@ pub struct RootfsGrower {
     pub layer_id: Uuid,
     pub scratch_dir: PathBuf,
     pub dir: PathBuf,
+    pub deadline: Deadline,
 }
 
 impl RootfsGrower {
@@ -55,7 +57,7 @@ impl RootfsGrower {
             header.metadata.size,
             header.metadata.block_size,
         )?;
-        let before = measure_free(&self.source, &self.cache_path("measure"), block_size).await?;
+        let before = measure_free(&self.source, &self.cache_path("measure"), block_size, self.deadline).await?;
         match before >= target {
             true => self.unchanged(before, target),
             false => {
@@ -100,7 +102,7 @@ impl RootfsGrower {
             .write_zeroes_at(source_size as u64, (new_size - source_size) as u64)
             .map_err(|e| format!("zero-fill grown tail: {e}"))?;
         let block_size = self.source.header().metadata.block_size as i64;
-        let after = resize_offline(overlay.clone(), new_size, block_size).await?;
+        let after = resize_offline(overlay.clone(), new_size, block_size, self.deadline).await?;
         let (diff, header) = self.export(&overlay, new_size as u64).await?;
         Ok(GrownRootfs {
             diff,
@@ -122,7 +124,10 @@ impl RootfsGrower {
         path: &Path,
         new_size: u64,
     ) -> Result<(RootfsDiff, Header), String> {
-        let diff = export_diff(overlay.clone(), path.to_path_buf()).await?;
+        let diff = self
+            .deadline
+            .bound(export_diff(overlay.clone(), path.to_path_buf()))
+            .await?;
         let header = diff
             .to_resized_diff_header(self.source.header(), self.layer_id, new_size)
             .map_err(|e| format!("build grown rootfs header: {e}"))?;
@@ -165,6 +170,8 @@ async fn export_diff(overlay: Arc<Overlay>, path: PathBuf) -> Result<DiffMetadat
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::block::build_file::{Artifact, DiffStore};
     use crate::storage::backend::Storage;
@@ -189,6 +196,7 @@ mod tests {
             layer_id: Uuid::from_bytes([2; 16]),
             scratch_dir: dir.join("scratch"),
             dir: dir.join("layer"),
+            deadline: Deadline::after(Duration::from_secs(3600)),
         }
     }
 

@@ -260,19 +260,19 @@ impl Sandbox {
     }
 
     async fn flush_disk(&self) -> Result<(), String> {
-        let device = match &self.config.rootfs {
-            Rootfs::File(path) => path.clone(),
-            Rootfs::Overlay(_) => self
-                .resources
-                .disk
-                .as_ref()
-                .map(|disk| disk.path())
-                .ok_or("rootfs is not exposed")?,
-        };
-        tokio::task::spawn_blocking(move || File::open(&device).and_then(|disk| disk.sync_all()))
-            .await
-            .map_err(|e| format!("flush rootfs device: {e}"))?
-            .map_err(|e| format!("flush rootfs device: {e}"))
+        match &self.config.rootfs {
+            Rootfs::File(path) => sync_file(path.clone()).await,
+            Rootfs::Overlay(_) => {
+                let disk = self
+                    .resources
+                    .disk
+                    .as_ref()
+                    .ok_or("failed to get cow path: rootfs is not exposed")?;
+                disk.flush()
+                    .await
+                    .map_err(|e| format!("flushing COW device failed: {e}"))
+            }
+        }
     }
 
     async fn export_rootfs(&self, path: &Path, build_id: Uuid) -> Result<Exported, String> {
@@ -290,6 +290,13 @@ impl Sandbox {
             Rootfs::File(source) => export_file(source.clone(), path.to_path_buf(), build_id).await,
         }
     }
+}
+
+async fn sync_file(device: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || File::open(&device).and_then(|disk| disk.sync_all()))
+        .await
+        .map_err(|e| format!("flush rootfs device: {e}"))?
+        .map_err(|e| format!("flush rootfs device: {e}"))
 }
 
 async fn export_file(source: PathBuf, path: PathBuf, build_id: Uuid) -> Result<Exported, String> {

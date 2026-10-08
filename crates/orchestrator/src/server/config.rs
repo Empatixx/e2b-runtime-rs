@@ -16,6 +16,7 @@ use crate::routing::redis::RedisSettings;
 use crate::storage::backend::Storage;
 use crate::storage::local_upload::UploadSigner;
 use crate::storage::spec::{Provider, StorageSpec};
+use binaries::Binaries;
 use storage::StorageEnv;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
@@ -39,6 +40,8 @@ pub struct NodeConfig {
     pub node_id: String,
     pub firecracker: PathBuf,
     pub kernel: PathBuf,
+    pub binaries: Binaries,
+    pub network_version: u8,
     pub template_storage: StorageSpec,
     pub build_cache_storage: Option<StorageSpec>,
     pub local_upload_base_url: String,
@@ -97,15 +100,20 @@ impl NodeConfig {
             .then(|| storage.and_then(|storage| storage.build_cache()))
             .transpose()
             .map_err(|e| format!("failed to setup build storage: resolve build cache storage: {e}"))?;
+        let firecracker: PathBuf = var("E2B_FIRECRACKER").unwrap_or_default().into();
+        let kernel: PathBuf = var("E2B_KERNEL").unwrap_or_default().into();
+        let builder = BuilderConfig::from_vars(vars);
         Ok(Self {
             grpc_port,
             node_id: var("NODE_ID").unwrap_or_else(|| DEFAULT_NODE_ID.to_owned()),
-            firecracker: var("E2B_FIRECRACKER").unwrap_or_default().into(),
-            kernel: var("E2B_KERNEL").unwrap_or_default().into(),
+            binaries: Binaries::from_vars(vars, &builder.target_arch, &firecracker, &kernel),
+            network_version: network_version(vars)?,
+            firecracker,
+            kernel,
             template_storage,
             build_cache_storage,
             local_upload_base_url: var("LOCAL_UPLOAD_BASE_URL").unwrap_or_default(),
-            builder: BuilderConfig::from_vars(vars),
+            builder,
             work_dir: var("E2B_WORK_DIR")
                 .unwrap_or_else(|| "/var/lib/e2b/sandboxes".to_owned())
                 .into(),
@@ -185,6 +193,14 @@ fn prefetch_source(source: Option<&str>) -> bool {
     !matches!(source, Some("off" | "last-cycle"))
 }
 
+fn network_version(vars: &HashMap<String, String>) -> Result<u8, String> {
+    match number::<i64>(vars, "NETWORK_VERSION")?.unwrap_or(1) {
+        1 => Ok(1),
+        2 => Ok(2),
+        other => Err(format!("NETWORK_VERSION={other} unsupported (must be 1 or 2)")),
+    }
+}
+
 fn number<T: std::str::FromStr>(vars: &HashMap<String, String>, name: &str) -> Result<Option<T>, String> {
     vars.get(name)
         .map(|value| value.parse().map_err(|_| format!("{name} is not a number: {value}")))
@@ -200,6 +216,31 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn the_network_version_defaults_to_one_and_accepts_only_one_or_two() {
+        assert_eq!(network_version(&vars(&[])), Ok(1));
+        assert_eq!(network_version(&vars(&[("NETWORK_VERSION", "2")])), Ok(2));
+        assert_eq!(
+            network_version(&vars(&[("NETWORK_VERSION", "3")])),
+            Err("NETWORK_VERSION=3 unsupported (must be 1 or 2)".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_binaries_directories_come_from_the_node_vars() {
+        let config = NodeConfig::from_vars(&vars(&[
+            ("FIRECRACKER_VERSIONS_DIR", "/opt/fc"),
+            ("STORAGE_PROVIDER", "Local"),
+            ("LOCAL_TEMPLATE_STORAGE_BASE_PATH", "/srv/builds"),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            config.binaries.firecracker_for("v1").parent().and_then(|p| p.parent()),
+            Some(std::path::Path::new("/opt/fc"))
+        );
     }
 
     #[test]

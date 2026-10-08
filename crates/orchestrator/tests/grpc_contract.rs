@@ -22,6 +22,7 @@ use orchestrator::proto::{
 use orchestrator::sandbox::Sandbox;
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
+use orchestrator::server::config::binaries::Binaries;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::backend::Storage;
@@ -143,17 +144,25 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
                 .status(),
         )
     });
+    let builder = BuilderConfig::from_vars(&Default::default());
     let config = NodeConfig {
         grpc_port: 0,
         node_id: "grpc-node".to_owned(),
         firecracker: host.firecracker.clone(),
         kernel: host.kernel.clone(),
+        binaries: Binaries::from_vars(
+            &Default::default(),
+            &builder.target_arch,
+            &host.firecracker,
+            &host.kernel,
+        ),
+        network_version: 1,
         template_storage: StorageSpec::local(&store_root.display().to_string()),
         build_cache_storage: Some(StorageSpec::local(
             &dir.path().join("build-cache").display().to_string(),
         )),
         local_upload_base_url: String::new(),
-        builder: BuilderConfig::from_vars(&Default::default()),
+        builder,
         work_dir: dir.path().join("sandboxes"),
         cache_dir: dir.path().join("cache"),
         template_cache_dir: dir.path().join("templates"),
@@ -680,18 +689,17 @@ async fn cancelled_create_and_pause_requests_still_run_to_completion() {
     let cluster = cluster(&host, CANCEL_POOL, false, 200).await;
     let mut client = cluster.client.clone();
 
-    let abandoned_create = tokio::time::timeout(
-        Duration::from_millis(50),
-        client.create(create_request(
-            "grpc-cancelled",
-            cluster.template_build,
-            Duration::from_secs(600),
-        )),
-    )
-    .await;
+    let create = create_request("grpc-cancelled", cluster.template_build, Duration::from_secs(600));
+    let mut creating = client.clone();
+    let abandoned_create = tokio::spawn(async move { creating.create(create).await });
     assert!(
-        abandoned_create.is_err(),
-        "the create finished inside the cancel window"
+        eventually(Duration::from_secs(10), || !cluster.node.registry.is_empty()).await,
+        "the server never received the create"
+    );
+    abandoned_create.abort();
+    assert!(
+        abandoned_create.await.unwrap_err().is_cancelled(),
+        "the create finished before it was cancelled"
     );
     let mut listed = Vec::new();
     for _ in 0..150 {
@@ -710,17 +718,28 @@ async fn cancelled_create_and_pause_requests_still_run_to_completion() {
     );
 
     let paused_build = Uuid::new_v4();
-    let abandoned_pause = tokio::time::timeout(
-        Duration::from_millis(1),
-        client.pause(SandboxPauseRequest {
-            sandbox_id: "grpc-cancelled".to_owned(),
-            template_id: "grpc-template".to_owned(),
-            build_id: paused_build.to_string(),
-            filesystem_only: false,
-        }),
-    )
-    .await;
-    assert!(abandoned_pause.is_err(), "the pause finished inside the cancel window");
+    let pause = SandboxPauseRequest {
+        sandbox_id: "grpc-cancelled".to_owned(),
+        template_id: "grpc-template".to_owned(),
+        build_id: paused_build.to_string(),
+        filesystem_only: false,
+    };
+    let mut pausing = client.clone();
+    let abandoned_pause = tokio::spawn(async move { pausing.pause(pause).await });
+    assert!(
+        eventually(Duration::from_secs(10), || cluster
+            .node
+            .registry
+            .get("grpc-cancelled")
+            .is_none())
+        .await,
+        "the server never received the pause"
+    );
+    abandoned_pause.abort();
+    assert!(
+        abandoned_pause.await.unwrap_err().is_cancelled(),
+        "the pause finished before it was cancelled"
+    );
     assert!(
         eventually(Duration::from_secs(60), || upload_landed(&cluster, paused_build)).await,
         "the cancelled pause did not finish its snapshot"

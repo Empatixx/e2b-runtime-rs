@@ -21,6 +21,7 @@ use orchestrator::proto::{
 };
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
+use orchestrator::server::config::binaries::Binaries;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::spec::StorageSpec;
@@ -142,15 +143,23 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         "TEMPLATES_DIR".to_owned(),
         dir.join("build-templates").display().to_string(),
     );
+    let builder = BuilderConfig::from_vars(&builder_vars);
     NodeConfig {
         grpc_port: 0,
         node_id: "template-node".to_owned(),
         firecracker: host.firecracker.clone(),
         kernel: host.kernel.clone(),
+        binaries: Binaries::from_vars(
+            &Default::default(),
+            &builder.target_arch,
+            &host.firecracker,
+            &host.kernel,
+        ),
+        network_version: 1,
         template_storage: StorageSpec::local(&dir.join("store").display().to_string()),
         build_cache_storage: Some(StorageSpec::local(&dir.join("build-cache").display().to_string())),
         local_upload_base_url: String::new(),
-        builder: BuilderConfig::from_vars(&builder_vars),
+        builder,
         work_dir: dir.join("sandboxes"),
         cache_dir: dir.join("cache"),
         template_cache_dir: dir.join("templates"),
