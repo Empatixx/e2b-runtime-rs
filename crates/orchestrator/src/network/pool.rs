@@ -21,6 +21,29 @@ pub trait SlotFactory: Send + Sync + 'static {
     fn destroy(&self, slot: Slot) -> impl Future<Output = Result<(), String>> + Send;
 }
 
+pub struct SlotLease<F: SlotFactory> {
+    pool: Arc<NetworkPool<F>>,
+    slot: Option<Slot>,
+}
+
+impl<F: SlotFactory> SlotLease<F> {
+    pub fn slot(&self) -> Option<Slot> {
+        self.slot
+    }
+
+    pub fn keep(mut self) -> Option<Slot> {
+        self.slot.take()
+    }
+}
+
+impl<F: SlotFactory> Drop for SlotLease<F> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            self.pool.return_slot(slot);
+        }
+    }
+}
+
 pub struct NetworkPool<F> {
     factory: F,
     storage: SlotStorage,
@@ -57,6 +80,13 @@ impl<F: SlotFactory> NetworkPool<F> {
             slot = async { self.new_slots.lock().await.recv().await } => slot.ok_or_else(|| "network pool is closed".to_owned()),
             () = self.done.cancelled() => Err("network pool is closed".to_owned()),
         }
+    }
+
+    pub async fn lease(self: &Arc<Self>) -> Result<SlotLease<F>, String> {
+        self.get().await.map(|slot| SlotLease {
+            pool: self.clone(),
+            slot: Some(slot),
+        })
     }
 
     pub fn return_slot(self: &Arc<Self>, slot: Slot) {
@@ -243,5 +273,20 @@ mod tests {
         let created: BTreeSet<u32> = slots.created.lock().iter().copied().collect();
         assert_eq!(*slots.destroyed.lock(), created);
         assert_eq!(pool.get().await, Err("network pool is closed".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_lease_returns_its_slot_and_a_kept_one_does_not() {
+        let (pool, _) = pool(1..=100);
+        pool.start();
+        let dropped = pool.lease().await.unwrap();
+        let first = dropped.slot().unwrap();
+        drop(dropped);
+        let kept = pool.lease().await.unwrap().keep().unwrap();
+
+        tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
+
+        assert_eq!(pool.get().await.unwrap(), first);
+        assert_ne!(kept, first);
     }
 }

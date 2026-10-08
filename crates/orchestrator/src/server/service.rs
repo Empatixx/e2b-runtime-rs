@@ -30,8 +30,8 @@ impl SandboxService for SandboxServer {
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox config is required"))?;
         let lifetime = Lifetime {
-            start: request.start_time.map_or_else(SystemTime::now, system_time),
-            end: request.end_time.map_or_else(SystemTime::now, system_time),
+            start: request.start_time.map_or(SystemTime::UNIX_EPOCH, system_time),
+            end: request.end_time.map_or(SystemTime::UNIX_EPOCH, system_time),
         };
         tokio::spawn(self.node.clone().create(config, lifetime))
             .await
@@ -68,11 +68,12 @@ impl SandboxService for SandboxServer {
 
     async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
         let id = request.into_inner().sandbox_id;
+        self.running(&id, &format!("sandbox '{id}' not found"))?;
         let handle = self
             .node
             .registry
             .stop(&id)
-            .ok_or_else(|| Status::not_found(format!("sandbox '{id}' not found")))?;
+            .ok_or_else(|| Status::internal(format!("failed to delete sandbox '{id}'")))?;
         let _ = handle.commands.send(Command::Delete).await;
         Ok(Response::new(()))
     }
@@ -87,13 +88,17 @@ impl SandboxService for SandboxServer {
             .node
             .registry
             .stop(&id)
-            .ok_or_else(|| Status::not_found("sandbox not found"))?;
+            .ok_or_else(|| Status::internal("failed to pause sandbox"))?;
         let snapshotted = tokio::spawn(pause(handle, build_id))
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
             .map(|()| Response::new(SandboxPauseResponse::default()))
-            .map_err(|e| Status::internal(format!("error snapshotting sandbox '{id}': {e}")))
+            .map_err(|e| {
+                Status::internal(format!(
+                    "error snapshotting sandbox '{id}': error snapshotting sandbox: {e}"
+                ))
+            })
     }
 
     async fn checkpoint(

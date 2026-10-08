@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::node::Node;
+use super::registry::Lifecycle;
 use super::status::Work;
 use crate::network::slot::Slot;
 use crate::proto::SandboxConfig;
@@ -22,6 +23,7 @@ pub struct SandboxInfo {
     pub start: SystemTime,
     pub end: SystemTime,
     pub metadata: Option<TemplateMetadata>,
+    pub lifecycle: Lifecycle,
 }
 
 pub enum Command {
@@ -99,7 +101,8 @@ impl Running {
         }
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
         self.node.network.return_slot(self.slot);
-        self.node.registry.finish(&id);
+        let lifecycle = self.info.lock().lifecycle.clone();
+        self.node.registry.finish(&lifecycle);
         if let Some((local, reply)) = paused {
             let _ = reply.send(local.map(|local| local.snapshot));
         }

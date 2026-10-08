@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::admission::Admission;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
-use super::registry::Registry;
+use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::services::Services;
 use super::status::NodeStatus;
@@ -30,6 +30,7 @@ use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub struct Node {
@@ -183,19 +184,32 @@ impl Node {
 
     pub async fn create(self: Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<(), Status> {
         let _work = self.status.track_work();
-        let id = config.sandbox_id.clone();
+        let lifecycle = Lifecycle {
+            sandbox_id: config.sandbox_id.clone(),
+            lifecycle_id: Uuid::new_v4().to_string(),
+            execution_id: config.execution_id.clone(),
+        };
+        let id = lifecycle.sandbox_id.clone();
         self.registry.reserve(&id).map_err(Status::already_exists)?;
         let started = async {
             let _permit = self.admission.admit(self.registry.running().len()).await?;
-            self.start(config, lifetime).await
+            self.start(config, lifetime, lifecycle.clone()).await
         };
-        match started.await {
+        let started = tokio::time::timeout(REQUEST_TIMEOUT, started)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Status::internal(format!(
+                    "failed to create sandbox: {DEADLINE_EXCEEDED}"
+                )))
+            });
+        match started {
             Ok(handle) => {
-                self.registry.activate(&id, handle);
+                self.registry.activate(lifecycle, handle);
                 Ok(())
             }
             Err(status) => {
                 self.registry.abandon(&id);
+                let _ = std::fs::remove_dir_all(self.work_dir_of(&id));
                 Err(status)
             }
         }
@@ -237,25 +251,28 @@ impl Node {
         let _ = std::fs::remove_dir_all(&self.work_dir);
     }
 
-    async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
+    async fn start(
+        self: &Arc<Self>,
+        config: SandboxConfig,
+        lifetime: Lifetime,
+        lifecycle: Lifecycle,
+    ) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
-        let slot = tokio::time::timeout(REQUEST_TIMEOUT, self.network.get());
-        tokio::pin!(files, slot);
-        let (files, slot) = tokio::select! {
+        let lease = self.network.lease();
+        tokio::pin!(files, lease);
+        let (files, lease) = tokio::select! {
             files = &mut files => match files {
                 Err(e) => return Err(template_status(&config, e)),
-                files => (files, slot.await),
+                files => (files, lease.await),
             },
-            slot = &mut slot => (files.await, slot),
+            lease = &mut lease => (files.await, lease),
         };
-        let slot = slot
-            .unwrap_or_else(|_| Err("request timed out".to_owned()))
-            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
-        let (build, snapfile) = files.map_err(|e| {
-            self.network.return_slot(slot);
-            template_status(&config, e)
-        })?;
+        let lease = lease.map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
+        let (build, snapfile) = files.map_err(|e| template_status(&config, e))?;
+        let slot = lease
+            .slot()
+            .ok_or_else(|| Status::internal("failed to create sandbox: the network slot was taken back"))?;
         let metadata = template
             .metadata()
             .await
@@ -265,24 +282,25 @@ impl Node {
             .prefetch_from_trace
             .then(|| metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned())
             .flatten();
-        match self.resume(&config, &build, &snapfile, prefetch, slot).await {
-            Ok(sandbox) => Ok(lifecycle::spawn(
-                sandbox,
-                slot,
-                SandboxInfo {
-                    config,
-                    start: lifetime.start,
-                    end: lifetime.end,
-                    metadata,
-                },
-                self.clone(),
-            )),
-            Err(e) => {
-                self.network.return_slot(slot);
-                let _ = std::fs::remove_dir_all(self.work_dir_of(&config.sandbox_id));
-                Err(Status::internal(format!("failed to create sandbox: {e}")))
-            }
-        }
+        let sandbox = self
+            .resume(&config, &build, &snapfile, prefetch, slot)
+            .await
+            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
+        let slot = lease
+            .keep()
+            .ok_or_else(|| Status::internal("failed to create sandbox: the network slot was taken back"))?;
+        Ok(lifecycle::spawn(
+            sandbox,
+            slot,
+            SandboxInfo {
+                config,
+                start: lifetime.start,
+                end: lifetime.end,
+                metadata,
+                lifecycle,
+            },
+            self.clone(),
+        ))
     }
 
     fn template_of(&self, config: &SandboxConfig) -> Result<Arc<Template>, Status> {
