@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use crate::go_time::{rfc3339, rfc3339_nano};
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -61,10 +61,6 @@ fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
-pub fn rfc3339(time: SystemTime) -> String {
-    DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::AutoSi, true)
-}
-
 impl SandboxEvent {
     pub fn new(kind: &str, sandbox: &EventSandbox) -> Self {
         let mut event_data = BTreeMap::new();
@@ -76,7 +72,7 @@ impl SandboxEvent {
             id: Uuid::new_v4(),
             version: VERSION.to_owned(),
             kind: kind.to_owned(),
-            timestamp: rfc3339(at),
+            timestamp: rfc3339_nano(at),
             at,
             event_category: String::new(),
             event_label: String::new(),

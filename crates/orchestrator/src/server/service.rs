@@ -8,7 +8,8 @@ use super::lifecycle::{Command, SandboxHandle};
 use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
 use super::scheduling::from_headers;
 use crate::envd::version::check_for_snapshot;
-use crate::events::{KILLED, SandboxEvent, UPDATED, rfc3339};
+use crate::events::{KILLED, SandboxEvent, UPDATED};
+use crate::go_time::rfc3339;
 use crate::proto::sandbox_service_server::SandboxService;
 use crate::proto::{
     RunningSandbox, SandboxCheckpointRequest, SandboxCheckpointResponse, SandboxCreateRequest, SandboxCreateResponse,

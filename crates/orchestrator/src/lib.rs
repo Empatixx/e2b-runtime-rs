@@ -7,6 +7,7 @@ pub mod envd;
 pub mod events;
 pub mod exposure;
 pub mod firecracker;
+pub mod go_time;
 pub mod hoststats;
 pub mod hyperloop;
 pub mod memory;

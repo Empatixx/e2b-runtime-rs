@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use crate::go_time::rfc3339_nano;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -89,7 +89,7 @@ impl RoutingPublisher {
             orchestrator_id: self.orchestrator_id.clone(),
             orchestrator_ip: self.node_ip.clone(),
             execution_id: sandbox.execution_id.clone(),
-            sandbox_started_at: DateTime::<Utc>::from(sandbox.started_at).to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            sandbox_started_at: rfc3339_nano(sandbox.started_at),
             sandbox_max_length_in_hours: sandbox.max_length_hours,
         };
         let ttl = (sandbox.max_length_hours > 0).then(|| Duration::from_secs(sandbox.max_length_hours as u64 * 3600));

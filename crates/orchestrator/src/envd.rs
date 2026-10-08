@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::go_time::rfc3339_nano;
 use bytes::Bytes;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use http_body_util::Full;
 use hyper::Request;
 use hyper::client::conn::http1;
@@ -40,7 +41,7 @@ impl EnvdInit {
     pub fn body(&self, timestamp: DateTime<Utc>) -> Value {
         let mut body = json!({
             "envVars": self.env_vars,
-            "timestamp": timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            "timestamp": rfc3339_nano(timestamp.into()),
         });
         [
             ("accessToken", &self.access_token),

@@ -231,18 +231,20 @@ impl Slot {
             ])
             .await?;
         }
-        self.nft_inside(&settings.firewall().initialize()).await
+        self.nft_inside(&settings.firewall().initialize()?).await
     }
 
     pub async fn apply_egress(&self, rules: &EgressRules) -> Result<(), String> {
-        self.nft_inside(&NetworkSettings::current().firewall().apply(rules))
-            .await
-            .map_err(|e| {
-                format!(
-                    "error setting slot internet access: failed execution in network namespace '{}': {e}",
-                    self.namespace()
-                )
-            })
+        let applied = match NetworkSettings::current().firewall().apply(rules) {
+            Ok(script) => self.nft_inside(&script).await,
+            Err(e) => Err(e),
+        };
+        applied.map_err(|e| {
+            format!(
+                "error setting slot internet access: failed execution in network namespace '{}': {e}",
+                self.namespace()
+            )
+        })
     }
 
     async fn nft_inside(&self, script: &str) -> Result<(), String> {
