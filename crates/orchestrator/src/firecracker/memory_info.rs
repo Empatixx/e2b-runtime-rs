@@ -32,6 +32,17 @@ impl From<MemoryWords> for MemoryInfo {
 }
 
 #[derive(Deserialize)]
+pub struct DirtyMemory {
+    bitmap: Vec<u64>,
+}
+
+impl DirtyMemory {
+    pub fn pages(&self) -> RoaringBitmap {
+        bitmap_from_words(&self.bitmap)
+    }
+}
+
+#[derive(Deserialize)]
 pub struct MemoryMappings {
     pub mappings: Vec<GuestRegion>,
 }

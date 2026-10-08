@@ -8,6 +8,7 @@ const EVENTS_PER_READ: usize = 64;
 const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
 const UFFD_EVENT_REMOVE: u8 = 0x15;
 const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1;
+const UFFDIO_COPY_MODE_WP: u64 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -21,6 +22,7 @@ pub enum CopyOutcome {
     AlreadyPresent,
     Retry,
     Gone,
+    NoWriteProtect,
 }
 
 #[derive(Debug)]
@@ -69,17 +71,18 @@ impl Uffd {
         }
     }
 
-    pub fn copy(&self, dst: u64, src: &[u8]) -> io::Result<CopyOutcome> {
+    pub fn copy(&self, dst: u64, src: &[u8], write_protect: bool) -> io::Result<CopyOutcome> {
         let len = src.len() as u64;
         let mut request = UffdioCopy {
             dst,
             src: src.as_ptr() as u64,
             len,
-            mode: 0,
+            mode: if write_protect { UFFDIO_COPY_MODE_WP } else { 0 },
             copy: 0,
         };
         match unsafe { ioctls::copy(self.fd.as_raw_fd(), &mut request) } {
             Ok(_) if request.copy == len as i64 => Ok(CopyOutcome::Copied),
+            Err(Errno::EINVAL) if write_protect => Ok(CopyOutcome::NoWriteProtect),
             Ok(_) | Err(Errno::EAGAIN) => Ok(CopyOutcome::Retry),
             Err(Errno::EEXIST) => Ok(CopyOutcome::AlreadyPresent),
             Err(Errno::ESRCH) => Ok(CopyOutcome::Gone),
@@ -134,7 +137,10 @@ pub mod testing {
 
     const UFFD_API: u64 = 0xAA;
     const UFFD_FEATURE_EVENT_REMOVE: u64 = 1 << 3;
+    const UFFD_FEATURE_WP_ASYNC: u64 = 1 << 15;
     const UFFDIO_REGISTER_MODE_MISSING: u64 = 1;
+    const UFFDIO_REGISTER_MODE_WP: u64 = 1 << 1;
+    const PAGEMAP_UFFD_WP: u64 = 1 << 57;
 
     #[repr(C)]
     struct UffdioApi {
@@ -194,6 +200,25 @@ pub mod testing {
         }
 
         pub fn register(&self) -> io::Result<Uffd> {
+            self.register_with(UFFDIO_REGISTER_MODE_MISSING, UFFD_FEATURE_EVENT_REMOVE)
+        }
+
+        pub fn register_write_protected(&self) -> io::Result<Uffd> {
+            self.register_with(
+                UFFDIO_REGISTER_MODE_MISSING | UFFDIO_REGISTER_MODE_WP,
+                UFFD_FEATURE_EVENT_REMOVE | UFFD_FEATURE_WP_ASYNC,
+            )
+        }
+
+        pub fn write_protected(address: u64) -> bool {
+            let page = address / 4096;
+            let mut entry = [0u8; 8];
+            std::fs::File::open("/proc/self/pagemap")
+                .and_then(|pagemap| std::os::unix::fs::FileExt::read_exact_at(&pagemap, &mut entry, page * 8))
+                .is_ok_and(|()| u64::from_ne_bytes(entry) & PAGEMAP_UFFD_WP != 0)
+        }
+
+        fn register_with(&self, mode: u64, features: u64) -> io::Result<Uffd> {
             let raw = userfaultfd();
             if raw < 0 {
                 return Err(io::Error::last_os_error());
@@ -201,14 +226,14 @@ pub mod testing {
             let fd = unsafe { OwnedFd::from_raw_fd(raw) };
             let mut handshake = UffdioApi {
                 api: UFFD_API,
-                features: UFFD_FEATURE_EVENT_REMOVE,
+                features,
                 ioctls: 0,
             };
             unsafe { api(std::os::fd::AsRawFd::as_raw_fd(&fd), &mut handshake) }?;
             let mut registration = UffdioRegister {
                 start: self.address(),
                 len: self.len as u64,
-                mode: UFFDIO_REGISTER_MODE_MISSING,
+                mode,
                 ioctls: 0,
             };
             unsafe { register(std::os::fd::AsRawFd::as_raw_fd(&fd), &mut registration) }?;
@@ -275,7 +300,7 @@ mod tests {
         );
         let source = vec![0xAB; PAGE as usize];
         assert_eq!(
-            uffd.copy(pages.address() + 2 * PAGE, &source).unwrap(),
+            uffd.copy(pages.address() + 2 * PAGE, &source, false).unwrap(),
             CopyOutcome::Copied
         );
         assert_eq!(reader.join().unwrap(), 0xAB);
@@ -290,12 +315,50 @@ mod tests {
         let pages = Pages::map(2 * PAGE as usize);
         let uffd = pages.register().unwrap();
         let source = vec![1; PAGE as usize];
-        assert_eq!(uffd.copy(pages.address(), &source).unwrap(), CopyOutcome::Copied);
+        assert_eq!(uffd.copy(pages.address(), &source, false).unwrap(), CopyOutcome::Copied);
         assert_eq!(
-            uffd.copy(pages.address(), &source).unwrap(),
+            uffd.copy(pages.address(), &source, false).unwrap(),
             CopyOutcome::AlreadyPresent
         );
         uffd.wake(pages.address(), PAGE).unwrap();
+    }
+
+    #[test]
+    fn copy_with_write_protect_arms_the_pagemap_bit() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let pages = Pages::map(2 * PAGE as usize);
+        let uffd = pages.register_write_protected().unwrap();
+        let source = vec![5; PAGE as usize];
+
+        assert_eq!(uffd.copy(pages.address(), &source, true).unwrap(), CopyOutcome::Copied);
+        assert!(
+            Pages::write_protected(pages.address()),
+            "a read-installed page must be write-protected"
+        );
+        Pages::write_byte(pages.address(), 9);
+        assert!(
+            !Pages::write_protected(pages.address()),
+            "a written page must lose write-protection"
+        );
+    }
+
+    #[test]
+    fn write_protect_without_wp_registration_is_reported() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let pages = Pages::map(PAGE as usize);
+        let uffd = pages.register().unwrap();
+        let source = vec![5; PAGE as usize];
+
+        assert_eq!(
+            uffd.copy(pages.address(), &source, true).unwrap(),
+            CopyOutcome::NoWriteProtect
+        );
     }
 
     #[test]

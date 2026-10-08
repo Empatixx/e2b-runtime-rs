@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use tokio::net::UnixStream;
 
 use super::config::VmConfig;
-use super::memory_info::{GuestRegion, MemoryInfo, MemoryMappings};
+use super::memory_info::{DirtyMemory, GuestRegion, MemoryInfo, MemoryMappings};
 use super::mmds::MmdsMetadata;
 use crate::network::slot::{GUEST_MAC, TAP_NAME};
+use roaring::RoaringBitmap;
 
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -110,6 +111,12 @@ impl FirecrackerClient {
         self.get::<MemoryMappings>("/memory/mappings")
             .await
             .map(|response| response.mappings)
+    }
+
+    pub async fn memory_dirty(&self) -> Result<RoaringBitmap, String> {
+        self.get::<DirtyMemory>("/memory/dirty")
+            .await
+            .map(|dirty| dirty.pages())
     }
 
     pub async fn memory_info(&self) -> Result<MemoryInfo, String> {
@@ -479,6 +486,21 @@ mod tests {
                 page_size: 4096
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn memory_dirty_is_parsed() {
+        let faults = Faults {
+            answers: &[("/memory/dirty", r#"{"bitmap":[3,0,1]}"#)],
+            ..Faults::default()
+        };
+        let mut dirty = None;
+        calls_after(faults, async |client| {
+            dirty = Some(client.memory_dirty().await.unwrap());
+        })
+        .await;
+
+        assert_eq!(dirty.unwrap().iter().collect::<Vec<_>>(), vec![0, 1, 128]);
     }
 
     #[tokio::test]

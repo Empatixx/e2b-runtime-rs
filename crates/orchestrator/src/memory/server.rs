@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -21,34 +21,56 @@ const RETRY_DELAY: Duration = Duration::from_millis(1);
 pub struct MemoryServer {
     stop: oneshot::Sender<()>,
     task: JoinHandle<Result<(), String>>,
-    served: Arc<AtomicU64>,
+    state: Arc<SharedState>,
+}
+
+#[derive(Default)]
+struct SharedState {
+    served: AtomicU64,
+    write_protect: AtomicBool,
+    removed: Mutex<RoaringBitmap>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Fault {
+    address: u64,
+    write: bool,
 }
 
 struct Serving {
     uffd: AsyncFd<Uffd>,
     regions: Regions,
     memfile: Arc<BuildFile>,
-    removed: Mutex<RoaringBitmap>,
-    served: Arc<AtomicU64>,
+    state: Arc<SharedState>,
 }
 
 impl MemoryServer {
     pub fn start(uffd: Uffd, regions: Regions, memfile: Arc<BuildFile>) -> io::Result<Self> {
-        let served = Arc::new(AtomicU64::new(0));
+        let state = Arc::new(SharedState {
+            write_protect: AtomicBool::new(true),
+            ..SharedState::default()
+        });
         let serving = Serving {
             uffd: AsyncFd::new(uffd)?,
             regions,
             memfile,
-            removed: Mutex::default(),
-            served: served.clone(),
+            state: state.clone(),
         };
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(serving.run(stopped));
-        Ok(Self { stop, task, served })
+        Ok(Self { stop, task, state })
     }
 
     pub fn faults_served(&self) -> u64 {
-        self.served.load(Ordering::Relaxed)
+        self.state.served.load(Ordering::Relaxed)
+    }
+
+    pub fn write_protecting(&self) -> bool {
+        self.state.write_protect.load(Ordering::Relaxed)
+    }
+
+    pub fn removed_pages(&self) -> RoaringBitmap {
+        self.state.removed.lock().clone()
     }
 
     pub fn is_finished(&self) -> bool {
@@ -75,7 +97,7 @@ impl Serving {
                         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                         Err(e) => return Err(format!("read uffd events: {e}")),
                     };
-                    in_flight.extend(retries.drain(..).chain(faults).map(|address| self.serve_fault(address)));
+                    in_flight.extend(retries.drain(..).chain(faults).map(|fault| self.serve_fault(fault)));
                 }
                 Some(served) = in_flight.next() => retries.extend(served?),
             }
@@ -95,11 +117,11 @@ impl Serving {
         Ok(events)
     }
 
-    fn record_removals(&self, events: Vec<Event>) -> Vec<u64> {
+    fn record_removals(&self, events: Vec<Event>) -> Vec<Fault> {
         events
             .into_iter()
             .filter_map(|event| match event {
-                Event::PageFault { address, .. } => Some(address),
+                Event::PageFault { address, write } => Some(Fault { address, write }),
                 Event::Remove { start, end } => {
                     self.mark_removed(start, end);
                     None
@@ -114,40 +136,58 @@ impl Serving {
             .step_by(page_size as usize)
             .filter_map(|address| self.regions.offset_of(address).ok())
             .map(|offset| (offset / page_size) as u32);
-        self.removed.lock().extend(pages);
+        self.state.removed.lock().extend(pages);
     }
 
-    async fn serve_fault(&self, address: u64) -> Result<Option<u64>, String> {
-        let page_size = self.regions.page_size();
-        let page = address & !(page_size - 1);
-        let installed = self.install(page).await;
-        installed
+    async fn serve_fault(&self, fault: Fault) -> Result<Option<Fault>, String> {
+        let page = fault.address & !(self.regions.page_size() - 1);
+        self.install(page, fault.write)
+            .await
             .map_err(|e| format!("serve page at {page:#x}: {e}"))
-            .map(|outcome| match outcome {
-                CopyOutcome::Retry => Some(address),
-                _ => None,
-            })
+            .map(|outcome| matches!(outcome, CopyOutcome::Retry).then_some(fault))
     }
 
-    async fn install(&self, page: u64) -> Result<CopyOutcome, String> {
-        let page_size = self.regions.page_size();
+    async fn install(&self, page: u64, write: bool) -> Result<CopyOutcome, String> {
         let offset = self.regions.offset_of(page)?;
         let bytes = self.page_bytes(offset).await?;
-        let outcome = self.uffd.get_ref().copy(page, &bytes).map_err(|e| e.to_string())?;
+        let protect = !write && self.state.write_protect.load(Ordering::Relaxed);
+        let outcome = match self.copy(page, &bytes, protect)? {
+            CopyOutcome::NoWriteProtect => {
+                self.state.write_protect.store(false, Ordering::Relaxed);
+                self.copy(page, &bytes, false)?
+            }
+            outcome => outcome,
+        };
+        self.after_copy(page, outcome)?;
+        Ok(outcome)
+    }
+
+    fn copy(&self, page: u64, bytes: &[u8], protect: bool) -> Result<CopyOutcome, String> {
+        self.uffd
+            .get_ref()
+            .copy(page, bytes, protect)
+            .map_err(|e| e.to_string())
+    }
+
+    fn after_copy(&self, page: u64, outcome: CopyOutcome) -> Result<(), String> {
         match outcome {
             CopyOutcome::Copied => {
-                self.served.fetch_add(1, Ordering::Relaxed);
+                self.state.served.fetch_add(1, Ordering::Relaxed);
+                Ok(())
             }
-            CopyOutcome::AlreadyPresent => self.uffd.get_ref().wake(page, page_size).map_err(|e| e.to_string())?,
-            CopyOutcome::Retry | CopyOutcome::Gone => {}
+            CopyOutcome::AlreadyPresent => self
+                .uffd
+                .get_ref()
+                .wake(page, self.regions.page_size())
+                .map_err(|e| e.to_string()),
+            CopyOutcome::Retry | CopyOutcome::Gone | CopyOutcome::NoWriteProtect => Ok(()),
         }
-        Ok(outcome)
     }
 
     async fn page_bytes(&self, offset: u64) -> Result<Vec<u8>, String> {
         let page_size = self.regions.page_size();
         let mut bytes = vec![0; page_size as usize];
-        let removed = self.removed.lock().contains((offset / page_size) as u32);
+        let removed = self.state.removed.lock().contains((offset / page_size) as u32);
         if !removed {
             self.memfile.read_at(offset, &mut bytes).await?;
         }
@@ -176,6 +216,10 @@ mod tests {
     }
 
     async fn fixture(mapped_pages: u64, memfile_pages: u64) -> Fixture {
+        fixture_with(mapped_pages, memfile_pages, false).await
+    }
+
+    async fn fixture_with(mapped_pages: u64, memfile_pages: u64, write_protected: bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::local(&dir.path().join("store")).unwrap();
         let build_id = Uuid::new_v4();
@@ -191,7 +235,10 @@ mod tests {
         let memfile = Arc::new(BuildFile::new(header, Artifact::Memfile, store));
 
         let pages = Arc::new(Pages::map((mapped_pages * PAGE) as usize));
-        let uffd = pages.register().unwrap();
+        let uffd = match write_protected {
+            true => pages.register_write_protected().unwrap(),
+            false => pages.register().unwrap(),
+        };
         let regions = Regions::parse(
             format!(
                 r#"[{{"base_host_virt_addr":{},"size":{},"offset":0,"page_size_kib":4096}}]"#,
@@ -276,6 +323,53 @@ mod tests {
         let _ = reader.join();
 
         assert!(error.starts_with(&format!("serve page at {address:#x}: ")), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn read_faults_are_write_protected() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let fixture = fixture_with(2, 2, true).await;
+
+        assert_eq!(read_page(&fixture.pages, 0).await, 1);
+
+        assert!(fixture.server.write_protecting());
+        assert!(Pages::write_protected(fixture.pages.address()));
+        fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn falls_back_to_plain_copies_without_write_protect() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let fixture = fixture(2, 2).await;
+
+        assert_eq!(read_page(&fixture.pages, 0).await, 1);
+
+        assert!(!fixture.server.write_protecting());
+        fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn removed_pages_are_reported() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let fixture = fixture(2, 2).await;
+        assert_eq!(read_page(&fixture.pages, 1).await, 2);
+        let pages = fixture.pages.clone();
+        tokio::task::spawn_blocking(move || pages.discard(PAGE as usize, PAGE as usize))
+            .await
+            .unwrap();
+        assert_eq!(read_page(&fixture.pages, 1).await, 0);
+
+        assert_eq!(fixture.server.removed_pages().iter().collect::<Vec<_>>(), vec![1]);
+        fixture.server.stop().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
