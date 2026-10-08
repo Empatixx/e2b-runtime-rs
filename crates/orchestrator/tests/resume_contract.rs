@@ -299,7 +299,7 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
         .await
         .unwrap();
     write_file(&first, "/home/user/a.txt", "disk a").await;
-    write_file(&first, "/dev/shm/a", "memory a").await;
+    write_file(&first, "/dev/shm/e2b/a", "memory a").await;
     run_in_guest(
         &first,
         "nohup sleep 600 >/dev/null 2>&1 & echo $! > /dev/shm/sleep.pid; sync",
@@ -308,10 +308,10 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let paused = first.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
 
     let second = templates.resume(&host, "sbx-gen1", 4034, &paused.build).await;
-    assert_eq!(read_file(&second, "/dev/shm/a").await, (200, "memory a".to_owned()));
-    write_file(&second, "/dev/shm/a", "memory a2").await;
+    assert_eq!(read_file(&second, "/dev/shm/e2b/a").await, (200, "memory a".to_owned()));
+    write_file(&second, "/dev/shm/e2b/a", "memory a2").await;
     write_file(&second, "/home/user/b.txt", "disk b").await;
-    write_file(&second, "/dev/shm/b", "memory b").await;
+    write_file(&second, "/dev/shm/e2b/b", "memory b").await;
     run_in_guest(&second, "sync").await;
     let pause_started = Instant::now();
     let paused_again = second.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
@@ -337,8 +337,8 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let files = [
         read_file(&third, "/home/user/a.txt").await,
         read_file(&third, "/home/user/b.txt").await,
-        read_file(&third, "/dev/shm/a").await,
-        read_file(&third, "/dev/shm/b").await,
+        read_file(&third, "/dev/shm/e2b/a").await,
+        read_file(&third, "/dev/shm/e2b/b").await,
         read_file(&third, "/dev/shm/alive").await,
     ];
     third.stop().await.unwrap();
