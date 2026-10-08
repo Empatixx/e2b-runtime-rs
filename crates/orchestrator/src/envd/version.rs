@@ -13,7 +13,7 @@ pub fn check_for_snapshot(envd_version: &str) -> Result<(), String> {
         })
 }
 
-fn is_at_least(current: &str, minimum: &str) -> Result<bool, String> {
+pub fn is_at_least(current: &str, minimum: &str) -> Result<bool, String> {
     let current = sanitized(current);
     let minimum = sanitized(minimum);
     let current = Version::parse(&current).ok_or_else(|| format!("invalid current version format: {current}"))?;

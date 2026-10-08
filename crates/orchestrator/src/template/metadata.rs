@@ -104,6 +104,17 @@ impl TemplateMetadata {
         serde_json::to_vec(self).unwrap_or_default()
     }
 
+    pub fn based_on(&self, alias: &str, build_id: &str) -> Self {
+        Self {
+            version: CURRENT_VERSION,
+            template: self.template.clone(),
+            context: self.context.clone(),
+            start: self.start.clone(),
+            from_template: Some(serde_json::json!({ "alias": alias, "build_id": build_id })),
+            ..Self::default()
+        }
+    }
+
     pub fn same_version(&self, template: TemplateVersions) -> Self {
         Self {
             template,

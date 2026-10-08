@@ -35,6 +35,7 @@ use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig, SchedulingMetadata};
 use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
+use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
@@ -204,6 +205,23 @@ impl Node {
         let uploaded = self.uploads.run(build.build_id, parents(&build), attempt).await;
         self.store.unpin(build.build_id);
         uploaded
+    }
+
+    pub fn build_sandbox(&self, sandbox_id: &str, template_id: &str) -> SandboxBuilder {
+        Sandbox::builder()
+            .id(sandbox_id)
+            .template_id(template_id)
+            .firecracker(&self.firecracker)
+            .kernel(&self.kernel)
+            .work_dir(self.work_dir.join(sandbox_id))
+    }
+
+    pub fn layer_dir(&self, build_id: Uuid) -> PathBuf {
+        self.templates.instance_dir(build_id)
+    }
+
+    pub fn cache_layer(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
+        self.cache_snapshot(local, metadata, dir)
     }
 
     fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {

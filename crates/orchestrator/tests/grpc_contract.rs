@@ -20,7 +20,7 @@ use orchestrator::proto::{
     TemplateStatusRequest,
 };
 use orchestrator::sandbox::Sandbox;
-use orchestrator::server::app::App;
+use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
@@ -170,7 +170,12 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         clickhouse_additional: Vec::new(),
     };
     let node = Arc::new(Node::new(&config).unwrap());
-    let app = App::new(node.clone(), config.open_build_storage().unwrap());
+    let setup = config.open_build_storage().unwrap().map(|build| TemplateManagerSetup {
+        build,
+        builder: config.builder.clone(),
+        development: true,
+    });
+    let app = App::new(node.clone(), setup).unwrap();
     app.start_background();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

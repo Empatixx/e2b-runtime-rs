@@ -13,6 +13,9 @@ use super::service::SandboxServer;
 use super::status::NodeStatus;
 use super::upload::UploadHandler;
 use crate::builder::builds::BuildCache;
+use crate::builder::config::BuilderConfig;
+use crate::builder::oci::pull::Puller;
+use crate::builder::phases::BuildEnv;
 use crate::builder::pipeline::PhasePipeline;
 use crate::builder::service::{TemplateServer, TemplateStorages};
 use crate::proto::info_service_server::InfoServiceServer;
@@ -26,6 +29,12 @@ pub const COMMIT: &str = match option_env!("E2B_COMMIT") {
     None => "unknown",
 };
 
+pub struct TemplateManagerSetup {
+    pub build: BuildStorage,
+    pub builder: BuilderConfig,
+    pub development: bool,
+}
+
 pub struct App {
     pub node: Arc<Node>,
     pub status: Arc<NodeStatus>,
@@ -36,23 +45,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(node: Arc<Node>, build: Option<BuildStorage>) -> Self {
+    pub fn new(node: Arc<Node>, setup: Option<TemplateManagerSetup>) -> Result<Self, String> {
         let builds = Arc::new(BuildCache::default());
-        let templates = build.as_ref().map(|build| {
-            let storages = TemplateStorages {
-                template: node.storage.clone(),
-                build: build.storage.clone(),
-            };
-            Arc::new(TemplateServer::new(builds.clone(), storages, Arc::new(PhasePipeline)))
-        });
-        Self {
+        let templates = setup
+            .as_ref()
+            .map(|setup| template_server(&node, &builds, setup))
+            .transpose()?;
+        Ok(Self {
             status: node.status.clone(),
             node,
             metrics: Arc::default(),
             templates,
-            uploads: build.and_then(|build| build.uploads),
+            uploads: setup.and_then(|setup| setup.build.uploads),
             builds,
-        }
+        })
     }
 
     pub fn start_background(&self) {
@@ -113,4 +119,27 @@ impl App {
             running: Box::new(move || node.running_configs()),
         }
     }
+}
+
+fn template_server(
+    node: &Arc<Node>,
+    builds: &Arc<BuildCache>,
+    setup: &TemplateManagerSetup,
+) -> Result<Arc<TemplateServer<PhasePipeline>>, String> {
+    let storages = TemplateStorages {
+        template: node.storage.clone(),
+        build: setup.build.storage.clone(),
+    };
+    let env = BuildEnv {
+        node: node.clone(),
+        config: setup.builder.clone(),
+        puller: Puller::new(&setup.builder)?,
+        build_storage: setup.build.storage.clone(),
+        development: setup.development,
+    };
+    Ok(Arc::new(TemplateServer::new(
+        builds.clone(),
+        storages,
+        Arc::new(PhasePipeline { env: Arc::new(env) }),
+    )))
 }

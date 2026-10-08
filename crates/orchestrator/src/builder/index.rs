@@ -16,6 +16,12 @@ struct IndexTemplate {
 
 const MINIMAL_CACHED_VERSION: u64 = 2;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataError {
+    Missing(String),
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedLayer {
     pub build_id: String,
@@ -59,6 +65,28 @@ impl LayerIndex {
             .ok()
             .filter(|metadata| metadata.version >= MINIMAL_CACHED_VERSION)
             .map(|metadata| CachedLayer { build_id, metadata })
+    }
+
+    pub async fn metadata_of(&self, build_id: &str) -> Result<TemplateMetadata, MetadataError> {
+        let path = format!("{build_id}/metadata.json");
+        let bytes = self
+            .template_storage
+            .find(&path)
+            .await
+            .map_err(|e| MetadataError::Failed(format!("error reading template metadata: {e}")))?
+            .ok_or_else(|| {
+                MetadataError::Missing(format!("error reading template metadata: object {path} does not exist"))
+            })?;
+        let metadata = TemplateMetadata::from_json(&bytes)
+            .map_err(|e| MetadataError::Failed(format!("error reading template metadata: {e}")))?;
+        match metadata.version >= MINIMAL_CACHED_VERSION {
+            true => Ok(metadata),
+            false => Err(MetadataError::Failed(format!(
+                "outdated template metadata: expected {}, got {}",
+                crate::template::metadata::CURRENT_VERSION,
+                metadata.version
+            ))),
+        }
     }
 
     async fn layer_build_id(&self, hash: &str) -> Option<String> {

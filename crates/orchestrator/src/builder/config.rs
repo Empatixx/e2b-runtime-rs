@@ -8,6 +8,8 @@ const DEFAULT_BASE_PATH: &str = "/orchestrator";
 const DEFAULT_TEMPLATES_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/build-templates";
 const DEFAULT_PROVIDER: &str = "gcp";
 const DEFAULT_DOCKERHUB_PROVIDER: &str = "GCP_REMOTE_REPOSITORY";
+const DEFAULT_KERNEL_VERSION: &str = "vmlinux-6.1.158";
+const DEFAULT_FIRECRACKER_VERSION: &str = "v1.14-0.2.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderConfig {
@@ -18,6 +20,8 @@ pub struct BuilderConfig {
     pub target_arch: String,
     pub dockerhub_provider: String,
     pub dockerhub_url: String,
+    pub kernel_version: String,
+    pub firecracker_version: String,
 }
 
 impl BuilderConfig {
@@ -49,6 +53,8 @@ impl BuilderConfig {
             target_arch: target_arch(vars.get("TARGET_ARCH").map(String::as_str)),
             dockerhub_provider: var("DOCKERHUB_REMOTE_REPOSITORY_PROVIDER", DEFAULT_DOCKERHUB_PROVIDER),
             dockerhub_url: var("DOCKERHUB_REMOTE_REPOSITORY_URL", ""),
+            kernel_version: var("DEFAULT_KERNEL_VERSION", DEFAULT_KERNEL_VERSION),
+            firecracker_version: var("DEFAULT_FIRECRACKER_VERSION", DEFAULT_FIRECRACKER_VERSION),
         }
     }
 }
@@ -128,6 +134,10 @@ mod tests {
         assert_eq!(config.provider, "gcp");
         assert_eq!(config.dockerhub_provider, "GCP_REMOTE_REPOSITORY");
         assert_eq!(config.target_arch, host_arch());
+        assert_eq!(
+            (config.kernel_version.as_str(), config.firecracker_version.as_str()),
+            ("vmlinux-6.1.158", "v1.14-0.2.0")
+        );
     }
 
     #[test]

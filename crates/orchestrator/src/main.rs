@@ -17,7 +17,7 @@ mod serve {
     use orchestrator::clickhouse::sinks::Clickhouse;
     use orchestrator::events::EventSink;
     use orchestrator::routing::redis::Redis;
-    use orchestrator::server::app::App;
+    use orchestrator::server::app::{App, TemplateManagerSetup};
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::node::Node;
     use orchestrator::server::shutdown::drain;
@@ -50,7 +50,12 @@ mod serve {
         }
         node.events.install(event_sinks);
         node.sweep().await;
-        let app = App::new(node.clone(), config.open_build_storage()?);
+        let setup = config.open_build_storage()?.map(|build| TemplateManagerSetup {
+            build,
+            builder: config.builder.clone(),
+            development: config.local,
+        });
+        let app = App::new(node.clone(), setup)?;
         app.start_background();
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
         let listener = tokio::net::TcpListener::bind(address)

@@ -6,6 +6,9 @@ pub mod index;
 pub mod logs;
 pub mod oci;
 pub mod phase;
+#[cfg(target_os = "linux")]
+pub mod phases;
+#[cfg(target_os = "linux")]
 pub mod pipeline;
 pub mod provision;
 #[cfg(target_os = "linux")]
