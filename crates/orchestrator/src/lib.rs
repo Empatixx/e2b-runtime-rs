@@ -1,4 +1,5 @@
 pub mod block;
+pub mod builder;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
 pub mod envd;
