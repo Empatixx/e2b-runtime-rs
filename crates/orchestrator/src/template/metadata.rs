@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 pub const CURRENT_VERSION: u64 = 2;
 const DEPRECATED_VERSION: u64 = 1;
@@ -105,12 +104,9 @@ impl TemplateMetadata {
         serde_json::to_vec(self).unwrap_or_default()
     }
 
-    pub fn same_version(&self, build_id: Uuid) -> Self {
+    pub fn same_version(&self, template: TemplateVersions) -> Self {
         Self {
-            template: TemplateVersions {
-                build_id: build_id.to_string(),
-                ..self.template.clone()
-            },
+            template,
             prefetch: None,
             filesystem_only: false,
             fs_quiesced: false,
@@ -134,6 +130,8 @@ impl TemplateMetadata {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
 
     fn paused() -> TemplateMetadata {
@@ -205,9 +203,14 @@ mod tests {
         let build = Uuid::from_bytes([7; 16]);
         let traced = paused().with_prefetch(Some(MemoryPrefetch::default()));
 
-        let next = traced.same_version(build);
+        let versions = TemplateVersions {
+            build_id: build.to_string(),
+            kernel_version: "vmlinux-6.1.158".to_owned(),
+            firecracker_version: "v1.14".to_owned(),
+        };
+        let next = traced.same_version(versions.clone());
 
-        assert_eq!(next.template.build_id, build.to_string());
+        assert_eq!(next.template, versions);
         assert_eq!((next.context, next.prefetch), (paused().context, None));
     }
 

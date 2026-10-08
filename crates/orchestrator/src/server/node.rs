@@ -22,10 +22,10 @@ use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::LocalSnapshot;
-use crate::storage::backend::Storage;
+use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::template::cache::TemplateCache;
-use crate::template::metadata::{MemoryPrefetch, TemplateMetadata};
+use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
 use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -94,41 +94,49 @@ impl Node {
         tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }
 
-    pub async fn pause_locally(
+    pub async fn snapshot_locally(
         &self,
-        sandbox: Sandbox,
+        sandbox: &Sandbox,
         parent: &SandboxInfo,
         build_id: Uuid,
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
-        let local = sandbox.pause_into(&dir, build_id).await?;
+        let local = sandbox.snapshot_into(&dir, build_id).await?;
         let metadata = match &parent.metadata {
             Some(metadata) => metadata.clone(),
             None => self.parent_metadata(&parent.config.build_id).await,
         }
-        .same_version(build_id);
+        .same_version(TemplateVersions {
+            build_id: build_id.to_string(),
+            kernel_version: parent.config.kernel_version.clone(),
+            firecracker_version: parent.config.firecracker_version.clone(),
+        });
         if let Err(e) = self.cache_snapshot(&local, metadata, dir) {
             tracing::warn!(build = %build_id, error = %e, "the paused snapshot is not cached on this node");
         }
         Ok(local)
     }
 
-    pub fn upload(&self, local: LocalSnapshot) {
+    pub fn upload(&self, local: LocalSnapshot, object_metadata: ObjectMetadata) {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
         let store = self.store.clone();
         let attempt = move || {
             let local = local.clone();
             let storage = storage.clone();
+            let object_metadata = object_metadata.clone();
             async move {
                 if !local.files.exist() {
                     return Err(Failure::Terminal("snapshot files are gone".to_owned()));
                 }
                 let metadata = metadata_path(&local);
                 let object = local.snapshot.build.paths().metadata();
-                tokio::try_join!(local.upload(&storage), storage.put_file(&object, &metadata))
-                    .map(|_| ())
-                    .map_err(Failure::Retryable)
+                tokio::try_join!(
+                    local.upload(&storage, &object_metadata),
+                    storage.put_file_with(&object, &metadata, &object_metadata)
+                )
+                .map(|_| ())
+                .map_err(Failure::Retryable)
             }
         };
         self.uploads

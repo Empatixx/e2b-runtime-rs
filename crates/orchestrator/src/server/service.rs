@@ -89,7 +89,7 @@ impl SandboxService for SandboxServer {
             .registry
             .stop(&id)
             .ok_or_else(|| Status::internal("failed to pause sandbox"))?;
-        let snapshotted = tokio::spawn(pause(handle, build_id))
+        let snapshotted = tokio::spawn(pause(handle, build_id, request.template_id))
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
@@ -133,11 +133,15 @@ impl SandboxServer {
     }
 }
 
-async fn pause(handle: SandboxHandle, build_id: Uuid) -> Result<(), String> {
+async fn pause(handle: SandboxHandle, build_id: Uuid, template_id: String) -> Result<(), String> {
     let (reply, snapshot) = tokio::sync::oneshot::channel();
     handle
         .commands
-        .send(Command::Pause { build_id, reply })
+        .send(Command::Pause {
+            build_id,
+            template_id,
+            reply,
+        })
         .await
         .map_err(|_| "the sandbox stopped".to_owned())?;
     snapshot

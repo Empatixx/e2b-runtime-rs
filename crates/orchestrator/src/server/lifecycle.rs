@@ -13,6 +13,7 @@ use crate::network::slot::Slot;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::Snapshot;
+use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
@@ -30,6 +31,7 @@ pub enum Command {
     Delete,
     Pause {
         build_id: Uuid,
+        template_id: String,
         reply: oneshot::Sender<Result<Snapshot, String>>,
     },
     Extend,
@@ -47,6 +49,7 @@ enum Ending {
     },
     Pause {
         build_id: Uuid,
+        template_id: String,
         reply: oneshot::Sender<Result<Snapshot, String>>,
     },
 }
@@ -83,29 +86,34 @@ impl Running {
         let id = self.sandbox.id().to_owned();
         let ending = self.wait_for_ending().await;
         self.node.registry.stop(&id);
-        let paused = match ending {
-            Ending::Pause { build_id, reply } => {
-                let parent = self.info.lock().clone();
-                Some((self.node.pause_locally(self.sandbox, &parent, build_id).await, reply))
-            }
-            Ending::Stop { reason } => {
-                tracing::info!(sandbox = %id, %reason, "stopping sandbox");
-                if let Err(e) = self.sandbox.stop().await {
-                    tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
-                }
-                None
-            }
-        };
-        if let Some((Ok(local), _)) = &paused {
-            self.node.upload(local.clone());
+        match ending {
+            Ending::Pause {
+                build_id,
+                template_id,
+                reply,
+            } => self.pause(build_id, template_id, reply).await,
+            Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
+        }
+        if let Err(e) = self.sandbox.stop().await {
+            tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
         }
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
         self.node.network.return_slot(self.slot);
         let lifecycle = self.info.lock().lifecycle.clone();
         self.node.registry.finish(&lifecycle);
-        if let Some((local, reply)) = paused {
-            let _ = reply.send(local.map(|local| local.snapshot));
+    }
+
+    async fn pause(&self, build_id: Uuid, template_id: String, reply: oneshot::Sender<Result<Snapshot, String>>) {
+        let parent = self.info.lock().clone();
+        let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
+        if let Ok(local) = &snapshotted {
+            let object_metadata = ObjectMetadata::default()
+                .with("template_id", template_id)
+                .with("team_id", &parent.config.team_id)
+                .with("build_origin", "pause");
+            self.node.upload(local.clone(), object_metadata);
         }
+        let _ = reply.send(snapshotted.map(|local| local.snapshot));
     }
 
     async fn wait_for_ending(&mut self) -> Ending {
@@ -114,7 +122,7 @@ impl Running {
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::Extend) => continue,
-                    Some(Command::Pause { build_id, reply }) => return Ending::Pause { build_id, reply },
+                    Some(Command::Pause { build_id, template_id, reply }) => return Ending::Pause { build_id, template_id, reply },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },
                 () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },

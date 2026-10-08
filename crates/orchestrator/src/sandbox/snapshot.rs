@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 
@@ -10,7 +11,7 @@ use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::server::MemoryServer;
 use crate::memory::snapshot::{GuestMemory, export_pages, memfile_pages};
-use crate::storage::backend::Storage;
+use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
 
@@ -96,7 +97,7 @@ impl Sandbox {
 
     pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
         let local = self.snapshot_into(&self.config.work_dir, build_id).await?;
-        let uploaded = local.upload(storage).await;
+        let uploaded = local.upload(storage, &ObjectMetadata::default()).await;
         local.files.remove();
         uploaded.map(|()| local.snapshot)
     }
@@ -258,19 +259,58 @@ async fn blocking(
 }
 
 impl LocalSnapshot {
-    pub async fn upload(&self, storage: &Storage) -> Result<(), String> {
-        upload(storage, &self.snapshot.build, &self.files).await
+    pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
+        let build = &self.snapshot.build;
+        let paths = build.paths();
+        let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());
+        let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
+        let memfile_metadata = data_metadata(metadata, &build.memfile, self.snapshot.memfile_bytes);
+        let rootfs_metadata = data_metadata(metadata, &build.rootfs, self.snapshot.rootfs_bytes);
+        tokio::try_join!(
+            storage.put_file_with(&snapfile, &self.files.snapfile, metadata),
+            body(
+                storage,
+                &memfile,
+                &self.files.memfile,
+                self.snapshot.memfile_bytes,
+                &memfile_metadata
+            ),
+            body(
+                storage,
+                &rootfs,
+                &self.files.rootfs,
+                self.snapshot.rootfs_bytes,
+                &rootfs_metadata
+            ),
+            storage.put_with(&memfile_header, Bytes::from(build.memfile.encode()), metadata),
+            storage.put_with(&rootfs_header, Bytes::from(build.rootfs.encode()), metadata),
+        )
+        .map(|_| ())
     }
 }
 
-async fn upload(storage: &Storage, build: &Build, files: &SnapshotFiles) -> Result<(), String> {
-    let paths = build.paths();
-    let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());
-    tokio::try_join!(
-        storage.put_file(&snapfile, &files.snapfile),
-        storage.put_file(&memfile, &files.memfile),
-        storage.put_file(&rootfs, &files.rootfs),
-        build.store(storage),
-    )
-    .map(|_| ())
+async fn body(
+    storage: &Storage,
+    object: &str,
+    file: &Path,
+    bytes: u64,
+    metadata: &ObjectMetadata,
+) -> Result<(), String> {
+    match bytes {
+        0 => Ok(()),
+        _ => storage.put_file_with(object, file, metadata).await,
+    }
+}
+
+fn data_metadata(base: &ObjectMetadata, header: &Header, diff_bytes: u64) -> ObjectMetadata {
+    let mapped: u64 = header
+        .mappings
+        .iter()
+        .filter(|mapping| !mapping.build_id.is_nil())
+        .map(|mapping| mapping.length)
+        .sum();
+    base.clone()
+        .with("logical-size", header.metadata.size)
+        .with("mapped-size", mapped)
+        .with("diff-size", diff_bytes)
 }

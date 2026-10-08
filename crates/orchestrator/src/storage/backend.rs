@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,11 +13,25 @@ use object_store::buffered::BufWriter;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
-use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{
+    Attribute, AttributeValue, Attributes, GetOptions, ObjectStore, ObjectStoreExt, PutOptions, PutPayload,
+};
 
 use tokio::io::AsyncWriteExt;
 
 use super::header::Header;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectMetadata {
+    pub entries: BTreeMap<String, String>,
+}
+
+impl ObjectMetadata {
+    pub fn with(mut self, key: &str, value: impl ToString) -> Self {
+        self.entries.insert(key.to_owned(), value.to_string());
+        self
+    }
+}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -48,22 +63,51 @@ impl Storage {
     }
 
     pub async fn put(&self, path: &str, data: Bytes) -> Result<(), String> {
+        self.put_with(path, data, &ObjectMetadata::default()).await
+    }
+
+    pub async fn put_with(&self, path: &str, data: Bytes, metadata: &ObjectMetadata) -> Result<(), String> {
+        let options = PutOptions {
+            attributes: self.attributes(metadata),
+            ..PutOptions::default()
+        };
         self.store
-            .put(&ObjectPath::from(path), PutPayload::from(data))
+            .put_opts(&ObjectPath::from(path), PutPayload::from(data), options)
             .await
             .map(|_| ())
             .map_err(|e| format!("put {path}: {e}"))
     }
 
     pub async fn put_file(&self, path: &str, file: &Path) -> Result<(), String> {
+        self.put_file_with(path, file, &ObjectMetadata::default()).await
+    }
+
+    pub async fn put_file_with(&self, path: &str, file: &Path, metadata: &ObjectMetadata) -> Result<(), String> {
         let mut source = tokio::fs::File::open(file)
             .await
             .map_err(|e| format!("open {}: {e}", file.display()))?;
-        let mut writer = BufWriter::new(self.store.clone(), ObjectPath::from(path));
+        let mut writer =
+            BufWriter::new(self.store.clone(), ObjectPath::from(path)).with_attributes(self.attributes(metadata));
         tokio::io::copy(&mut source, &mut writer)
             .await
             .map_err(|e| format!("put {path}: {e}"))?;
         writer.shutdown().await.map_err(|e| format!("put {path}: {e}"))
+    }
+
+    fn attributes(&self, metadata: &ObjectMetadata) -> Attributes {
+        match self.signer {
+            Some(_) => metadata
+                .entries
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Attribute::Metadata(key.clone().into()),
+                        AttributeValue::from(value.clone()),
+                    )
+                })
+                .collect(),
+            None => Attributes::default(),
+        }
     }
 
     pub async fn get(&self, path: &str) -> Result<Bytes, String> {

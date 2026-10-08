@@ -489,7 +489,6 @@ async fn sandbox_lifecycle_over_grpc() {
         paths.snapfile(),
         paths.memfile(),
         paths.memfile_header(),
-        paths.rootfs(),
         paths.rootfs_header(),
         paths.metadata(),
     ] {

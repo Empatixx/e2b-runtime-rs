@@ -137,6 +137,7 @@ mod tests {
     use crate::storage::header::{Header, Metadata};
     use crate::storage::paths::BuildPaths;
     use crate::template::TemplateError;
+    use crate::template::metadata::TemplateVersions;
 
     struct Fixture {
         cache: TemplateCache,
@@ -253,7 +254,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("snapfile"), b"local").unwrap();
 
-        let metadata = TemplateMetadata::v1().same_version(build_id);
+        let metadata = TemplateMetadata::v1().same_version(TemplateVersions {
+            build_id: build_id.to_string(),
+            ..TemplateVersions::default()
+        });
         fixture
             .cache
             .add_snapshot(build.clone(), dir.join("snapfile"), metadata.clone(), dir.clone());
