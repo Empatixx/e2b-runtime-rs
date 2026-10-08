@@ -13,6 +13,7 @@ use orchestrator::storage::header::{Header, Metadata};
 use uuid::Uuid;
 
 const SIZE: u64 = 64 << 20;
+const ZERO_SIZE: u64 = 8 << 20;
 
 fn ready() -> bool {
     nix::unistd::geteuid().is_root() && Path::new("/dev/nbd0").exists()
@@ -92,10 +93,13 @@ async fn zero_overlay(dir: &Path, name: &str) -> Arc<Overlay> {
     let storage = Storage::local(&dir.join("store")).unwrap();
     let template_id = Uuid::new_v4();
     storage
-        .put(&Artifact::Rootfs.object(template_id), Bytes::from(vec![0; 8 << 20]))
+        .put(
+            &Artifact::Rootfs.object(template_id),
+            Bytes::from(vec![0; ZERO_SIZE as usize]),
+        )
         .await
         .unwrap();
-    let template = Header::new(Metadata::template(template_id, 4096, 8 << 20), Vec::new()).unwrap();
+    let template = Header::new(Metadata::template(template_id, 4096, ZERO_SIZE), Vec::new()).unwrap();
     let store = Arc::new(DiffStore::new(storage, dir.join(format!("cache-{name}"))));
     overlay_over(template, store, &dir.join(format!("overlay-{name}"))).await
 }
@@ -183,7 +187,7 @@ async fn parallel_writers_and_readers_see_their_own_data() {
     let dir = tempfile::tempdir().unwrap();
     let exposure = expose(zero_overlay(dir.path(), "parallel").await).await.unwrap();
     let device = exposure.path();
-    let part = SIZE / 8;
+    let part = ZERO_SIZE / 8;
 
     let workers: Vec<_> = (0..8u64)
         .map(|worker| {
