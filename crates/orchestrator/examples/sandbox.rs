@@ -14,7 +14,7 @@ mod linux {
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
     use orchestrator::block::overlay::Overlay;
@@ -28,11 +28,17 @@ mod linux {
     use orchestrator::tcpfirewall::proxy::{FirewallSandbox, TcpFirewall};
     use orchestrator::template::cache::TemplateCache;
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{Signal, SignalKind, signal};
     use uuid::Uuid;
 
     const COLD_SLOT: u32 = 4020;
     const RESUMED_SLOT: u32 = 4021;
+    const TEARDOWN_POLL: Duration = Duration::from_millis(100);
+    const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    struct Shutdown {
+        terminate: Signal,
+    }
 
     struct Assets {
         firecracker: PathBuf,
@@ -62,6 +68,7 @@ mod linux {
     }
 
     pub async fn run() -> Result<(), String> {
+        let mut shutdown = Shutdown::install()?;
         let assets = assets()?;
         let template = Template::upload(&assets.rootfs).await?;
         let settings = NetworkSettings::current();
@@ -79,17 +86,35 @@ mod linux {
         let listener = TcpListener::bind(("127.0.0.1", ENVD_PORT))
             .await
             .map_err(|e| format!("bind 127.0.0.1:{ENVD_PORT}: {e}"))?;
-        let resume = std::env::var("E2B_RESUME").is_ok_and(|value| value == "1");
-        let sandbox = match resume {
-            true => resumed(&assets, &template).await?,
-            false => cold(&assets, &template).await?,
+        let booted = tokio::select! {
+            sandbox = boot(&assets, &template) => Some(sandbox?),
+            () = shutdown.requested() => None,
+        };
+        let Some(sandbox) = booted else {
+            return wait_for_teardown().await;
         };
         println!("ready {}", sandbox.envd_address());
 
         let forwarding = tokio::spawn(forward(listener, sandbox.envd_address()));
-        shutdown_requested().await?;
+        shutdown.requested().await;
         forwarding.abort();
         sandbox.stop().await
+    }
+
+    async fn boot(assets: &Assets, template: &Template) -> Result<Sandbox, String> {
+        match std::env::var("E2B_RESUME").is_ok_and(|value| value == "1") {
+            true => resumed(assets, template).await,
+            false => cold(assets, template).await,
+        }
+    }
+
+    async fn wait_for_teardown() -> Result<(), String> {
+        let slots = [COLD_SLOT, RESUMED_SLOT].map(Slot::new);
+        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+        while Instant::now() < deadline && slots.iter().flatten().any(Slot::namespace_exists) {
+            tokio::time::sleep(TEARDOWN_POLL).await;
+        }
+        Ok(())
     }
 
     async fn cold(assets: &Assets, template: &Template) -> Result<Sandbox, String> {
@@ -182,11 +207,18 @@ mod linux {
         }
     }
 
-    async fn shutdown_requested() -> Result<(), String> {
-        let mut terminate = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => Ok(()),
-            _ = terminate.recv() => Ok(()),
+    impl Shutdown {
+        fn install() -> Result<Self, String> {
+            signal(SignalKind::terminate())
+                .map(|terminate| Self { terminate })
+                .map_err(|e| e.to_string())
+        }
+
+        async fn requested(&mut self) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = self.terminate.recv() => {}
+            }
         }
     }
 }

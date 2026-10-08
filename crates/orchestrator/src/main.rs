@@ -27,6 +27,7 @@ mod serve {
 
     pub async fn run() -> Result<(), String> {
         tracing_subscriber::fmt().init();
+        orchestrator::network::prerequisites::require_ip_forwarding()?;
         let config = NodeConfig::from_env()?;
         let node = Arc::new(Node::new(&config)?);
         let mut event_sinks: Vec<Arc<dyn EventSink>> = Vec::new();

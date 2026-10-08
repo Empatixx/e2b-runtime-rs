@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -58,6 +58,23 @@ fn alpine_ext4(alpine: &Path, dir: &Path) -> Vec<u8> {
     std::fs::read(image).unwrap()
 }
 
+struct HostCleanup {
+    slot: u32,
+    cgroup: String,
+}
+
+impl Drop for HostCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("ip")
+            .args(["netns", "delete", &format!("ns-{}", self.slot)])
+            .status();
+        let _ = Command::new("ip")
+            .args(["link", "delete", &format!("veth-{}", self.slot)])
+            .status();
+        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/e2b/{}", self.cgroup));
+    }
+}
+
 async fn pings(address: &str, within: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < deadline {
@@ -96,22 +113,34 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
 
     let slot = Slot::new(4002).unwrap();
     let _ = slot.destroy().await;
+    let _cleanup = HostCleanup {
+        slot: slot.index,
+        cgroup: "vm-contract".to_owned(),
+    };
     slot.create().await.unwrap();
     let cgroup = Cgroup::create("vm-contract").unwrap();
 
     let socket = dir.path().join("fc.sock");
-    let console = dir.path().join("console.log");
     let launch = Launch::builder()
         .binary(&assets.firecracker)
         .socket(&socket)
         .namespace(&slot.namespace())
-        .console(&console)
         .rootfs(disk.path())
         .kernel(&assets.kernel)
         .build()
         .unwrap();
     let vm = FirecrackerProcess::spawn(&launch).await.unwrap();
     cgroup.add(vm.pid().unwrap()).unwrap();
+    let console = Arc::new(Mutex::new(String::new()));
+    let mut lines = vm.console_lines();
+    let collected = console.clone();
+    tokio::spawn(async move {
+        while let Some(line) = lines.recv().await {
+            let mut text = collected.lock().unwrap();
+            text.push_str(&line);
+            text.push('\n');
+        }
+    });
     let config = VmConfig::builder()
         .kernel(GUEST_KERNEL)
         .rootfs(GUEST_ROOTFS)
@@ -134,7 +163,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     vm.client().boot(&config, Some(&metadata)).await.unwrap();
 
     let reachable = pings(&slot.host_ip().to_string(), Duration::from_secs(30)).await;
-    let console_log = std::fs::read_to_string(&console).unwrap_or_default();
+    let console_log = console.lock().unwrap().clone();
 
     vm.kill().await.unwrap();
     disk.close().await.unwrap();
@@ -142,5 +171,5 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     slot.destroy().await.unwrap();
 
     assert!(reachable, "guest did not answer ping; console:\n{console_log}");
-    assert!(console_log.contains("Running Firecracker"), "{console_log}");
+    assert!(console_log.contains("Linux version"), "{console_log}");
 }

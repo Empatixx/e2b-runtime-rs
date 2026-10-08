@@ -17,13 +17,11 @@ use super::launch::Launch;
 
 const READY_POLLS: u32 = 500;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const CONSOLE_TAIL: usize = 2000;
 const CONSOLE_DRAIN: Duration = Duration::from_secs(1);
 
 pub struct FirecrackerProcess {
     child: Child,
     socket: PathBuf,
-    console: PathBuf,
     console_tap: ConsoleTap,
     drained: Option<JoinHandle<()>>,
 }
@@ -31,8 +29,6 @@ pub struct FirecrackerProcess {
 impl FirecrackerProcess {
     pub async fn spawn(launch: &Launch) -> Result<Self, String> {
         remove_stale_socket(&launch.socket)?;
-        let console = &launch.console;
-        let console_file = File::create(console).map_err(|e| format!("create console {}: {e}", console.display()))?;
         let mut command = Command::new("setsid");
         command
             .args(["unshare", "-m", "--", "sh", "-c"])
@@ -52,13 +48,12 @@ impl FirecrackerProcess {
         drop(cgroup_procs);
         let console_tap = ConsoleTap::open();
         let drained = match (child.stdout.take(), child.stderr.take()) {
-            (Some(stdout), Some(stderr)) => Some(console_tap.pump(stdout, stderr, console_file)),
+            (Some(stdout), Some(stderr)) => Some(console_tap.pump(stdout, stderr)),
             _ => None,
         };
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
-            console: console.clone(),
             console_tap,
             drained,
         };
@@ -88,10 +83,15 @@ impl FirecrackerProcess {
     }
 
     pub async fn kill(mut self) -> Result<(), String> {
-        match self.child.try_wait() {
+        let killed = match self.child.try_wait() {
             Ok(Some(_)) => Ok(()),
             _ => self.child.kill().await.map_err(|e| format!("kill firecracker: {e}")),
+        };
+        if let Err(e) = &killed {
+            tracing::error!(error = %e, "firecracker may still be running and holding the rootfs device");
         }
+        let _ = std::fs::remove_file(&self.socket);
+        killed
     }
 
     async fn wait_until_ready(&mut self) -> Result<(), String> {
@@ -123,9 +123,7 @@ impl FirecrackerProcess {
     }
 
     pub fn console_tail(&self) -> String {
-        let console = std::fs::read_to_string(&self.console).unwrap_or_default();
-        let start = console.len().saturating_sub(CONSOLE_TAIL);
-        console.get(start..).unwrap_or_default().trim().to_owned()
+        self.console_tap.tail()
     }
 }
 

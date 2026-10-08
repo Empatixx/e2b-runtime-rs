@@ -252,7 +252,6 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
         .binary("/bin/false")
         .socket(&socket)
         .namespace(&slot.namespace())
-        .console(dir.path().join("console.log"))
         .rootfs("/dev/null")
         .kernel("/dev/null")
         .build()

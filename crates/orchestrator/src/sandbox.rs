@@ -187,7 +187,6 @@ impl Sandbox {
             .binary(&self.config.firecracker)
             .socket(self.config.work_dir.join("firecracker.sock"))
             .namespace(&self.config.slot.namespace())
-            .console(self.config.work_dir.join("console.log"))
             .rootfs(rootfs)
             .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
             .cgroup(cgroup)

@@ -14,7 +14,7 @@ use super::storage::SlotStorage;
 #[cfg(target_os = "linux")]
 use crate::system::{all_ok, output, run, run_with_input};
 
-pub const MAX_SLOT: u32 = 16383;
+pub const MAX_SLOT: u32 = 32766;
 pub const TAP_NAME: &str = "tap0";
 pub const TAP_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 22);
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 21);
@@ -255,7 +255,6 @@ impl Slot {
     async fn host_route_and_rules(&self) -> Result<(), String> {
         let host_ip = self.host_ip().to_string();
         let peer_veth_ip = self.peer_veth_ip().to_string();
-        run("sysctl", &["-qw", "net.ipv4.ip_forward=1"]).await?;
         run(
             "ip",
             &["route", "add", &host_ip, "via", &peer_veth_ip, "dev", &self.host_veth()],
@@ -397,13 +396,13 @@ mod tests {
         assert_eq!(slot.host_ip(), Ipv4Addr::new(10, 11, 1, 44));
 
         let last = Slot::new(MAX_SLOT).unwrap();
-        assert_eq!(last.peer_veth_ip(), Ipv4Addr::new(10, 12, 127, 255));
+        assert_eq!(last.peer_veth_ip(), Ipv4Addr::new(10, 12, 255, 253));
         assert!(last.host_veth().len() <= 15);
     }
 
     #[test]
     fn rejects_out_of_range_indices() {
-        assert_eq!(Slot::new(0).unwrap_err(), "slot index 0 is outside 1..=16383");
-        assert_eq!(Slot::new(16384).unwrap_err(), "slot index 16384 is outside 1..=16383");
+        assert_eq!(Slot::new(0).unwrap_err(), "slot index 0 is outside 1..=32766");
+        assert_eq!(Slot::new(32767).unwrap_err(), "slot index 32767 is outside 1..=32766");
     }
 }

@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Write;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -8,10 +6,18 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 const FLUSH_METRICS: &str = "FlushMetrics";
 const REQUEST_SUCCEEDED: &str = "The request was executed successfully";
+const TAIL_BYTES: usize = 2000;
 
 #[derive(Clone, Default)]
 pub struct ConsoleTap {
     subscribers: Arc<Mutex<Option<Vec<UnboundedSender<String>>>>>,
+    tail: Arc<Mutex<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    Stdout,
+    Stderr,
 }
 
 #[derive(Debug, Default)]
@@ -23,7 +29,21 @@ impl ConsoleTap {
     pub fn open() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Some(Vec::new()))),
+            tail: Arc::default(),
         }
+    }
+
+    pub fn tail(&self) -> String {
+        self.tail.lock().trim().to_owned()
+    }
+
+    fn remember(&self, line: &str) {
+        let mut tail = self.tail.lock();
+        tail.push_str(line);
+        tail.push('\n');
+        let excess = tail.len().saturating_sub(TAIL_BYTES);
+        let cut = (excess..=tail.len()).find(|at| tail.is_char_boundary(*at)).unwrap_or(0);
+        tail.drain(..cut);
     }
 
     pub fn subscribe(&self) -> UnboundedReceiver<String> {
@@ -48,17 +68,15 @@ impl ConsoleTap {
         &self,
         stdout: impl AsyncRead + Unpin + Send + 'static,
         stderr: impl AsyncRead + Unpin + Send + 'static,
-        console: File,
     ) -> tokio::task::JoinHandle<()> {
-        let console = Arc::new(Mutex::new(console));
         let tap = self.clone();
         let out = tokio::spawn(copy_lines(
             stdout,
             tap.clone(),
-            console.clone(),
+            Stream::Stdout,
             Some(MetricsFilter::default()),
         ));
-        let err = tokio::spawn(copy_lines(stderr, tap.clone(), console, None));
+        let err = tokio::spawn(copy_lines(stderr, tap.clone(), Stream::Stderr, None));
         tokio::spawn(async move {
             let _ = tokio::join!(out, err);
             tap.close();
@@ -83,7 +101,7 @@ impl MetricsFilter {
 async fn copy_lines(
     stream: impl AsyncRead + Unpin,
     tap: ConsoleTap,
-    console: Arc<Mutex<File>>,
+    source: Stream,
     mut filter: Option<MetricsFilter>,
 ) {
     let mut reader = BufReader::new(stream);
@@ -94,8 +112,17 @@ async fn copy_lines(
         if filter.as_mut().is_some_and(|filter| !filter.keeps(&line)) {
             continue;
         }
-        let _ = console.lock().write_all(line.as_bytes());
-        tap.publish(line.strip_suffix('\n').unwrap_or(&line));
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        log_line(source, line);
+        tap.remember(line);
+        tap.publish(line);
+    }
+}
+
+fn log_line(source: Stream, line: &str) {
+    match source {
+        Stream::Stdout => tracing::info!(target: "firecracker", "{line}"),
+        Stream::Stderr => tracing::error!(target: "firecracker", "{line}"),
     }
 }
 
@@ -122,12 +149,10 @@ mod tests {
 
     #[tokio::test]
     async fn subscribers_get_lines_until_the_streams_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let console = File::create(dir.path().join("console.log")).unwrap();
         let tap = ConsoleTap::open();
         let mut lines = tap.subscribe();
 
-        let _drained = tap.pump(&b"one\r\ntwo\n"[..], &b"err\n"[..], console);
+        let _drained = tap.pump(&b"one\r\ntwo\n"[..], &b"err\n"[..]);
 
         let mut received = Vec::new();
         while let Some(line) = lines.recv().await {
@@ -135,7 +160,19 @@ mod tests {
         }
         received.sort();
         assert_eq!(received, vec!["err", "one\r", "two"]);
-        let written = std::fs::read_to_string(dir.path().join("console.log")).unwrap();
-        assert!(written.contains("one\r\n") && written.contains("err\n"));
+        let tail = tap.tail();
+        assert!(tail.contains("one\r\n") && tail.contains("err"));
+    }
+
+    #[test]
+    fn the_tail_keeps_only_the_last_bytes() {
+        let tap = ConsoleTap::open();
+        (0..1000).for_each(|n| tap.remember(&format!("line {n}")));
+
+        let tail = tap.tail();
+
+        assert!(tail.len() <= TAIL_BYTES);
+        assert!(tail.ends_with("line 999"));
+        assert!(!tail.contains("line 0\n"));
     }
 }

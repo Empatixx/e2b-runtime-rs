@@ -10,7 +10,6 @@ pub struct Launch {
     pub binary: PathBuf,
     pub socket: PathBuf,
     pub namespace: String,
-    pub console: PathBuf,
     pub rootfs: PathBuf,
     pub kernel: PathBuf,
     pub cgroup: Option<PathBuf>,
@@ -21,7 +20,6 @@ pub struct LaunchBuilder {
     binary: Option<PathBuf>,
     socket: Option<PathBuf>,
     namespace: Option<String>,
-    console: Option<PathBuf>,
     rootfs: Option<PathBuf>,
     kernel: Option<PathBuf>,
     cgroup: Option<PathBuf>,
@@ -67,11 +65,6 @@ impl LaunchBuilder {
         self
     }
 
-    pub fn console(mut self, console: impl Into<PathBuf>) -> Self {
-        self.console = Some(console.into());
-        self
-    }
-
     pub fn rootfs(mut self, rootfs: impl Into<PathBuf>) -> Self {
         self.rootfs = Some(rootfs.into());
         self
@@ -92,7 +85,6 @@ impl LaunchBuilder {
             binary: self.binary.ok_or("firecracker binary is required")?,
             socket: self.socket.ok_or("api socket is required")?,
             namespace: self.namespace.ok_or("network namespace is required")?,
-            console: self.console.ok_or("console path is required")?,
             rootfs: self.rootfs.ok_or("rootfs is required")?,
             kernel: self.kernel.ok_or("kernel is required")?,
             cgroup: self.cgroup,
@@ -118,7 +110,6 @@ mod tests {
             .binary("/opt/e2b/firecracker")
             .socket("/run/sbx/fc.sock")
             .namespace("ns-7")
-            .console("/run/sbx/console.log")
             .rootfs("/dev/nbd3")
             .kernel("/opt/e2b/vmlinux")
             .build()
