@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
+use orchestrator::builder::config::BuilderConfig;
 use orchestrator::envd::{ENVD_PORT, EnvdInit};
 use orchestrator::network::slot::Slot;
 use orchestrator::proto::info_service_client::InfoServiceClient;
@@ -144,6 +145,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
             &dir.path().join("build-cache").display().to_string(),
         )),
         local_upload_base_url: String::new(),
+        builder: BuilderConfig::from_vars(&Default::default()),
         work_dir: dir.path().join("sandboxes"),
         cache_dir: dir.path().join("cache"),
         template_cache_dir: dir.path().join("templates"),

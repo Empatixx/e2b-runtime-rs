@@ -7,6 +7,7 @@ mod storage;
 
 use super::services::Services;
 use super::upload::UploadHandler;
+use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
 use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
@@ -40,6 +41,7 @@ pub struct NodeConfig {
     pub template_storage: StorageSpec,
     pub build_cache_storage: Option<StorageSpec>,
     pub local_upload_base_url: String,
+    pub builder: BuilderConfig,
     pub work_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub template_cache_dir: PathBuf,
@@ -102,6 +104,7 @@ impl NodeConfig {
             template_storage,
             build_cache_storage,
             local_upload_base_url: var("LOCAL_UPLOAD_BASE_URL").unwrap_or_default(),
+            builder: BuilderConfig::from_vars(vars),
             work_dir: var("E2B_WORK_DIR")
                 .unwrap_or_else(|| "/var/lib/e2b/sandboxes".to_owned())
                 .into(),

@@ -1,7 +1,9 @@
 pub mod builds;
+pub mod config;
 pub mod hash;
 pub mod index;
 pub mod logs;
 pub mod phase;
 pub mod pipeline;
 pub mod service;
+pub mod template_files;

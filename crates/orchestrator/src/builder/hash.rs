@@ -13,8 +13,24 @@ pub fn hash_keys<'a>(base: &str, keys: impl IntoIterator<Item = &'a str>) -> Str
     format!("{digest:x}")
 }
 
-pub fn base_hash(provision_version: &str, disk_size_mb: i32, source: &str) -> String {
-    hash_keys(INDEX_VERSION, [provision_version, &disk_size_mb.to_string(), source])
+const ENVD_MEMORY_PROTECTION_KEY: &str = "envd-memory-protection:128:256";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseKey<'a> {
+    pub provision_version: &'a str,
+    pub disk_size_mb: i64,
+    pub source: &'a str,
+    pub envd_memory_protection: bool,
+}
+
+impl BaseKey<'_> {
+    pub fn hash(&self) -> String {
+        let disk_size_mb = self.disk_size_mb.to_string();
+        let keys = [self.provision_version, &disk_size_mb, self.source]
+            .into_iter()
+            .chain(self.envd_memory_protection.then_some(ENVD_MEMORY_PROTECTION_KEY));
+        hash_keys(INDEX_VERSION, keys)
+    }
 }
 
 pub fn user_hash(previous: &str) -> String {
@@ -53,7 +69,21 @@ mod tests {
 
     #[test]
     fn phase_hashes_use_upstream_keys() {
-        assert_eq!(base_hash("7", 1024, "debian:12"), sha("v2;7;1024;debian:12"));
+        let key = BaseKey {
+            provision_version: "7",
+            disk_size_mb: 1024,
+            source: "debian:12",
+            envd_memory_protection: false,
+        };
+        assert_eq!(key.hash(), sha("v2;7;1024;debian:12"));
+        assert_eq!(
+            BaseKey {
+                envd_memory_protection: true,
+                ..key
+            }
+            .hash(),
+            sha("v2;7;1024;debian:12;envd-memory-protection:128:256")
+        );
         assert_eq!(user_hash("p"), sha("p;DEFAULT USER;user"));
         assert_eq!(
             step_hash("p", "RUN", &["echo".to_owned(), "hi".to_owned()], None),

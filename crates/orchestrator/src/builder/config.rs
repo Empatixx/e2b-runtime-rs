@@ -1,0 +1,145 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+const DEFAULT_BUSYBOX_VERSION: &str = "1.36.1";
+const DEFAULT_BUSYBOX_DIR: &str = "/fc-busybox";
+const DEFAULT_ENVD_PATH: &str = "/fc-envd/envd";
+const DEFAULT_BASE_PATH: &str = "/orchestrator";
+const DEFAULT_TEMPLATES_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/build-templates";
+const DEFAULT_PROVIDER: &str = "gcp";
+const DEFAULT_DOCKERHUB_PROVIDER: &str = "GCP_REMOTE_REPOSITORY";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderConfig {
+    pub busybox: PathBuf,
+    pub envd: PathBuf,
+    pub templates_dir: PathBuf,
+    pub provider: String,
+    pub target_arch: String,
+    pub dockerhub_provider: String,
+    pub dockerhub_url: String,
+}
+
+impl BuilderConfig {
+    pub fn from_vars(vars: &HashMap<String, String>) -> Self {
+        let var = |name: &str, default: &str| {
+            vars.get(name)
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| default.to_owned(), Clone::clone)
+        };
+        let with_base = |name: &str, default: &str| {
+            let base = var("ORCHESTRATOR_BASE_PATH", DEFAULT_BASE_PATH);
+            expand(&var(name, default), &|key| match key {
+                "ORCHESTRATOR_BASE_PATH" => base.clone(),
+                key => vars.get(key).cloned().unwrap_or_default(),
+            })
+        };
+        Self {
+            busybox: [
+                var("HOST_BUSYBOX_DIR", DEFAULT_BUSYBOX_DIR),
+                var("BUSYBOX_VERSION", DEFAULT_BUSYBOX_VERSION),
+                host_arch().to_owned(),
+                "busybox".to_owned(),
+            ]
+            .iter()
+            .collect(),
+            envd: var("HOST_ENVD_PATH", DEFAULT_ENVD_PATH).into(),
+            templates_dir: with_base("TEMPLATES_DIR", DEFAULT_TEMPLATES_DIR).into(),
+            provider: var("PROVIDER", DEFAULT_PROVIDER),
+            target_arch: target_arch(vars.get("TARGET_ARCH").map(String::as_str)),
+            dockerhub_provider: var("DOCKERHUB_REMOTE_REPOSITORY_PROVIDER", DEFAULT_DOCKERHUB_PROVIDER),
+            dockerhub_url: var("DOCKERHUB_REMOTE_REPOSITORY_URL", ""),
+        }
+    }
+}
+
+pub fn host_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+fn target_arch(value: Option<&str>) -> String {
+    match value.filter(|value| !value.is_empty()) {
+        None => host_arch().to_owned(),
+        Some("amd64" | "x86_64") => "amd64".to_owned(),
+        Some("arm64" | "aarch64") => "arm64".to_owned(),
+        Some(other) => {
+            eprintln!(
+                "WARNING: unrecognized TARGET_ARCH={}, falling back to {}",
+                crate::go_strconv::quote(other),
+                host_arch()
+            );
+            host_arch().to_owned()
+        }
+    }
+}
+
+fn expand(text: &str, lookup: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        let (name, consumed) = match after.strip_prefix('{') {
+            Some(braced) => braced.find('}').map_or(("", 0), |end| (&braced[..end], end + 2)),
+            None => {
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                (&after[..end], end)
+            }
+        };
+        match consumed {
+            0 => out.push('$'),
+            _ => out.push_str(&lookup(name)),
+        }
+        rest = &after[consumed..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(pairs: &[(&str, &str)]) -> BuilderConfig {
+        BuilderConfig::from_vars(
+            &pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn defaults_follow_upstream() {
+        let config = config(&[]);
+
+        assert_eq!(
+            config.busybox,
+            PathBuf::from(format!("/fc-busybox/1.36.1/{}/busybox", host_arch()))
+        );
+        assert_eq!(config.envd, PathBuf::from("/fc-envd/envd"));
+        assert_eq!(config.templates_dir, PathBuf::from("/orchestrator/build-templates"));
+        assert_eq!(config.provider, "gcp");
+        assert_eq!(config.dockerhub_provider, "GCP_REMOTE_REPOSITORY");
+        assert_eq!(config.target_arch, host_arch());
+    }
+
+    #[test]
+    fn templates_dir_expands_the_base_path_and_arch_is_normalised() {
+        let config = config(&[
+            ("ORCHESTRATOR_BASE_PATH", "/a/b"),
+            ("TEMPLATES_DIR", "$ORCHESTRATOR_BASE_PATH/t/${HOME_UNSET}x"),
+            ("TARGET_ARCH", "aarch64"),
+        ]);
+
+        assert_eq!(config.templates_dir, PathBuf::from("/a/b/t/x"));
+        assert_eq!(config.target_arch, "arm64");
+        assert_eq!(target_arch(Some("x86_64")), "amd64");
+    }
+}

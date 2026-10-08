@@ -94,6 +94,15 @@ The port keeps upstream's business logic exactly where a client or the API can o
 
 ## OCI → ext4 and provisioning (M14)
 
+**Corrections from upstream (Go wins; details in `docs/superpowers/research/2026-10-19-m14-upstream-digest.md`):**
+- ToExt4 is mkfs → mount → extract → umount → `e2fsck -pfv` → `resize2fs -M` → `e2fsck -pfv`; then `tune2fs -O ^read-only`, free space, enlarge, `e2fsck -pfv`.
+- The base `e2fsck` + grow to `diskSizeMB` runs after the provisioning boot.
+- The 5 min provisioning timeout is not enforced; the wait ends on the marker, EOF or cancellation.
+- Busybox is `HOST_BUSYBOX_DIR/BUSYBOX_VERSION/<arch>/busybox`, envd is `HOST_ENVD_PATH`.
+- 21 injected files plus the symlink (22 with envd memory protection).
+- The base systemd boot runs `tune2fs -r 65536` first.
+- Provisioning boots with `init=usr/bin/init`.
+
 **Pull** with the `oci-client` crate, as upstream `oci.go`:
 - platform `linux/<arch>`, and the image config architecture is checked;
 - Docker Hub images without auth go through the Docker Hub proxy remote repository when one is configured;

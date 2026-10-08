@@ -172,3 +172,4 @@ Every final review ends with minors and deferred rulings. They are collected her
 | GCS takes credentials from object_store's env (`GOOGLE_SERVICE_ACCOUNT*`, `GOOGLE_APPLICATION_CREDENTIALS`); `GOOGLE_SERVICE_ACCOUNT_BASE64` signs uploads and also authenticates the client, upstream uses ADC for the client | template build |
 | Azure connection strings are split into `AccountName`/`AccountKey`/`BlobEndpoint`; SAS signing is object_store's, not upstream's user-delegation fallback with its error texts | template build |
 | `delete_prefix` with an empty prefix lists the whole bucket; upstream S3/Azure refuse with "refusing to delete objects with an empty prefix" | template build |
+| Base hash `cmdline:` and `cpu-template:` keys are not added; upstream takes them from feature flags that default to empty | template build |
