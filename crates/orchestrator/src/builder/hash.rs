@@ -13,7 +13,9 @@ pub fn hash_keys<'a>(base: &str, keys: impl IntoIterator<Item = &'a str>) -> Str
     format!("{digest:x}")
 }
 
-const ENVD_MEMORY_PROTECTION_KEY: &str = "envd-memory-protection:128:256";
+const ENVD_MEMORY_PROTECTION_KEY: &str = "envd-memory-protection";
+pub const ENVD_MEMORY_MIN_MIB: i64 = 128;
+pub const ENVD_MEMORY_LOW_MIB: i64 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseKey<'a> {
@@ -26,9 +28,10 @@ pub struct BaseKey<'a> {
 impl BaseKey<'_> {
     pub fn hash(&self) -> String {
         let disk_size_mb = self.disk_size_mb.to_string();
+        let protection = format!("{ENVD_MEMORY_PROTECTION_KEY}:{ENVD_MEMORY_MIN_MIB}:{ENVD_MEMORY_LOW_MIB}");
         let keys = [self.provision_version, &disk_size_mb, self.source]
             .into_iter()
-            .chain(self.envd_memory_protection.then_some(ENVD_MEMORY_PROTECTION_KEY));
+            .chain(self.envd_memory_protection.then_some(protection.as_str()));
         hash_keys(INDEX_VERSION, keys)
     }
 }

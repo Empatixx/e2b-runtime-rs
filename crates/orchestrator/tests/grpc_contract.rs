@@ -115,6 +115,7 @@ async fn template_build(host: &Host, dir: &Path, storage: &Storage, slot: u32) -
             default_workdir: Some("/home/user".to_owned()),
             ..EnvdInit::default()
         })
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();
@@ -156,6 +157,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         max_sandboxes,
         max_starting: 3,
         local: true,
+        development: true,
         force_stop: false,
         build_cache_max_usage: 90.0,
         prefetch_from_trace: true,

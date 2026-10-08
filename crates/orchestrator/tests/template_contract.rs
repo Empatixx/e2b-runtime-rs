@@ -77,6 +77,7 @@ fn node_config(host: &Host, dir: &Path) -> NodeConfig {
         max_sandboxes: 10,
         max_starting: 3,
         local: true,
+        development: true,
         force_stop: false,
         build_cache_max_usage: 95.0,
         prefetch_from_trace: true,

@@ -5,6 +5,7 @@ pub mod render;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::builder::hash::{ENVD_MEMORY_LOW_MIB, ENVD_MEMORY_MIN_MIB};
 use crate::go_os::path_error;
 
 use render::{Value, Values, render};
@@ -17,8 +18,6 @@ pub const BUSYBOX_INIT_PATH: &str = "usr/bin/init";
 pub const GUEST_ENVD_PATH: &str = "/usr/bin/envd";
 const HOSTNAME: &str = "e2b.local";
 const NAMESERVER: &str = "8.8.8.8";
-const ENVD_MEMORY_MIN_MIB: i64 = 128;
-const ENVD_MEMORY_LOW_MIB: i64 = 256;
 const MEMORY_LIMIT_CAP_MB: i64 = 512;
 const PRESET_PATH: &str = "etc/systemd/system-preset/00-e2b.preset";
 const PRESET: &str = "enable envd.service\n";

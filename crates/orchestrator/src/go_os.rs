@@ -11,12 +11,20 @@ pub fn parent(path: &Path) -> PathBuf {
 
 pub fn reason(err: &io::Error) -> String {
     err.raw_os_error()
-        .map(|code| nix::errno::Errno::from_raw(code).desc())
+        .map(|code| go_errno_text(code).unwrap_or_else(|| nix::errno::Errno::from_raw(code).desc()))
         .map(|desc| {
             let first = desc.chars().take(1).flat_map(char::to_lowercase);
             first.chain(desc.chars().skip(1)).collect()
         })
         .unwrap_or_else(|| err.to_string())
+}
+
+fn go_errno_text(code: i32) -> Option<&'static str> {
+    match code {
+        nix::libc::EOPNOTSUPP => Some("operation not supported"),
+        nix::libc::EXDEV => Some("invalid cross-device link"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

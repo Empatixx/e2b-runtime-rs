@@ -97,6 +97,7 @@ mod linux {
             .sandbox(assets, "sbx-cold", COLD_SLOT)
             .await?
             .rootfs(template.overlay(template.header.clone(), "cold")?)
+            .kernel_logs(true)
             .cold_boot()
             .await
     }

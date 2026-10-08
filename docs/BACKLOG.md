@@ -179,3 +179,5 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Kernel and Firecracker binaries come from `E2B_KERNEL`/`E2B_FIRECRACKER`, not from `HOST_KERNELS_DIR/<version>` and `FIRECRACKER_VERSIONS_DIR/<version>` as upstream; the recorded versions are only labels | template build |
 | The base layer is uploaded before the phase returns; upstream uploads in the background and waits for all uploads at the end of the build | template build |
 
+| Feature flags read through LaunchDarkly upstream are fixed at their defaults: `build-provision-version` (0), `build-envd-memory-protection` (false), `build-reserved-disk-space-mb` (256), `build-base-rootfs-size-limit-mb` (25000), `build-kernel-version`/`build-firecracker-version` (env defaults) | template build |
+| The injected files and symlink layers are gzipped with flate2, so their logged `sha256:` digests differ from Go's compress/gzip output for the same tar | template build |

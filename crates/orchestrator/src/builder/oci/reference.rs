@@ -32,9 +32,9 @@ impl ImageReference {
     }
 
     pub fn repository_str(&self) -> String {
-        match !self.repository.contains('/') && self.registry == DEFAULT_REGISTRY {
-            true => format!("{DEFAULT_NAMESPACE}/{}", self.repository),
-            false => self.repository.clone(),
+        match self.repository.contains('/') || self.registry != DEFAULT_REGISTRY {
+            true => self.repository.clone(),
+            false => format!("{DEFAULT_NAMESPACE}/{}", self.repository),
         }
     }
 

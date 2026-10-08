@@ -101,14 +101,14 @@ pub async fn run_command(
         .send()
         .await
         .map_err(|e| format!("error starting process: unavailable: {e}"))?;
-    if !response.status().is_success() {
+    if response.status() != reqwest::StatusCode::OK {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        let error = serde_json::from_str::<ConnectError>(&body).unwrap_or(ConnectError {
-            code: status.as_u16().to_string(),
-            message: body,
-        });
-        return Err(format!("error starting process: {}", error.text()));
+        return Err(format!(
+            "command failed: {}: HTTP status {} {}",
+            http_to_code(status.as_u16()),
+            status.as_u16(),
+            status.canonical_reason().unwrap_or_default()
+        ));
     }
     let mut stream = response.bytes_stream();
     let mut buffer = BytesMut::new();
@@ -171,7 +171,14 @@ fn next_frame(buffer: &mut BytesMut) -> Option<Frame> {
 }
 
 fn handle_message(payload: &[u8], on_output: &mut impl FnMut(&str, &str)) -> Option<Result<(), String>> {
-    let event = serde_json::from_slice::<StartResponse>(payload).ok()?.event;
+    let event = match serde_json::from_slice::<StartResponse>(payload) {
+        Ok(response) => response.event,
+        Err(e) => {
+            return Some(Err(format!(
+                "command failed: invalid_argument: unmarshal into *process.StartResponse: {e}"
+            )));
+        }
+    };
     let Some(event) = event else {
         tracing::error!("received nil command event");
         return Some(Ok(()));
@@ -182,6 +189,17 @@ fn handle_message(payload: &[u8], on_output: &mut impl FnMut(&str, &str)) -> Opt
     match event.end {
         Some(end) if end.exit_code != 0 => Some(Err(end.status)),
         _ => None,
+    }
+}
+
+fn http_to_code(status: u16) -> &'static str {
+    match status {
+        400 => "internal",
+        401 => "unauthenticated",
+        403 => "permission_denied",
+        404 => "unimplemented",
+        429 | 502 | 503 | 504 => "unavailable",
+        _ => "unknown",
     }
 }
 
@@ -295,6 +313,22 @@ mod tests {
         assert_eq!(
             run_command(broken, "x", &context, |_, _| {}).await,
             Err("command failed: internal: boom".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn http_failures_map_to_connect_codes() {
+        let router = Router::new().route(
+            START_PATH,
+            post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        assert_eq!(
+            run_command(address, "x", &CommandContext::default(), |_, _| {}).await,
+            Err("command failed: unavailable: HTTP status 503 Service Unavailable".to_owned())
         );
     }
 }

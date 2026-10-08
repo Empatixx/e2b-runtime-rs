@@ -53,7 +53,7 @@ mod serve {
         let setup = config.open_build_storage()?.map(|build| TemplateManagerSetup {
             build,
             builder: config.builder.clone(),
-            development: config.local,
+            development: config.development,
         });
         let app = App::new(node.clone(), setup)?;
         app.start_background();

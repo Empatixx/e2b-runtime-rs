@@ -16,10 +16,13 @@ use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISI
 use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
 use crate::go_exec::GoCommand;
+use crate::network::pool::SlotLease;
+use crate::network::slot::HostSlots;
 use crate::proto::LogLevel;
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::snapshot::LocalSnapshot;
+use crate::server::node::BuildNetwork;
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
@@ -38,6 +41,23 @@ const ROOT_USER: &str = "root";
 pub struct BaseBuild<'a> {
     pub phase: &'a BasePhase,
     pub log: &'a ScopedLog<'a>,
+}
+
+struct SlotHold {
+    network: BuildNetwork,
+    lease: SlotLease<HostSlots>,
+}
+
+impl SlotHold {
+    fn release(self) {
+        drop(self.network);
+        drop(self.lease);
+    }
+}
+
+struct HeldSlot {
+    builder: SandboxBuilder,
+    slot: SlotHold,
 }
 
 struct BuildDir {
@@ -128,22 +148,10 @@ impl BaseBuild<'_> {
     }
 
     async fn provision(&self, rootfs: &Path) -> Result<(), BuildError> {
-        let lease = self
-            .phase
-            .env
-            .node
-            .network
-            .lease(None)
-            .await
-            .map_err(|e| BuildError::Internal(format!("error creating sandbox: {e}")))?;
-        let slot = lease
-            .slot()
-            .ok_or_else(|| BuildError::Internal("error creating sandbox: no network slot".to_owned()))?;
         let (console, lines) = unbounded_channel();
-        let (sandbox_id, builder) = self.sandbox_builder();
-        let _network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
-        let sandbox = builder
-            .pooled_slot(slot)
+        let held = self.build_slot("error creating sandbox").await?;
+        let sandbox = held
+            .builder
             .rootfs_file(rootfs)
             .init_path(BUSYBOX_INIT_PATH)
             .kernel_logs(true)
@@ -166,13 +174,37 @@ impl BaseBuild<'_> {
             .shut_down()
             .await
             .map_err(|e| BuildError::Internal(format!("error shutting down provisioned sandbox: {e}")))?;
-        drop(lease);
+        held.slot.release();
+        self.remove_result(rootfs).await
+    }
+
+    async fn remove_result(&self, rootfs: &Path) -> Result<(), BuildError> {
         Ext4::new(rootfs)
             .remove_file(PROVISION_RESULT_PATH)
             .await
             .map_err(|e| BuildError::Internal(format!("result file cleanup failed: {e}")))?;
         self.log.push(LogLevel::Info, "Sandbox template provisioned");
         Ok(())
+    }
+
+    async fn build_slot(&self, context: &str) -> Result<HeldSlot, BuildError> {
+        let node = &self.phase.env.node;
+        let lease = node
+            .network
+            .lease(None)
+            .await
+            .map_err(|e| BuildError::Internal(format!("{context}: {e}")))?;
+        let slot = lease
+            .slot()
+            .ok_or_else(|| BuildError::Internal(format!("{context}: no network slot")))?;
+        let (sandbox_id, builder) = self.sandbox_builder();
+        Ok(HeldSlot {
+            builder: builder.pooled_slot(slot),
+            slot: SlotHold {
+                network: node.assign_build_network(slot.host_ip(), &sandbox_id),
+                lease,
+            },
+        })
     }
 
     fn sandbox_builder(&self) -> (String, SandboxBuilder) {
@@ -271,21 +303,9 @@ impl BaseBuild<'_> {
         ext4.set_reserved_blocks(RESERVED_DISK_SPACE_MB, BLOCK_SIZE)
             .await
             .map_err(|e| BuildError::Internal(format!("create sandbox: pre-boot hook failed: {e}")))?;
-        let lease = self
-            .phase
-            .env
-            .node
-            .network
-            .lease(None)
-            .await
-            .map_err(|e| BuildError::Internal(format!("create sandbox: {e}")))?;
-        let slot = lease
-            .slot()
-            .ok_or_else(|| BuildError::Internal("create sandbox: no network slot".to_owned()))?;
-        let (sandbox_id, builder) = self.sandbox_builder();
-        let network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
-        let mut sandbox = builder
-            .pooled_slot(slot)
+        let held = self.build_slot("create sandbox").await?;
+        let mut sandbox = held
+            .builder
             .rootfs_file(&ext4.file)
             .init_path(SYSTEMD_INIT)
             .kernel_logs(self.phase.env.development)
@@ -310,8 +330,7 @@ impl BaseBuild<'_> {
             .pause_into(&dir, build_id)
             .await
             .map_err(|e| BuildError::Internal(format!("pause and upload: error processing vm: {e}")))?;
-        drop(network);
-        drop(lease);
+        held.slot.release();
         self.upload(local, dir, metadata, hash).await
     }
 

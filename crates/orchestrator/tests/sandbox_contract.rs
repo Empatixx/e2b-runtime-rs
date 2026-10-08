@@ -140,6 +140,7 @@ async fn failed_cold_boot_leaves_no_slot_cgroup_or_device() {
         .firecracker(&host.firecracker)
         .kernel("/nonexistent/vmlinux")
         .work_dir(dir.path().join("sbx-fail"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .err()
@@ -184,6 +185,7 @@ async fn a_cancelled_cold_boot_tears_everything_down() {
         .init_path("/bin/sleep -- 3600")
         .work_dir(dir.path().join("sbx-cancel"))
         .envd_timeout(Duration::from_secs(120))
+        .kernel_logs(true)
         .cold_boot();
     let cancelled = tokio::time::timeout(Duration::from_secs(3), boot).await;
 
@@ -227,6 +229,7 @@ async fn a_guest_that_dies_is_reported_quickly() {
         .kernel(&host.kernel)
         .work_dir(dir.path().join("sbx-dies"))
         .envd_timeout(Duration::from_secs(120))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .err()
@@ -263,6 +266,7 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
             default_workdir: Some("/home/user".to_owned()),
             ..EnvdInit::default()
         })
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();

@@ -17,15 +17,15 @@ pub fn parse_free_blocks(output: &str) -> Result<i64, String> {
 
 pub fn parse_reserved_blocks(output: &str) -> Result<i64, String> {
     const LABEL: &str = "Reserved block count:";
-    let after = output
-        .find(LABEL)
-        .map(|index| &output[index + LABEL.len()..])
+    let digits = output
+        .match_indices(LABEL)
+        .map(|(index, _)| &output[index + LABEL.len()..])
         .filter(|after| after.starts_with(char::is_whitespace))
-        .map(|after| after.trim_start())
+        .map(str::trim_start)
         .map(|after| &after[..after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len())])
-        .filter(|digits| !digits.is_empty())
+        .find(|digits| !digits.is_empty())
         .ok_or("could not find reserved blocks in debugfs output")?;
-    after
+    digits
         .parse()
         .map_err(|e| format!("could not parse reserved blocks: {e}"))
 }
@@ -80,6 +80,10 @@ mod tests {
             Ok(6553)
         );
         assert_eq!(parse_reserved_blocks("Reserved block count:     0\n"), Ok(0));
+        assert_eq!(
+            parse_reserved_blocks("Reserved block count:x\nReserved block count: 7\n"),
+            Ok(7)
+        );
         assert_eq!(
             parse_reserved_blocks("Block count: 1\n"),
             Err("could not find reserved blocks in debugfs output".to_owned())

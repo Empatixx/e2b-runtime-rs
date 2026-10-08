@@ -218,7 +218,7 @@ impl SandboxBuilder {
             kernel: self.kernel,
             memfile: self.memfile,
             boot: BootOptions {
-                kernel_logs: self.kernel_logs.unwrap_or(true),
+                kernel_logs: self.kernel_logs.unwrap_or(false),
                 kvm_clock: self.kvm_clock.unwrap_or(true),
                 ..BootOptions::new(self.init_path.as_deref().unwrap_or(DEFAULT_INIT_PATH))
             },

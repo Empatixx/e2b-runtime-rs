@@ -40,15 +40,17 @@ impl BuilderConfig {
         };
         Self {
             busybox: [
-                var("HOST_BUSYBOX_DIR", DEFAULT_BUSYBOX_DIR),
+                absolute(var("HOST_BUSYBOX_DIR", DEFAULT_BUSYBOX_DIR).into())
+                    .display()
+                    .to_string(),
                 var("BUSYBOX_VERSION", DEFAULT_BUSYBOX_VERSION),
                 host_arch().to_owned(),
                 "busybox".to_owned(),
             ]
             .iter()
             .collect(),
-            envd: var("HOST_ENVD_PATH", DEFAULT_ENVD_PATH).into(),
-            templates_dir: with_base("TEMPLATES_DIR", DEFAULT_TEMPLATES_DIR).into(),
+            envd: absolute(var("HOST_ENVD_PATH", DEFAULT_ENVD_PATH).into()),
+            templates_dir: absolute(with_base("TEMPLATES_DIR", DEFAULT_TEMPLATES_DIR).into()),
             provider: var("PROVIDER", DEFAULT_PROVIDER),
             target_arch: target_arch(vars.get("TARGET_ARCH").map(String::as_str)),
             dockerhub_provider: var("DOCKERHUB_REMOTE_REPOSITORY_PROVIDER", DEFAULT_DOCKERHUB_PROVIDER),
@@ -89,23 +91,58 @@ fn expand(text: &str, lookup: &dyn Fn(&str) -> String) -> String {
     while let Some(index) = rest.find('$') {
         out.push_str(&rest[..index]);
         let after = &rest[index + 1..];
-        let (name, consumed) = match after.strip_prefix('{') {
-            Some(braced) => braced.find('}').map_or(("", 0), |end| (&braced[..end], end + 2)),
-            None => {
-                let end = after
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(after.len());
-                (&after[..end], end)
-            }
-        };
-        match consumed {
-            0 => out.push('$'),
-            _ => out.push_str(&lookup(name)),
+        let (name, width) = shell_name(after);
+        match (name, width) {
+            (None, 0) => out.push('$'),
+            (None, _) => {}
+            (Some(name), _) => out.push_str(&lookup(name)),
         }
-        rest = &after[consumed..];
+        rest = &after[width..];
     }
     out.push_str(rest);
     out
+}
+
+fn shell_name(text: &str) -> (Option<&str>, usize) {
+    let bytes = text.as_bytes();
+    match bytes.first() {
+        None => (None, 0),
+        Some(b'{') => braced_name(text),
+        Some(c) if is_special(*c) => (Some(&text[..1]), 1),
+        Some(_) => {
+            let end = bytes
+                .iter()
+                .position(|c| !(c.is_ascii_alphanumeric() || *c == b'_'))
+                .unwrap_or(bytes.len());
+            match end {
+                0 => (None, 0),
+                end => (Some(&text[..end]), end),
+            }
+        }
+    }
+}
+
+fn braced_name(text: &str) -> (Option<&str>, usize) {
+    let bytes = text.as_bytes();
+    if bytes.len() > 2 && is_special(bytes[1]) && bytes[2] == b'}' {
+        return (Some(&text[1..2]), 3);
+    }
+    match text[1..].find('}') {
+        Some(0) => (None, 2),
+        Some(end) => (Some(&text[1..end + 1]), end + 2),
+        None => (None, 1),
+    }
+}
+
+fn is_special(c: u8) -> bool {
+    matches!(c, b'*' | b'#' | b'$' | b'@' | b'!' | b'?' | b'-') || c.is_ascii_digit()
+}
+
+fn absolute(path: PathBuf) -> PathBuf {
+    match path.is_absolute() || path.as_os_str().is_empty() {
+        true => path,
+        false => std::env::current_dir().map_or(path.clone(), |cwd| cwd.join(path)),
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +186,14 @@ mod tests {
         ]);
 
         assert_eq!(config.templates_dir, PathBuf::from("/a/b/t/x"));
+        let lookup = |name: &str| format!("<{name}>");
+        assert_eq!(expand("${abc", &lookup), "abc");
+        assert_eq!(expand("$1x", &lookup), "<1>x");
+        assert_eq!(expand("$-a", &lookup), "<->a");
+        assert_eq!(expand("a$", &lookup), "a$");
+        assert_eq!(expand("${}b", &lookup), "b");
+        assert_eq!(expand("$/", &lookup), "$/");
+        assert!(super::absolute(PathBuf::from("rel")).is_absolute());
         assert_eq!(config.target_arch, "arm64");
         assert_eq!(target_arch(Some("x86_64")), "amd64");
     }

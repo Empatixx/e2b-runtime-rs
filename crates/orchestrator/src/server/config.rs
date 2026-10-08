@@ -52,6 +52,7 @@ pub struct NodeConfig {
     pub max_sandboxes: i64,
     pub max_starting: usize,
     pub local: bool,
+    pub development: bool,
     pub force_stop: bool,
     pub build_cache_max_usage: f64,
     pub prefetch_from_trace: bool,
@@ -128,6 +129,7 @@ impl NodeConfig {
             max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
             max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
             local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
+            development: var("ENVIRONMENT").is_some_and(|environment| environment == "local" || environment == "dev"),
             force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),

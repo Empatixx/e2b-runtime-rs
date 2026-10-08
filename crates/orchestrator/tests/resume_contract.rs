@@ -192,6 +192,7 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
     let cold = templates
         .sandbox(&host, "sbx-cold", cold_slot)
         .rootfs(templates.overlay(templates.template.clone(), "cold"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();
@@ -234,6 +235,7 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
     let disk_only = templates
         .sandbox(&host, "sbx-disk-only", fresh_slot(4036).await)
         .rootfs(templates.overlay(loaded.rootfs.clone(), "disk-only"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();
@@ -297,6 +299,7 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let first = templates
         .sandbox(&host, "sbx-gen0", fresh_slot(4033).await)
         .rootfs(templates.overlay(templates.template.clone(), "gen0"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();
@@ -349,6 +352,7 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let disk_only = templates
         .sandbox(&host, "sbx-gen2-disk", fresh_slot(4037).await)
         .rootfs(templates.overlay(paused_again.build.rootfs.clone(), "sbx-gen2-disk"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();
@@ -384,6 +388,7 @@ async fn an_optimized_trace_prefetches_memory_on_resume() {
     let cold = templates
         .sandbox(&host, "sbx-opt-cold", fresh_slot(4040).await)
         .rootfs(templates.overlay(templates.template.clone(), "opt-cold"))
+        .kernel_logs(true)
         .cold_boot()
         .await
         .unwrap();

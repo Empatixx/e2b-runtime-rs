@@ -109,7 +109,14 @@ fn start_failure(program: &str, error: &io::Error) -> CommandFailure {
 fn status_text(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
         (Some(code), _) => format!("exit status {code}"),
-        (None, Some(signal)) => format!("signal: {}", signal_name(signal)),
+        (None, Some(signal)) => format!(
+            "signal: {}{}",
+            signal_name(signal),
+            match status.core_dumped() {
+                true => " (core dumped)",
+                false => "",
+            }
+        ),
         (None, None) => "exit status -1".to_owned(),
     }
 }
@@ -119,10 +126,17 @@ fn signal_name(signal: i32) -> String {
         1 => "hangup".to_owned(),
         2 => "interrupt".to_owned(),
         3 => "quit".to_owned(),
+        4 => "illegal instruction".to_owned(),
+        5 => "trace/breakpoint trap".to_owned(),
         6 => "aborted".to_owned(),
+        7 => "bus error".to_owned(),
+        8 => "floating point exception".to_owned(),
         9 => "killed".to_owned(),
+        10 => "user defined signal 1".to_owned(),
         11 => "segmentation fault".to_owned(),
+        12 => "user defined signal 2".to_owned(),
         13 => "broken pipe".to_owned(),
+        14 => "alarm clock".to_owned(),
         15 => "terminated".to_owned(),
         other => format!("signal {other}"),
     }
