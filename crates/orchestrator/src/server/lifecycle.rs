@@ -80,7 +80,10 @@ impl Running {
         let ending = self.wait_for_ending().await;
         self.node.registry.stop(&id);
         let paused = match ending {
-            Ending::Pause { build_id, reply } => Some((self.node.pause_locally(self.sandbox, build_id).await, reply)),
+            Ending::Pause { build_id, reply } => {
+                let parent = self.info.lock().config.build_id.clone();
+                Some((self.node.pause_locally(self.sandbox, &parent, build_id).await, reply))
+            }
             Ending::Stop { reason } => {
                 tracing::info!(sandbox = %id, %reason, "stopping sandbox");
                 if let Err(e) = self.sandbox.stop().await {

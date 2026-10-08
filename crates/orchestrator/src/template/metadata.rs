@@ -1,0 +1,193 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+
+pub const CURRENT_VERSION: u64 = 2;
+const DEPRECATED_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TemplateMetadata {
+    pub version: u64,
+    pub template: TemplateVersions,
+    pub context: Context,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_template: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetch: Option<Prefetch>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cmdline_args: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_template: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_cpu_template: Option<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filesystem_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fs_quiesced: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateVersions {
+    pub build_id: String,
+    pub kernel_version: String,
+    pub firecracker_version: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Context {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prefetch {
+    pub memory: Option<MemoryPrefetch>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryPrefetch {
+    pub indices: Vec<u64>,
+    pub access_types: Vec<String>,
+    pub block_size: i64,
+}
+
+impl TemplateMetadata {
+    pub fn v1() -> Self {
+        Self {
+            version: DEPRECATED_VERSION,
+            ..Self::default()
+        }
+    }
+
+    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
+        let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("decode metadata.json: {e}"))?;
+        match value.get("version").and_then(Value::as_u64) {
+            Some(version) if version > DEPRECATED_VERSION => {
+                serde_json::from_value(value).map_err(|e| format!("decode metadata.json: {e}"))
+            }
+            _ => Ok(Self::v1()),
+        }
+    }
+
+    pub fn to_json(&self) -> Vec<u8> {
+        serde_json::to_vec(self).unwrap_or_default()
+    }
+
+    pub fn same_version(&self, build_id: Uuid) -> Self {
+        Self {
+            template: TemplateVersions {
+                build_id: build_id.to_string(),
+                ..self.template.clone()
+            },
+            prefetch: None,
+            filesystem_only: false,
+            fs_quiesced: false,
+            ..self.clone()
+        }
+    }
+
+    pub fn with_prefetch(&self, memory: Option<MemoryPrefetch>) -> Self {
+        Self {
+            prefetch: Some(Prefetch { memory }),
+            filesystem_only: false,
+            fs_quiesced: false,
+            ..self.clone()
+        }
+    }
+
+    pub fn memory_prefetch(&self) -> Option<&MemoryPrefetch> {
+        self.prefetch.as_ref().and_then(|prefetch| prefetch.memory.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paused() -> TemplateMetadata {
+        TemplateMetadata {
+            version: CURRENT_VERSION,
+            template: TemplateVersions {
+                build_id: "b1".to_owned(),
+                kernel_version: "vmlinux-6.1.102".to_owned(),
+                firecracker_version: "v1.14.1".to_owned(),
+            },
+            context: Context {
+                user: Some("user".to_owned()),
+                workdir: Some("/home/user".to_owned()),
+                env_vars: BTreeMap::from([("A".to_owned(), "b".to_owned())]),
+            },
+            ..TemplateMetadata::default()
+        }
+    }
+
+    #[test]
+    fn serializes_with_upstream_keys_and_omits_empty_fields() {
+        assert_eq!(
+            String::from_utf8(paused().to_json()).unwrap(),
+            r#"{"version":2,"template":{"build_id":"b1","kernel_version":"vmlinux-6.1.102","firecracker_version":"v1.14.1"},"context":{"user":"user","workdir":"/home/user","env_vars":{"A":"b"}}}"#
+        );
+        let empty = paused().with_prefetch(None);
+        assert!(
+            String::from_utf8(empty.to_json())
+                .unwrap()
+                .ends_with(r#""prefetch":{"memory":null}}"#)
+        );
+    }
+
+    #[test]
+    fn a_trace_round_trips() {
+        let traced = paused().with_prefetch(Some(MemoryPrefetch {
+            indices: vec![812, 3],
+            access_types: vec!["r".to_owned(), "w".to_owned()],
+            block_size: 4096,
+        }));
+
+        let json = traced.to_json();
+
+        assert!(
+            String::from_utf8(json.clone())
+                .unwrap()
+                .contains(r#""prefetch":{"memory":{"indices":[812,3],"access_types":["r","w"],"block_size":4096}}"#)
+        );
+        assert_eq!(TemplateMetadata::from_json(&json).unwrap(), traced);
+    }
+
+    #[test]
+    fn version_one_or_garbage_versions_read_as_v1() {
+        let v1 = TemplateMetadata::v1();
+        assert_eq!(
+            String::from_utf8(v1.to_json()).unwrap(),
+            r#"{"version":1,"template":{"build_id":"","kernel_version":"","firecracker_version":""},"context":{}}"#
+        );
+        assert_eq!(
+            TemplateMetadata::from_json(br#"{"version":1,"context":{"user":"x"}}"#).unwrap(),
+            v1
+        );
+        assert_eq!(TemplateMetadata::from_json(br#"{"version":"2"}"#).unwrap(), v1);
+        assert!(TemplateMetadata::from_json(br#"{"version":2,"template":{"build_id":"b","kernel_version":"k","firecracker_version":"f"},"context":{},"unknown":1}"#).is_ok());
+    }
+
+    #[test]
+    fn a_paused_build_keeps_the_context_and_drops_the_trace() {
+        let build = Uuid::from_bytes([7; 16]);
+        let traced = paused().with_prefetch(Some(MemoryPrefetch::default()));
+
+        let next = traced.same_version(build);
+
+        assert_eq!(next.template.build_id, build.to_string());
+        assert_eq!((next.context, next.prefetch), (paused().context, None));
+    }
+}

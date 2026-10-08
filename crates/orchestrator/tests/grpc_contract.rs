@@ -457,6 +457,7 @@ async fn sandbox_lifecycle_over_grpc() {
         paths.memfile_header(),
         paths.rootfs(),
         paths.rootfs_header(),
+        paths.metadata(),
     ] {
         assert!(stored.exists(&object).await.unwrap(), "{object} was not uploaded");
     }

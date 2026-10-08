@@ -8,6 +8,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::Template;
+use super::metadata::TemplateMetadata;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 
@@ -53,9 +54,15 @@ impl TemplateCache {
             .join(Uuid::new_v4().to_string())
     }
 
-    pub fn add_snapshot(&self, build: Build, snapfile: PathBuf, dir: PathBuf) -> Arc<Template> {
+    pub fn add_snapshot(
+        &self,
+        build: Build,
+        snapfile: PathBuf,
+        metadata: TemplateMetadata,
+        dir: PathBuf,
+    ) -> Arc<Template> {
         let build_id = build.build_id;
-        let template = Arc::new(Template::cached(self.storage.clone(), build, snapfile, dir));
+        let template = Arc::new(Template::cached(self.storage.clone(), build, snapfile, metadata, dir));
         let entry = Entry {
             template: template.clone(),
             expires: Instant::now() + TEMPLATE_EXPIRATION,
@@ -175,6 +182,7 @@ mod tests {
         assert_eq!(snapfile, second.snapfile().await.unwrap());
         assert_eq!(std::fs::read(&snapfile).unwrap(), b"snap");
         assert_eq!(first.build().await.unwrap(), build);
+        assert_eq!(first.metadata().await.unwrap(), TemplateMetadata::v1());
     }
 
     #[tokio::test]
@@ -245,12 +253,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("snapfile"), b"local").unwrap();
 
+        let metadata = TemplateMetadata::v1().same_version(build_id);
         fixture
             .cache
-            .add_snapshot(build.clone(), dir.join("snapfile"), dir.clone());
+            .add_snapshot(build.clone(), dir.join("snapfile"), metadata.clone(), dir.clone());
         let template = fixture.cache.get(build_id);
 
         assert_eq!(template.build().await.unwrap(), build);
+        assert_eq!(template.metadata().await.unwrap(), metadata);
         assert_eq!(template.snapfile().await.unwrap(), dir.join("snapfile"));
     }
 }

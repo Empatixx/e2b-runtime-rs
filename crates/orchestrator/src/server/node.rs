@@ -24,6 +24,7 @@ use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::template::cache::TemplateCache;
+use crate::template::metadata::TemplateMetadata;
 use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -85,10 +86,11 @@ impl Node {
         tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }
 
-    pub async fn pause_locally(&self, sandbox: Sandbox, build_id: Uuid) -> Result<LocalSnapshot, String> {
+    pub async fn pause_locally(&self, sandbox: Sandbox, parent: &str, build_id: Uuid) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
         let local = sandbox.pause_into(&dir, build_id).await?;
-        if let Err(e) = self.cache_snapshot(&local, dir) {
+        let metadata = self.parent_metadata(parent).await.same_version(build_id);
+        if let Err(e) = self.cache_snapshot(&local, metadata, dir) {
             tracing::warn!(build = %build_id, error = %e, "the paused snapshot is not cached on this node");
         }
         Ok(local)
@@ -105,7 +107,11 @@ impl Node {
                 if !local.files.exist() {
                     return Err(Failure::Terminal("snapshot files are gone".to_owned()));
                 }
-                local.upload(&storage).await.map_err(Failure::Retryable)
+                let metadata = metadata_path(&local);
+                let object = local.snapshot.build.paths().metadata();
+                tokio::try_join!(local.upload(&storage), storage.put_file(&object, &metadata))
+                    .map(|_| ())
+                    .map_err(Failure::Retryable)
             }
         };
         self.uploads
@@ -117,14 +123,31 @@ impl Node {
             });
     }
 
-    fn cache_snapshot(&self, local: &LocalSnapshot, dir: PathBuf) -> Result<(), String> {
+    fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
         let build_id = local.snapshot.build.build_id;
+        let metadata_file = metadata_path(local);
+        std::fs::write(&metadata_file, metadata.to_json())
+            .map_err(|e| format!("write {}: {e}", metadata_file.display()))?;
         self.store
             .add_local(build_id, Artifact::Memfile, &local.files.memfile)?;
         self.store.add_local(build_id, Artifact::Rootfs, &local.files.rootfs)?;
-        self.templates
-            .add_snapshot(local.snapshot.build.clone(), local.files.snapfile.clone(), dir);
+        self.templates.add_snapshot(
+            local.snapshot.build.clone(),
+            local.files.snapfile.clone(),
+            metadata,
+            dir,
+        );
         Ok(())
+    }
+
+    async fn parent_metadata(&self, parent: &str) -> TemplateMetadata {
+        match Uuid::parse_str(parent) {
+            Ok(parent) => self.templates.get(parent).metadata().await.unwrap_or_else(|e| {
+                tracing::warn!(build = %parent, error = %e, "parent metadata is unreadable; writing v1 metadata");
+                TemplateMetadata::v1()
+            }),
+            Err(_) => TemplateMetadata::v1(),
+        }
     }
 
     pub fn running_configs(&self) -> Vec<SandboxConfig> {
@@ -277,6 +300,10 @@ impl Node {
             .resume(snapfile)
             .await
     }
+}
+
+fn metadata_path(local: &LocalSnapshot) -> PathBuf {
+    local.files.snapfile.with_file_name("metadata.json")
 }
 
 fn parents(build: &Build) -> Vec<Uuid> {
