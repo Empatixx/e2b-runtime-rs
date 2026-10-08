@@ -346,7 +346,7 @@ impl Node {
             ..EnvdInit::default()
         };
         let sandbox = self
-            .resume(&config, &build, &snapfile, prefetch, slot, init)
+            .resume(&config, &build, &snapfile, prefetch, slot, init, &lifecycle)
             .await
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
         let slot = lease
