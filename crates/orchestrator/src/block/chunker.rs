@@ -62,6 +62,22 @@ impl Chunker {
         })
     }
 
+    pub fn local(storage: Storage, object: &str, path: &Path) -> Result<Self, String> {
+        let cache = BlockCache::adopt(path, PAGE_SIZE).map_err(|e| format!("adopt {}: {e}", path.display()))?;
+        let source = Source {
+            cache: Arc::new(cache),
+            storage,
+            object: object.to_owned(),
+            timeout: FETCH_TIMEOUT,
+            fetches: AtomicU64::new(0),
+            attempts: AtomicU64::new(0),
+        };
+        Ok(Self {
+            source: Arc::new(source),
+            in_flight: Mutex::default(),
+        })
+    }
+
     pub fn size(&self) -> u64 {
         self.source.cache.size()
     }
@@ -309,5 +325,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(error, "head build/memfile: timed out after 100ms");
+    }
+
+    #[tokio::test]
+    async fn a_local_chunker_reads_its_file_without_fetching() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("empty-store")).unwrap();
+        let path = dir.path().join("memfile.diff");
+        let data = pattern(2 * MIB + 4096);
+        std::fs::write(&path, &data).unwrap();
+
+        let chunker = Chunker::local(storage, OBJECT, &path).unwrap();
+        let mut buf = vec![0; 8192];
+        chunker.read_at(MIB, &mut buf).await.unwrap();
+
+        assert_eq!(buf, data[MIB as usize..MIB as usize + 8192]);
+        assert_eq!((chunker.fetch_attempts(), chunker.size()), (0, 2 * MIB + 4096));
     }
 }

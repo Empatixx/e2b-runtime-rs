@@ -23,6 +23,16 @@ impl SparseFile {
         })
     }
 
+    pub fn adopt(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+            size,
+        })
+    }
+
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -88,6 +98,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache");
         drop(SparseFile::create(&path, 4096).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_adopted_file_keeps_its_bytes_and_is_removed_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diff");
+        std::fs::write(&path, [5; 8192]).unwrap();
+
+        let file = SparseFile::adopt(&path).unwrap();
+        let mut block = [0; 4096];
+        file.read_at(4096, &mut block).unwrap();
+
+        assert_eq!((file.size(), block), (8192, [5; 4096]));
+        drop(file);
         assert!(!path.exists());
     }
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -58,6 +58,13 @@ impl DiffStore {
     pub async fn chunker(&self, build_id: Uuid, artifact: Artifact) -> Result<Arc<Chunker>, String> {
         let cell = self.cell(DiffKey { build_id, artifact });
         cell.get_or_try_init(|| self.open(build_id, artifact)).await.cloned()
+    }
+
+    pub fn add_local(&self, build_id: Uuid, artifact: Artifact, path: &Path) -> Result<(), String> {
+        let chunker = Chunker::local(self.storage.clone(), &artifact.object(build_id), path)?;
+        let cell = Arc::new(OnceCell::new_with(Some(Arc::new(chunker))));
+        self.chunkers.lock().insert(DiffKey { build_id, artifact }, cell);
+        Ok(())
     }
 
     fn cell(&self, key: DiffKey) -> Arc<OnceCell<Arc<Chunker>>> {
@@ -210,5 +217,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.chunker(id(1), Artifact::Memfile).await.unwrap().size(), 4096);
+    }
+
+    #[tokio::test]
+    async fn a_local_diff_is_read_without_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        storage
+            .put(&Artifact::Memfile.object(id(1)), Bytes::from(vec![1; 2 * 4096]))
+            .await
+            .unwrap();
+        let diff = dir.path().join("memfile.diff");
+        std::fs::write(&diff, vec![2; 4096]).unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        store.add_local(id(2), Artifact::Memfile, &diff).unwrap();
+        let metadata = Metadata::template(id(1), 4096, 2 * 4096).next_generation(id(2));
+        let header = Header::new(metadata, vec![mapping(0, id(1), 0), mapping(4096, id(2), 0)]).unwrap();
+
+        let mut whole = vec![0; 2 * 4096];
+        BuildFile::new(header, Artifact::Memfile, store.clone())
+            .read_at(0, &mut whole)
+            .await
+            .unwrap();
+
+        assert_eq!(whole, [vec![1; 4096], vec![2; 4096]].concat());
+        assert_eq!(
+            store.chunker(id(2), Artifact::Memfile).await.unwrap().fetch_attempts(),
+            0
+        );
     }
 }

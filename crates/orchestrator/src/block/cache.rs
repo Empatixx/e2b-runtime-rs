@@ -24,6 +24,17 @@ impl BlockCache {
         })
     }
 
+    pub fn adopt(path: &Path, block_size: u64) -> io::Result<Self> {
+        let file = SparseFile::adopt(path)?;
+        let mut tracker = BlockTracker::default();
+        tracker.set(0..file.size().div_ceil(block_size) as u32, BlockState::Data);
+        Ok(Self {
+            file,
+            block_size,
+            tracker: RwLock::new(tracker),
+        })
+    }
+
     pub fn size(&self) -> u64 {
         self.file.size()
     }

@@ -22,10 +22,17 @@ pub struct Snapshot {
     pub tracked_writes: bool,
 }
 
-struct SnapshotFiles {
-    snapfile: PathBuf,
-    memfile: PathBuf,
-    rootfs: PathBuf,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotFiles {
+    pub snapfile: PathBuf,
+    pub memfile: PathBuf,
+    pub rootfs: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSnapshot {
+    pub snapshot: Snapshot,
+    pub files: SnapshotFiles,
 }
 
 struct Exported {
@@ -41,7 +48,7 @@ struct MemoryPages {
 }
 
 impl SnapshotFiles {
-    fn in_dir(dir: &Path) -> Self {
+    pub fn in_dir(dir: &Path) -> Self {
         Self {
             snapfile: dir.join("snapfile"),
             memfile: dir.join("memfile.diff"),
@@ -49,7 +56,7 @@ impl SnapshotFiles {
         }
     }
 
-    fn remove(&self) {
+    pub fn remove(&self) {
         [&self.snapfile, &self.memfile, &self.rootfs]
             .into_iter()
             .for_each(|path| drop(std::fs::remove_file(path)));
@@ -72,21 +79,32 @@ impl Sandbox {
     }
 
     pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
+        let local = self.snapshot_into(&self.config.work_dir, build_id).await?;
+        let uploaded = local.upload(storage).await;
+        local.files.remove();
+        uploaded.map(|()| local.snapshot)
+    }
+
+    pub async fn snapshot_into(&self, dir: &Path, build_id: Uuid) -> Result<LocalSnapshot, String> {
         let vm = self.resources.vm.as_ref().ok_or("firecracker is not running")?;
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
-        let files = SnapshotFiles::in_dir(&self.config.work_dir);
-        let snapshot = self.write_and_upload(&client, pid, &files, storage, build_id).await;
-        files.remove();
-        snapshot
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        let files = SnapshotFiles::in_dir(dir);
+        self.write(&client, pid, &files, build_id)
+            .await
+            .map(|snapshot| LocalSnapshot {
+                snapshot,
+                files: files.clone(),
+            })
+            .inspect_err(|_| files.remove())
     }
 
-    async fn write_and_upload(
+    async fn write(
         &self,
         client: &FirecrackerClient,
         pid: u32,
         files: &SnapshotFiles,
-        storage: &Storage,
         build_id: Uuid,
     ) -> Result<Snapshot, String> {
         client.pause().await?;
@@ -97,14 +115,12 @@ impl Sandbox {
         let memfile = self.export_memory(pages, pid, &files.memfile, build_id).await?;
         self.flush_disk().await?;
         let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
-        let build = Build {
-            build_id,
-            memfile: memfile.header,
-            rootfs: rootfs.header,
-        };
-        upload(storage, &build, files).await?;
         Ok(Snapshot {
-            build,
+            build: Build {
+                build_id,
+                memfile: memfile.header,
+                rootfs: rootfs.header,
+            },
             memfile_bytes: memfile.bytes,
             memory_bytes,
             rootfs_bytes: rootfs.bytes,
@@ -217,6 +233,12 @@ async fn blocking(
         .await
         .map_err(|e| format!("{what}: {e}"))?
         .map_err(|e| format!("{what}: {e}"))
+}
+
+impl LocalSnapshot {
+    pub async fn upload(&self, storage: &Storage) -> Result<(), String> {
+        upload(storage, &self.snapshot.build, &self.files).await
+    }
 }
 
 async fn upload(storage: &Storage, build: &Build, files: &SnapshotFiles) -> Result<(), String> {
