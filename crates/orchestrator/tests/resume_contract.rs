@@ -199,8 +199,7 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
     write_file(&cold, NOTE, NOTE_TEXT).await;
     run_in_guest(&cold, "sync").await;
     let build_id = Uuid::new_v4();
-    let build = cold.snapshot(&templates.storage, build_id).await.unwrap().build;
-    cold.stop().await.unwrap();
+    let build = cold.pause(&templates.storage, build_id).await.unwrap().build;
     let leftovers: Vec<PathBuf> = ["snapfile", "memfile.diff", "rootfs.diff"]
         .iter()
         .map(|name| templates.work.join("sbx-cold").join(name))

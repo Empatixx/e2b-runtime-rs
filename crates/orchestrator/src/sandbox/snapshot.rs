@@ -111,7 +111,7 @@ impl Sandbox {
         snapshot
     }
 
-    pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
+    async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
         let local = self.snapshot_into(&self.config.work_dir, build_id).await?;
         let uploaded = local.upload(storage, &ObjectMetadata::default()).await;
         local.files.remove();
