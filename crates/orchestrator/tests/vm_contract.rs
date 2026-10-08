@@ -142,5 +142,5 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     slot.destroy().await.unwrap();
 
     assert!(reachable, "guest did not answer ping; console:\n{console_log}");
-    assert!(console_log.contains("Linux version"), "{console_log}");
+    assert!(console_log.contains("Running Firecracker"), "{console_log}");
 }
