@@ -10,6 +10,7 @@ pub mod memory;
 pub mod network;
 pub mod phases;
 pub mod proto;
+pub mod routing;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 pub mod server;

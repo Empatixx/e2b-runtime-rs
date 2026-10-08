@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::node::Node;
+use super::node::{Node, routed_sandbox};
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::network::slot::Slot;
@@ -90,6 +90,8 @@ impl Running {
         let id = self.sandbox.id().to_owned();
         let ending = self.wait_for_ending().await;
         self.node.registry.stop(&id);
+        let routed = routed_sandbox(&self.info.lock());
+        self.node.routing.on_stopping(&routed).await;
         match ending {
             Ending::Pause {
                 build_id,
@@ -101,9 +103,9 @@ impl Running {
         if let Err(e) = self.sandbox.stop().await {
             tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
         }
-        let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
-        self.node.network.return_slot(self.slot);
         let lifecycle = self.info.lock().lifecycle.clone();
+        let _ = std::fs::remove_dir_all(self.node.work_dir_of(&lifecycle));
+        self.node.network.return_slot(self.slot);
         self.node.registry.finish(&lifecycle);
     }
 

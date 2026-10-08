@@ -24,6 +24,12 @@ mod serve {
         tracing_subscriber::fmt().init();
         let config = NodeConfig::from_env()?;
         let node = Arc::new(Node::new(&config)?);
+        match &config.redis {
+            Some(redis) => node.routing.install(Arc::new(
+                orchestrator::routing::redis::RedisRoutes::connect(redis).await?,
+            )),
+            None => tracing::warn!("redis disabled; orchestrator sandbox routing records are not published"),
+        }
         node.sweep().await;
         let app = App::new(node.clone());
         app.start_background();

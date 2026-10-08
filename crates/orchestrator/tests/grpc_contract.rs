@@ -155,6 +155,8 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         orchestrator_ip: "192.0.2.1".to_owned(),
         hyperloop_port: 0,
         logs_collector: String::new(),
+        node_ip: "localhost".to_owned(),
+        redis: None,
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());
@@ -501,7 +503,8 @@ async fn sandbox_lifecycle_over_grpc() {
         eventually(Duration::from_secs(20), || pool_namespaces_left(pool).is_empty()
             && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx").exists()
             && !Path::new("/sys/fs/cgroup/e2b/grpc-race").exists()
-            && !cluster.dir.path().join("sandboxes").join("grpc-sbx").exists()
+            && std::fs::read_dir(cluster.dir.path().join("sandboxes"))
+                .map_or(true, |mut entries| entries.next().is_none())
             && !nbd_connected_with_size(template_size(&host)))
         .await,
         "left behind: {:?}",

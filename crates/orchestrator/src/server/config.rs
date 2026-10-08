@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::services::Services;
 use crate::network::slot::MAX_SLOT;
+use crate::routing::redis::RedisSettings;
 use crate::storage::backend::Storage;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
@@ -55,6 +56,8 @@ pub struct NodeConfig {
     pub orchestrator_ip: String,
     pub hyperloop_port: u16,
     pub logs_collector: String,
+    pub node_ip: String,
+    pub redis: Option<RedisSettings>,
 }
 
 impl NodeConfig {
@@ -111,6 +114,8 @@ impl NodeConfig {
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
             hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
             logs_collector: var("LOGS_COLLECTOR_ADDRESS").unwrap_or_default(),
+            node_ip: var("NODE_IP").unwrap_or_else(|| "localhost".to_owned()),
+            redis: RedisSettings::from_vars(vars)?,
         })
     }
 

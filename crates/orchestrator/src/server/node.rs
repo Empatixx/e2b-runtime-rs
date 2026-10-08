@@ -23,6 +23,7 @@ use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig};
+use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
@@ -48,6 +49,7 @@ pub struct Node {
     pub services: Services,
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
+    pub routing: RoutingPublisher,
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
@@ -76,6 +78,7 @@ impl Node {
             services: config.services.clone(),
             status: Arc::default(),
             uploads: Arc::default(),
+            routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
@@ -219,8 +222,9 @@ impl Node {
         self.network.close().await;
     }
 
-    pub fn work_dir_of(&self, id: &str) -> PathBuf {
-        self.work_dir.join(id)
+    pub fn work_dir_of(&self, lifecycle: &Lifecycle) -> PathBuf {
+        self.work_dir
+            .join(format!("{}-{}", lifecycle.sandbox_id, lifecycle.lifecycle_id))
     }
 
     pub async fn create(self: Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<(), Status> {
@@ -245,12 +249,14 @@ impl Node {
             });
         match started {
             Ok(handle) => {
+                let routed = routed_sandbox(&handle.info.lock());
                 self.registry.activate(lifecycle, handle);
+                self.routing.on_insert(&routed).await;
                 Ok(())
             }
             Err(status) => {
                 self.registry.abandon(&id);
-                let _ = std::fs::remove_dir_all(self.work_dir_of(&id));
+                let _ = std::fs::remove_dir_all(self.work_dir_of(&lifecycle));
                 Err(status)
             }
         }
@@ -372,8 +378,9 @@ impl Node {
         prefetch: Option<MemoryPrefetch>,
         slot: Slot,
         init: EnvdInit,
+        lifecycle: &Lifecycle,
     ) -> Result<Sandbox, String> {
-        let work_dir = self.work_dir_of(&config.sandbox_id);
+        let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let rootfs = Arc::new(BuildFile::new(
             build.rootfs.clone(),
@@ -420,6 +427,16 @@ pub fn egress_rules(egress: Option<&SandboxNetworkEgressConfig>) -> Result<Optio
         allowed: egress.allowed_cidrs.clone(),
         denied: egress.denied_cidrs.clone(),
     }))
+}
+
+pub fn routed_sandbox(info: &SandboxInfo) -> RoutedSandbox {
+    RoutedSandbox {
+        sandbox_id: info.config.sandbox_id.clone(),
+        lifecycle_id: info.lifecycle.lifecycle_id.clone(),
+        execution_id: info.config.execution_id.clone(),
+        started_at: info.start,
+        max_length_hours: info.config.max_sandbox_length,
+    }
 }
 
 fn volume_mounts(config: &SandboxConfig, orchestrator_ip: &str) -> Result<Vec<VolumeMount>, String> {
