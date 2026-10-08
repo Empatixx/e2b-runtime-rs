@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::services::Services;
+use crate::clickhouse::endpoint::Endpoint;
 use crate::network::slot::MAX_SLOT;
 use crate::routing::redis::RedisSettings;
 use crate::storage::backend::Storage;
@@ -58,6 +59,8 @@ pub struct NodeConfig {
     pub logs_collector: String,
     pub node_ip: String,
     pub redis: Option<RedisSettings>,
+    pub clickhouse: Option<String>,
+    pub clickhouse_additional: Vec<String>,
 }
 
 impl NodeConfig {
@@ -75,6 +78,10 @@ impl NodeConfig {
         let cache_dir: PathBuf = var("E2B_CACHE_DIR")
             .unwrap_or_else(|| "/var/lib/e2b/cache".to_owned())
             .into();
+        let clickhouse = Endpoint::parse_list(
+            var("CLICKHOUSE_CONNECTION_STRING").as_deref(),
+            var("CLICKHOUSE_CONNECTION_STRINGS").as_deref(),
+        );
         Ok(Self {
             grpc_port,
             node_id: var("NODE_ID").unwrap_or_else(|| DEFAULT_NODE_ID.to_owned()),
@@ -116,6 +123,8 @@ impl NodeConfig {
             logs_collector: var("LOGS_COLLECTOR_ADDRESS").unwrap_or_default(),
             node_ip: var("NODE_IP").unwrap_or_else(|| "localhost".to_owned()),
             redis: RedisSettings::from_vars(vars)?,
+            clickhouse: clickhouse.0,
+            clickhouse_additional: clickhouse.1,
         })
     }
 

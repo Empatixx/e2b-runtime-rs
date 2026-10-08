@@ -7,7 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::node::{Node, event_sandbox, execution, routed_sandbox};
+use super::host_stats::HostStatsCollector;
+use super::node::{Node, event_sandbox, execution, routed_sandbox, stats_identity};
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
@@ -66,6 +67,7 @@ struct Running {
     info: Arc<Mutex<SandboxInfo>>,
     commands: mpsc::Receiver<Command>,
     node: Arc<Node>,
+    host_stats: Option<HostStatsCollector>,
     _work: Work,
 }
 
@@ -75,7 +77,13 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         info: Arc::new(Mutex::new(info)),
         commands,
     };
+    let host_stats = node
+        .host_stats
+        .get()
+        .zip(sandbox.cgroup_stats())
+        .map(|(sink, reader)| HostStatsCollector::start(reader, stats_identity(&handle.info.lock()), sink.clone()));
     let running = Running {
+        host_stats,
         sandbox,
         slot,
         info: handle.info.clone(),
@@ -101,6 +109,9 @@ impl Running {
                 reply,
             } => self.pause(build_id, template_id, reply).await,
             Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
+        }
+        if let Some(collector) = self.host_stats.take() {
+            collector.stop().await;
         }
         if let Err(e) = self.sandbox.stop().await {
             tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");

@@ -18,8 +18,10 @@ use super::status::NodeStatus;
 use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
+use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
+use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
@@ -53,6 +55,7 @@ pub struct Node {
     pub uploads: Arc<Uploads>,
     pub routing: RoutingPublisher,
     pub events: EventsService,
+    pub host_stats: std::sync::OnceLock<Arc<ClickhouseHostStats>>,
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
@@ -64,6 +67,16 @@ pub struct Node {
     prefetch_from_trace: bool,
     use_memfd: bool,
     orchestrator_ip: String,
+}
+
+struct ResumeRequest<'a> {
+    config: &'a SandboxConfig,
+    build: &'a Build,
+    snapfile: &'a Path,
+    prefetch: Option<MemoryPrefetch>,
+    slot: Slot,
+    init: EnvdInit,
+    lifecycle: &'a Lifecycle,
 }
 
 pub struct Lifetime {
@@ -82,6 +95,7 @@ impl Node {
             status: Arc::default(),
             uploads: Arc::default(),
             events: EventsService::default(),
+            host_stats: std::sync::OnceLock::new(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
@@ -351,7 +365,15 @@ impl Node {
             ..EnvdInit::default()
         };
         let sandbox = self
-            .resume(&config, &build, &snapfile, prefetch, slot, init, &lifecycle)
+            .resume(ResumeRequest {
+                config: &config,
+                build: &build,
+                snapfile: &snapfile,
+                prefetch,
+                slot,
+                init,
+                lifecycle: &lifecycle,
+            })
             .await
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
         let slot = lease
@@ -381,16 +403,16 @@ impl Node {
             .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))
     }
 
-    async fn resume(
-        &self,
-        config: &SandboxConfig,
-        build: &Build,
-        snapfile: &Path,
-        prefetch: Option<MemoryPrefetch>,
-        slot: Slot,
-        init: EnvdInit,
-        lifecycle: &Lifecycle,
-    ) -> Result<Sandbox, String> {
+    async fn resume(&self, request: ResumeRequest<'_>) -> Result<Sandbox, String> {
+        let ResumeRequest {
+            config,
+            build,
+            snapfile,
+            prefetch,
+            slot,
+            init,
+            lifecycle,
+        } = request;
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let rootfs = Arc::new(BuildFile::new(
@@ -449,6 +471,18 @@ pub fn event_sandbox(info: &SandboxInfo) -> EventSandbox {
         team_id: info.config.team_id.clone(),
         events_ttl_days: info.config.events_ttl_days,
         metadata: info.config.metadata.clone().into_iter().collect(),
+    }
+}
+
+pub fn stats_identity(info: &SandboxInfo) -> StatsIdentity {
+    StatsIdentity {
+        sandbox_id: info.config.sandbox_id.clone(),
+        execution_id: info.config.execution_id.clone(),
+        template_id: info.config.template_id.clone(),
+        build_id: info.config.build_id.clone(),
+        team_id: info.config.team_id.clone(),
+        vcpu_count: info.config.vcpu,
+        memory_mb: info.config.ram_mb,
     }
 }
 

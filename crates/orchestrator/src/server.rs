@@ -3,6 +3,8 @@ pub mod admission;
 pub mod app;
 pub mod config;
 pub mod health;
+#[cfg(target_os = "linux")]
+pub mod host_stats;
 pub mod info;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;

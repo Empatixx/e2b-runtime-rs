@@ -64,6 +64,10 @@ impl Sandbox {
         SocketAddr::from((self.config.slot.host_ip(), ENVD_PORT))
     }
 
+    pub fn cgroup_stats(&self) -> Option<crate::cgroup::CgroupStats> {
+        self.resources.cgroup.as_ref().map(Cgroup::stats)
+    }
+
     pub fn phases(&self) -> String {
         self.phases.render()
     }

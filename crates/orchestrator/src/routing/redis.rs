@@ -13,7 +13,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use super::publisher::{RouteStore, RoutingRecord};
-use crate::events::{EventSink, STREAM};
+use crate::events::{EventSink, STREAM, SandboxEvent, delivery_key};
 
 const ROUTING_KEY_PREFIX: &str = "sandbox:routing:";
 const DEFAULT_POOL_SIZE: usize = 5;
@@ -203,8 +203,9 @@ impl RouteStore for RoutingCatalog {
 }
 
 impl EventSink for EventStream {
-    fn publish(&self, delivery_key: &str, payload: String) -> BoxFuture<'static, Result<(), String>> {
-        let key = delivery_key.to_owned();
+    fn publish(&self, event: &SandboxEvent) -> BoxFuture<'static, Result<(), String>> {
+        let key = delivery_key(event.sandbox_team_id);
+        let payload = serde_json::to_string(event).unwrap_or_default();
         let redis = self.redis.clone();
         async move {
             let subscribed: i64 = redis

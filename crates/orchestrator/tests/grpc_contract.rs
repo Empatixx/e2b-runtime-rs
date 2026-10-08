@@ -157,6 +157,8 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         logs_collector: String::new(),
         node_ip: "localhost".to_owned(),
         redis: None,
+        clickhouse: None,
+        clickhouse_additional: Vec::new(),
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());

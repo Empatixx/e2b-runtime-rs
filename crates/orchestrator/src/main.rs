@@ -14,6 +14,9 @@ mod serve {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    use orchestrator::clickhouse::sinks::Clickhouse;
+    use orchestrator::events::EventSink;
+    use orchestrator::routing::redis::Redis;
     use orchestrator::server::app::App;
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::node::Node;
@@ -24,12 +27,21 @@ mod serve {
         tracing_subscriber::fmt().init();
         let config = NodeConfig::from_env()?;
         let node = Arc::new(Node::new(&config)?);
+        let mut event_sinks: Vec<Arc<dyn EventSink>> = Vec::new();
         match &config.redis {
-            Some(redis) => node.routing.install(Arc::new(
-                orchestrator::routing::redis::RedisRoutes::connect(redis).await?,
-            )),
+            Some(settings) => {
+                let redis = Redis::connect(settings).await?;
+                node.routing.install(Arc::new(redis.routing_catalog()));
+                event_sinks.push(Arc::new(redis.event_stream()));
+            }
             None => tracing::warn!("redis disabled; orchestrator sandbox routing records are not published"),
         }
+        if let Some(primary) = &config.clickhouse {
+            let clickhouse = Clickhouse::open(primary, &config.clickhouse_additional)?;
+            event_sinks.push(Arc::new(clickhouse.events));
+            let _ = node.host_stats.set(Arc::new(clickhouse.host_stats));
+        }
+        node.events.install(event_sinks);
         node.sweep().await;
         let app = App::new(node.clone());
         app.start_background();

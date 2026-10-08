@@ -2,10 +2,12 @@ pub mod block;
 pub mod builder;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
+pub mod clickhouse;
 pub mod envd;
 pub mod events;
 pub mod exposure;
 pub mod firecracker;
+pub mod hoststats;
 pub mod hyperloop;
 pub mod memory;
 pub mod network;

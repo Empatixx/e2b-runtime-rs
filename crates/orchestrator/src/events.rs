@@ -24,6 +24,8 @@ pub struct SandboxEvent {
     #[serde(rename = "type")]
     pub kind: String,
     pub timestamp: String,
+    #[serde(skip)]
+    pub at: SystemTime,
     pub event_category: String,
     pub event_label: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -69,11 +71,13 @@ impl SandboxEvent {
         if !sandbox.metadata.is_empty() {
             event_data.insert("sandbox_metadata".to_owned(), json!(sandbox.metadata));
         }
+        let at = SystemTime::now();
         Self {
             id: Uuid::new_v4(),
             version: VERSION.to_owned(),
             kind: kind.to_owned(),
-            timestamp: rfc3339(SystemTime::now()),
+            timestamp: rfc3339(at),
+            at,
             event_category: String::new(),
             event_label: String::new(),
             event_data,
@@ -126,7 +130,7 @@ pub fn delivery_key(team_id: Uuid) -> String {
 }
 
 pub trait EventSink: Send + Sync {
-    fn publish(&self, delivery_key: &str, payload: String) -> BoxFuture<'static, Result<(), String>>;
+    fn publish(&self, event: &SandboxEvent) -> BoxFuture<'static, Result<(), String>>;
 }
 
 #[derive(Default)]
@@ -147,10 +151,8 @@ impl EventsService {
         let Some(sinks) = self.sinks.get() else {
             return;
         };
-        let key = delivery_key(event.sandbox_team_id);
-        let payload = serde_json::to_string(&event).unwrap_or_default();
         for sink in sinks {
-            let published = sink.publish(&key, payload.clone());
+            let published = sink.publish(&event);
             tokio::spawn(async move {
                 if let Err(e) = published.await {
                     tracing::error!(error = %e, "Failed to publish sandbox event");
