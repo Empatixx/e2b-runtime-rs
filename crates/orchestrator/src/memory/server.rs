@@ -12,6 +12,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::region::Regions;
+use super::trace::{Access, PrefetchTracker, Trace};
 use super::uffd::{CopyOutcome, Event, Uffd};
 use crate::block::build_file::BuildFile;
 
@@ -23,13 +24,45 @@ pub struct MemoryServer {
     running: watch::Receiver<()>,
     task: JoinHandle<Result<(), String>>,
     state: Arc<SharedState>,
+    uffd: Arc<AsyncFd<Uffd>>,
+    regions: Regions,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prefaulted {
+    Installed,
+    Present,
+    Skipped,
+    Deferred,
+}
+
 struct SharedState {
     served: AtomicU64,
     write_protect: AtomicBool,
     removed: Mutex<RoaringBitmap>,
+    installed: Mutex<RoaringBitmap>,
+    trace: Mutex<PrefetchTracker>,
+}
+
+impl SharedState {
+    fn new(page_size: u64) -> Self {
+        Self {
+            served: AtomicU64::new(0),
+            write_protect: AtomicBool::new(true),
+            removed: Mutex::default(),
+            installed: Mutex::default(),
+            trace: Mutex::new(PrefetchTracker::new(page_size)),
+        }
+    }
+
+    fn touched(&self, page: u32, access: Access) {
+        self.installed.lock().insert(page);
+        self.trace.lock().record(u64::from(page), access);
+    }
+
+    fn is_untouched(&self, page: u32) -> bool {
+        !self.installed.lock().contains(page) && !self.removed.lock().contains(page)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +72,7 @@ struct Fault {
 }
 
 struct Serving {
-    uffd: AsyncFd<Uffd>,
+    uffd: Arc<AsyncFd<Uffd>>,
     regions: Regions,
     memfile: Arc<BuildFile>,
     state: Arc<SharedState>,
@@ -47,13 +80,11 @@ struct Serving {
 
 impl MemoryServer {
     pub fn start(uffd: Uffd, regions: Regions, memfile: Arc<BuildFile>) -> io::Result<Self> {
-        let state = Arc::new(SharedState {
-            write_protect: AtomicBool::new(true),
-            ..SharedState::default()
-        });
+        let state = Arc::new(SharedState::new(regions.page_size()));
+        let uffd = Arc::new(AsyncFd::new(uffd)?);
         let serving = Serving {
-            uffd: AsyncFd::new(uffd)?,
-            regions,
+            uffd: uffd.clone(),
+            regions: regions.clone(),
             memfile,
             state: state.clone(),
         };
@@ -69,7 +100,54 @@ impl MemoryServer {
             running,
             task,
             state,
+            uffd,
+            regions,
         })
+    }
+
+    pub fn page_size(&self) -> u64 {
+        self.regions.page_size()
+    }
+
+    pub fn trace(&self) -> Trace {
+        self.state.trace.lock().collect()
+    }
+
+    pub fn prefault(&self, offset: u64, data: &[u8]) -> Result<Prefaulted, String> {
+        let page_size = self.page_size();
+        if data.len() as u64 != page_size {
+            return Err(format!(
+                "prefault of {} bytes, the page size is {page_size}",
+                data.len()
+            ));
+        }
+        let page = (offset / page_size) as u32;
+        let Some(address) = self
+            .regions
+            .addresses_of(offset..offset + page_size)
+            .first()
+            .map(|range| range.start)
+        else {
+            return Ok(Prefaulted::Skipped);
+        };
+        if !self.state.is_untouched(page) {
+            return Ok(Prefaulted::Skipped);
+        }
+        let protect = self.state.write_protect.load(Ordering::Relaxed);
+        match self
+            .uffd
+            .get_ref()
+            .copy(address, data, protect)
+            .map_err(|e| e.to_string())?
+        {
+            CopyOutcome::Copied => {
+                self.state.touched(page, Access::Prefetch);
+                Ok(Prefaulted::Installed)
+            }
+            CopyOutcome::AlreadyPresent => Ok(Prefaulted::Present),
+            CopyOutcome::Retry | CopyOutcome::NoWriteProtect => Ok(Prefaulted::Deferred),
+            CopyOutcome::Gone => Err("the guest memory is gone".to_owned()),
+        }
     }
 
     pub fn faults_served(&self) -> u64 {
@@ -175,6 +253,10 @@ impl Serving {
             outcome => outcome,
         };
         self.after_copy(page, outcome)?;
+        if matches!(outcome, CopyOutcome::Copied | CopyOutcome::AlreadyPresent) {
+            let access = if write { Access::Write } else { Access::Read };
+            self.state.touched((offset / self.regions.page_size()) as u32, access);
+        }
         Ok(outcome)
     }
 
@@ -478,5 +560,33 @@ mod tests {
 
         assert_eq!(fast_page.ok(), Some(7), "a fault behind a slow page was not served");
         assert!(stopped.is_ok(), "stop waited for a slow page");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prefaulted_pages_need_no_fault_and_are_traced() {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return;
+        }
+        let fixture = fixture(3, 3).await;
+        let page = vec![9; PAGE as usize];
+
+        assert_eq!(fixture.server.prefault(PAGE, &page), Ok(Prefaulted::Installed));
+        assert_eq!(fixture.server.prefault(PAGE, &page), Ok(Prefaulted::Skipped));
+        assert_eq!(fixture.server.prefault(10 * PAGE, &page), Ok(Prefaulted::Skipped));
+        assert_eq!(read_page(&fixture.pages, 1).await, 9);
+        assert_eq!(read_page(&fixture.pages, 0).await, 1);
+
+        let trace = fixture.server.trace();
+        assert_eq!(fixture.server.faults_served(), 1);
+        assert_eq!(
+            trace
+                .touches
+                .iter()
+                .map(|(index, touch)| (*index, touch.access))
+                .collect::<Vec<_>>(),
+            vec![(0, Access::Read), (1, Access::Prefetch)]
+        );
+        fixture.server.stop().await.unwrap();
     }
 }

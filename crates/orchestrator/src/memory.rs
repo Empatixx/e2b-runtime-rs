@@ -5,5 +5,6 @@ pub mod region;
 pub mod server;
 #[cfg(target_os = "linux")]
 pub mod snapshot;
+pub mod trace;
 #[cfg(target_os = "linux")]
 pub mod uffd;
