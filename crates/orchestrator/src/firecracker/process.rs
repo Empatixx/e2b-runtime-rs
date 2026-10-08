@@ -37,15 +37,15 @@ impl FirecrackerProcess {
             .stdout(console_file)
             .stderr(console_err)
             .kill_on_drop(true);
-        let membership = launch
+        let cgroup_procs = launch
             .cgroup
             .as_deref()
-            .map(|cgroup| CgroupMembership::on_exec(&mut command, cgroup))
+            .map(|cgroup| join_cgroup_on_exec(&mut command, cgroup))
             .transpose()?;
         let child = command
             .spawn()
             .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
-        drop(membership);
+        drop(cgroup_procs);
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
@@ -107,27 +107,21 @@ impl FirecrackerProcess {
     }
 }
 
-struct CgroupMembership {
-    procs: File,
-}
-
-impl CgroupMembership {
-    fn on_exec(command: &mut Command, cgroup: &Path) -> Result<Self, String> {
-        let path = cgroup.join("cgroup.procs");
-        let procs = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(|e| format!("open {}: {e}", path.display()))?;
-        let fd = procs.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                nix::unistd::write(BorrowedFd::borrow_raw(fd), b"0")
-                    .map(|_| ())
-                    .map_err(io::Error::from)
-            });
-        }
-        Ok(Self { procs })
+fn join_cgroup_on_exec(command: &mut Command, cgroup: &Path) -> Result<File, String> {
+    let path = cgroup.join("cgroup.procs");
+    let procs = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let fd = procs.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            nix::unistd::write(BorrowedFd::borrow_raw(fd), b"0")
+                .map(|_| ())
+                .map_err(io::Error::from)
+        });
     }
+    Ok(procs)
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), String> {
