@@ -17,7 +17,8 @@ mod serve {
     use orchestrator::server::app::App;
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::node::Node;
-    use tokio::signal::unix::{SignalKind, signal};
+    use orchestrator::server::shutdown::{Drained, drain};
+    use tokio::signal::unix::{Signal, SignalKind, signal};
 
     pub async fn run() -> Result<(), String> {
         tracing_subscriber::fmt().init();
@@ -31,26 +32,46 @@ mod serve {
             .await
             .map_err(|e| format!("listen on {address}: {e}"))?;
         tracing::info!(%address, node = %config.node_id, "orchestrator listening");
-        let served = axum::serve(listener, app.router())
-            .with_graceful_shutdown(shutdown_requested())
-            .await
-            .map_err(|e| e.to_string());
-        tracing::info!("stopping every sandbox");
-        node.shutdown().await;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(
+            axum::serve(listener, app.router())
+                .with_graceful_shutdown(async move { drop(stopped.await) })
+                .into_future(),
+        );
+        let mut signals = Signals::new()?;
+        signals.next().await;
+        tracing::info!("shutting down: draining sandboxes");
+        node.status.shut_down();
+        let drained = tokio::select! {
+            () = tokio::time::sleep(config.drain_sleep) => drain(|| node.registry.is_empty(), signals.next()).await,
+            () = signals.next() => Drained::Forced,
+        };
+        if drained == Drained::Forced {
+            tracing::info!("forced shutdown: stopping every sandbox");
+            node.shutdown().await;
+        }
+        drop(stop.send(()));
+        let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
         node.close().await;
         served
     }
 
-    async fn shutdown_requested() {
-        let terminate = async {
-            match signal(SignalKind::terminate()) {
-                Ok(mut terminate) => drop(terminate.recv().await),
-                Err(_) => std::future::pending().await,
+    struct Signals {
+        terminate: Signal,
+    }
+
+    impl Signals {
+        fn new() -> Result<Self, String> {
+            signal(SignalKind::terminate())
+                .map(|terminate| Self { terminate })
+                .map_err(|e| format!("listen for SIGTERM: {e}"))
+        }
+
+        async fn next(&mut self) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = self.terminate.recv() => {}
             }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            () = terminate => {}
         }
     }
 }

@@ -11,6 +11,7 @@ const DEFAULT_NODE_ID: &str = "local";
 const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_SANDBOXES: i64 = 200;
 const DEFAULT_MAX_STARTING: usize = 3;
+const DEFAULT_DRAIN_SLEEP_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {
@@ -42,6 +43,7 @@ pub struct NodeConfig {
     pub labels: Vec<String>,
     pub max_sandboxes: i64,
     pub max_starting: usize,
+    pub drain_sleep: Duration,
 }
 
 impl NodeConfig {
@@ -87,6 +89,9 @@ impl NodeConfig {
                 .unwrap_or_default(),
             max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
             max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
+            drain_sleep: Duration::from_millis(
+                number(vars, "SHUTDOWN_DRAIN_SLEEP_MS")?.unwrap_or(DEFAULT_DRAIN_SLEEP_MS),
+            ),
         })
     }
 
@@ -158,6 +163,7 @@ mod tests {
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
+        assert_eq!(config.drain_sleep, Duration::from_secs(15));
         assert!(config.labels.is_empty());
         assert_eq!(
             config.storage,

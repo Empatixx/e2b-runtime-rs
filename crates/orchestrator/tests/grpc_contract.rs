@@ -145,6 +145,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         labels: Vec::new(),
         max_sandboxes,
         max_starting: 3,
+        drain_sleep: Duration::ZERO,
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());
