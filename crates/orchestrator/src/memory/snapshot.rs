@@ -78,16 +78,9 @@ pub fn export_pages(
     empty: &RoaringBitmap,
     out: &mut impl Write,
 ) -> io::Result<DiffMetadata> {
-    let page_size = regions
-        .first()
-        .map(|region| region.page_size)
-        .ok_or_else(|| io::Error::other("firecracker reported no memory regions"))?;
-    memory.copy(regions, dirty, page_size, out)?;
-    Ok(DiffMetadata {
-        dirty: dirty.clone(),
-        empty: empty - dirty,
-        block_size: page_size,
-    })
+    let diff = diff_metadata(regions, dirty, empty)?;
+    memory.copy(regions, dirty, diff.block_size, out)?;
+    Ok(diff)
 }
 
 fn address_of(regions: &[GuestRegion], page: u32, page_size: u64) -> io::Result<u64> {

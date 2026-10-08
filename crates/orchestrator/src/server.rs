@@ -1,6 +1,7 @@
 pub mod admission;
 #[cfg(target_os = "linux")]
 pub mod app;
+pub mod build_id;
 pub mod config;
 pub mod health;
 #[cfg(target_os = "linux")]

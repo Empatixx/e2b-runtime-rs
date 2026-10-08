@@ -3,6 +3,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use futures::FutureExt;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 
@@ -15,7 +16,6 @@ use crate::memory::snapshot::{GuestMemory, diff_metadata, export_pages, memfile_
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{DiffMetadata, Header, Metadata};
-use futures::FutureExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -143,8 +143,13 @@ impl Sandbox {
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
         let tracked_writes = pages.tracked_writes;
         let (memfile, memfile_ready) = self.export_memory(pages, pid, &files.memfile, build_id).await?;
-        self.flush_disk().await?;
-        let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
+        let rootfs = match self.export_disk(&files.rootfs, build_id).await {
+            Ok(rootfs) => rootfs,
+            Err(e) => {
+                let _ = memfile_ready.await;
+                return Err(e);
+            }
+        };
         let snapshot = Snapshot {
             build: Build {
                 build_id,
@@ -157,6 +162,11 @@ impl Sandbox {
             tracked_writes,
         };
         Ok((snapshot, memfile_ready))
+    }
+
+    async fn export_disk(&self, path: &Path, build_id: Uuid) -> Result<Exported, String> {
+        self.flush_disk().await?;
+        self.export_rootfs(path, build_id).await
     }
 
     async fn memory_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {

@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use parking_lot::Mutex;
@@ -8,7 +9,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
-use super::node::{Node, event_sandbox, execution, routed_sandbox, stats_identity};
+use super::node::{Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::OomMonitor;
 use super::registry::Lifecycle;
 use super::status::Work;
@@ -59,11 +60,16 @@ pub enum Command {
 pub struct SandboxHandle {
     pub info: Arc<Mutex<SandboxInfo>>,
     pub commands: mpsc::Sender<Command>,
+    cleanup: Arc<AtomicBool>,
 }
 
 impl SandboxHandle {
     pub fn lifecycle(&self) -> Lifecycle {
         self.info.lock().lifecycle.clone()
+    }
+
+    pub fn cleanup_started(&self) -> bool {
+        self.cleanup.load(Ordering::SeqCst)
     }
 }
 
@@ -86,6 +92,7 @@ struct Running {
     sandbox: Sandbox,
     slot: Slot,
     info: Arc<Mutex<SandboxInfo>>,
+    cleanup: Arc<AtomicBool>,
     commands: mpsc::Receiver<Command>,
     node: Arc<Node>,
     host_stats: Option<HostStatsCollector>,
@@ -98,6 +105,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
     let handle = SandboxHandle {
         info: Arc::new(Mutex::new(info)),
         commands,
+        cleanup: Arc::default(),
     };
     let host_stats = node
         .host_stats
@@ -115,6 +123,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         sandbox,
         slot,
         info: handle.info.clone(),
+        cleanup: handle.cleanup.clone(),
         commands: receiver,
         _work: node.status.track_work(),
         node,
@@ -128,9 +137,8 @@ impl Running {
         let id = self.sandbox.id().to_owned();
         let ending = self.wait_for_ending().await;
         let lifecycle = self.info.lock().lifecycle.clone();
-        self.node.registry.stop(&lifecycle);
-        let routed = routed_sandbox(&self.info.lock());
-        self.node.routing.on_stopping(&routed).await;
+        self.cleanup.store(true, Ordering::SeqCst);
+        self.node.mark_stopping(&lifecycle).await;
         match ending {
             Ending::Pause {
                 build_id,

@@ -3,7 +3,7 @@ mod checkpoint;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use tonic::Status;
@@ -59,7 +59,7 @@ pub struct Node {
     pub uploads: Arc<Uploads>,
     pub routing: RoutingPublisher,
     pub events: EventsService,
-    pub host_stats: std::sync::OnceLock<Arc<ClickhouseHostStats>>,
+    pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
@@ -88,7 +88,34 @@ struct StartRequest {
     config: SandboxConfig,
     lifetime: Lifetime,
     lifecycle: Lifecycle,
-    started_at: SystemTime,
+}
+
+enum StartFailure {
+    Rejected(Status),
+    Template(TemplateError),
+    Failed(String),
+}
+
+impl StartFailure {
+    fn create_status(self, sandbox_id: &str) -> Status {
+        match self {
+            StartFailure::Rejected(status) => status,
+            StartFailure::Template(TemplateError::NotFound(_)) => {
+                Status::failed_precondition(format!("sandbox files for '{sandbox_id}' not found"))
+            }
+            StartFailure::Template(TemplateError::Failed(e)) | StartFailure::Failed(e) => {
+                Status::internal(format!("failed to create sandbox: {e}"))
+            }
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            StartFailure::Rejected(status) => status.message().to_owned(),
+            StartFailure::Template(e) => e.to_string(),
+            StartFailure::Failed(e) => e.clone(),
+        }
+    }
 }
 
 pub struct Lifetime {
@@ -107,7 +134,7 @@ impl Node {
             status: Arc::default(),
             uploads: Arc::default(),
             events: EventsService::default(),
-            host_stats: std::sync::OnceLock::new(),
+            host_stats: OnceLock::new(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
@@ -273,9 +300,9 @@ impl Node {
                 config,
                 lifetime,
                 lifecycle: lifecycle.clone(),
-                started_at: SystemTime::now(),
             })
             .await
+            .map_err(|failure| failure.create_status(&id))
         };
         let started = tokio::time::timeout(REQUEST_TIMEOUT, started)
             .await
@@ -284,29 +311,51 @@ impl Node {
                     "failed to create sandbox: {DEADLINE_EXCEEDED}"
                 )))
             });
-        match started {
-            Ok(handle) => {
-                let info = handle.info.lock().clone();
-                self.registry.activate(lifecycle, handle);
-                self.routing.on_insert(&routed_sandbox(&info)).await;
-                let kind = if info.config.snapshot { RESUMED } else { CREATED };
-                self.events.publish(SandboxEvent::new(kind, &event_sandbox(&info)));
-                Ok(info.scheduling)
-            }
+        let created = match started {
+            Ok(handle) => self
+                .register(&lifecycle, &handle)
+                .await
+                .map_err(|e| Status::internal(format!("failed to register sandbox: {e}")))
+                .map(|info| {
+                    let kind = if info.config.snapshot { RESUMED } else { CREATED };
+                    self.events.publish(SandboxEvent::new(kind, &event_sandbox(&info)));
+                    info.scheduling
+                }),
             Err(status) => {
-                self.registry.abandon(&id);
                 let _ = std::fs::remove_dir_all(self.work_dir_of(&lifecycle));
                 Err(status)
             }
+        };
+        self.registry.release(&id);
+        created
+    }
+
+    async fn register(&self, lifecycle: &Lifecycle, handle: &SandboxHandle) -> Result<SandboxInfo, String> {
+        let info = handle.info.lock().clone();
+        let registered = self
+            .registry
+            .activate(lifecycle.clone(), handle.clone(), || handle.cleanup_started());
+        if let Err(e) = registered {
+            let _ = handle.commands.send(Command::Delete).await;
+            return Err(e);
         }
+        self.routing.on_insert(&routed_sandbox(&info)).await;
+        Ok(info)
+    }
+
+    pub async fn mark_stopping(&self, lifecycle: &Lifecycle) -> Option<SandboxHandle> {
+        let stopped = self.registry.stop(lifecycle)?;
+        let routed = routed_sandbox(&stopped.info.lock());
+        self.routing.on_stopping(&routed).await;
+        Some(stopped)
     }
 
     pub async fn shutdown(&self) {
-        self.registry
-            .running()
-            .iter()
-            .filter_map(|handle| self.registry.stop(&handle.lifecycle()).map(|_| handle))
-            .for_each(|handle| drop(handle.commands.try_send(Command::Delete)));
+        for handle in self.registry.running() {
+            if let Some(stopped) = self.mark_stopping(&handle.lifecycle()).await {
+                let _ = stopped.commands.send(Command::Delete).await;
+            }
+        }
         let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
         while !self.registry.is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -333,30 +382,28 @@ impl Node {
         let _ = std::fs::remove_dir_all(&self.work_dir);
     }
 
-    async fn start(self: &Arc<Self>, request: StartRequest) -> Result<SandboxHandle, Status> {
+    async fn start(self: &Arc<Self>, request: StartRequest) -> Result<SandboxHandle, StartFailure> {
         let StartRequest {
             template,
             config,
             lifetime,
             lifecycle,
-            started_at,
         } = request;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
-        let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))?;
+        let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))
+            .map_err(StartFailure::Rejected)?;
         let lease = self.network.lease(egress.as_ref());
         tokio::pin!(files, lease);
         let (files, lease) = tokio::select! {
             files = &mut files => match files {
-                Err(e) => return Err(template_status(&config, e)),
+                Err(e) => return Err(StartFailure::Template(e)),
                 files => (files, lease.await),
             },
             lease = &mut lease => (files.await, lease),
         };
-        let lease = lease.map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
-        let (build, snapfile) = files.map_err(|e| template_status(&config, e))?;
-        let slot = lease
-            .slot()
-            .ok_or_else(|| Status::internal("failed to create sandbox: the network slot was taken back"))?;
+        let lease = lease.map_err(StartFailure::Failed)?;
+        let (build, snapfile) = files.map_err(StartFailure::Template)?;
+        let slot = lease.slot().ok_or_else(slot_taken_back)?;
         let metadata = template
             .metadata()
             .await
@@ -371,8 +418,7 @@ impl Node {
             env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),
             lifecycle_id: Some(lifecycle.lifecycle_id.clone()),
             hyperloop_ip: Some(self.orchestrator_ip.clone()),
-            volume_mounts: volume_mounts(&config, &self.orchestrator_ip)
-                .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?,
+            volume_mounts: volume_mounts(&config, &self.orchestrator_ip).map_err(StartFailure::Failed)?,
             default_user: default_user(metadata.as_ref()),
             ..EnvdInit::default()
         };
@@ -387,10 +433,8 @@ impl Node {
                 lifecycle: &lifecycle,
             })
             .await
-            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
-        let slot = lease
-            .keep()
-            .ok_or_else(|| Status::internal("failed to create sandbox: the network slot was taken back"))?;
+            .map_err(StartFailure::Failed)?;
+        let slot = lease.keep().ok_or_else(slot_taken_back)?;
         Ok(lifecycle::spawn(
             sandbox,
             slot,
@@ -404,7 +448,7 @@ impl Node {
                 slot,
                 template: template.clone(),
                 scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
-                started_at,
+                started_at: SystemTime::now(),
             },
             self.clone(),
         ))
@@ -576,13 +620,8 @@ fn parents(build: &Build) -> Vec<Uuid> {
         .collect()
 }
 
-fn template_status(config: &SandboxConfig, error: TemplateError) -> Status {
-    match error {
-        TemplateError::NotFound(_) => {
-            Status::failed_precondition(format!("sandbox files for '{}' not found", config.sandbox_id))
-        }
-        TemplateError::Failed(e) => Status::internal(format!("failed to create sandbox: {e}")),
-    }
+fn slot_taken_back() -> StartFailure {
+    StartFailure::Failed("the network slot was taken back".to_owned())
 }
 
 fn sweep_cgroups(root: &Path) {

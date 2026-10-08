@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use tonic::{Request, Response, Status};
-use uuid::Uuid;
 
+use super::build_id;
 use super::lifecycle::{Command, SandboxHandle};
 use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
 use super::scheduling::from_headers;
@@ -131,8 +131,8 @@ impl SandboxService for SandboxServer {
         let lifecycle = self.running(&id, &format!("sandbox '{id}' not found"))?.lifecycle();
         let handle = self
             .node
-            .registry
-            .stop(&lifecycle)
+            .mark_stopping(&lifecycle)
+            .await
             .ok_or_else(|| Status::internal(format!("failed to delete sandbox '{id}'")))?;
         let info = handle.info.lock().clone();
         let kill_reason = request.kill_reason.filter(|reason| !reason.is_empty());
@@ -149,14 +149,12 @@ impl SandboxService for SandboxServer {
         let request = request.into_inner();
         let id = request.sandbox_id;
         let lifecycle = self.running(&id, "sandbox not found")?.lifecycle();
-        let build_id = Uuid::parse_str(&request.build_id)
-            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", request.build_id)))?;
         let handle = self
             .node
-            .registry
-            .stop(&lifecycle)
+            .mark_stopping(&lifecycle)
+            .await
             .ok_or_else(|| Status::internal("failed to pause sandbox"))?;
-        let snapshotted = tokio::spawn(pause(handle, build_id, request.template_id))
+        let snapshotted = tokio::spawn(pause(handle, request.build_id, request.template_id))
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
@@ -186,10 +184,8 @@ impl SandboxService for SandboxServer {
         let handle = self.running(&id, &format!("sandbox '{id}' not found"))?;
         let envd_version = handle.info.lock().config.envd_version.clone();
         check_for_snapshot(&envd_version).map_err(Status::failed_precondition)?;
-        let build_id = Uuid::parse_str(&request.build_id)
-            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", request.build_id)))?;
         let checkpoint = CheckpointRequest {
-            build_id,
+            build_id: request.build_id,
             provenance: request.metadata,
             filesystem_only: request.filesystem_only,
         };
@@ -228,7 +224,14 @@ impl SandboxServer {
     }
 }
 
-async fn pause(handle: SandboxHandle, build_id: Uuid, template_id: String) -> Result<Snapshot, String> {
+async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> Result<Snapshot, String> {
+    let build_id = match build_id::parse(&build_id) {
+        Ok(build_id) => build_id,
+        Err(e) => {
+            let _ = handle.commands.send(Command::Delete).await;
+            return Err(format!("failed to parse build id: {e}"));
+        }
+    };
     let (reply, snapshot) = tokio::sync::oneshot::channel();
     handle
         .commands

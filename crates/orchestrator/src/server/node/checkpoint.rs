@@ -7,8 +7,10 @@ use uuid::Uuid;
 
 use super::{Lifetime, Node, StartRequest, event_sandbox, routed_sandbox};
 use crate::events::{CHECKPOINTED, SandboxEvent};
+use crate::memory::trace::Trace;
 use crate::proto::SchedulingMetadata;
 use crate::sandbox::snapshot::LocalSnapshot;
+use crate::server::build_id;
 use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
 use crate::server::registry::{Lifecycle, StopReserved};
 use crate::server::scheduling::from_headers;
@@ -18,7 +20,7 @@ use crate::storage::backend::ObjectMetadata;
 const BUILD_ORIGIN: &str = "snapshot_template";
 
 pub struct CheckpointRequest {
-    pub build_id: Uuid,
+    pub build_id: String,
     pub provenance: HashMap<String, String>,
     pub filesystem_only: bool,
 }
@@ -36,12 +38,15 @@ impl Node {
         if request.filesystem_only {
             return Err(filesystem_only_checkpoint_disabled(&id));
         }
-        self.registry
+        let stopped = self
+            .registry
             .stop_reserved(&lifecycle)
             .map_err(|stopped| stop_reserved_status(stopped, &id))?;
-        self.resume_fresh(handle, request)
-            .await
-            .inspect_err(|_| self.registry.abandon(&id))
+        let routed = routed_sandbox(&stopped.info.lock());
+        self.routing.on_stopping(&routed).await;
+        let checkpointed = self.resume_fresh(handle, request).await;
+        self.registry.release(&id);
+        checkpointed
     }
 
     async fn resume_fresh(
@@ -51,15 +56,23 @@ impl Node {
     ) -> Result<SchedulingMetadata, Status> {
         let parent = handle.info.lock().clone();
         let id = parent.config.sandbox_id.clone();
-        let local = snapshot(&handle, request.build_id).await.map_err(|e| {
+        let snapshot_error = |e: String| {
             Status::internal(format!(
                 "error snapshotting sandbox '{id}': error snapshotting sandbox: {e}"
             ))
-        })?;
+        };
+        let build_id = match build_id::parse(&request.build_id) {
+            Ok(build_id) => build_id,
+            Err(e) => {
+                let _ = handle.commands.send(Command::Delete).await;
+                return Err(snapshot_error(format!("failed to parse build id: {e}")));
+            }
+        };
+        let local = snapshot(&handle, build_id).await.map_err(snapshot_error)?;
         let resumed = self
-            .resume_checkpoint(&parent, request.build_id)
+            .resume_checkpoint(&parent, build_id)
             .await
-            .inspect_err(|_| self.store.unpin(request.build_id))?;
+            .inspect_err(|_| self.store.unpin(build_id))?;
         self.embed_prefetch(&resumed, &local).await;
         let object_metadata = object_metadata(request.provenance, &parent);
         if let Err(e) = self.upload_now(local.clone(), object_metadata).await {
@@ -99,16 +112,18 @@ impl Node {
                     end: parent.end,
                 },
                 lifecycle: lifecycle.clone(),
-                started_at: parent.started_at,
             })
             .await
             .inspect_err(|_| drop(std::fs::remove_dir_all(self.work_dir_of(&lifecycle))))
-            .map_err(|status| {
-                Status::internal(format!("error resuming sandbox after checkpoint: {}", status.message()))
+            .map_err(|failure| {
+                Status::internal(format!(
+                    "error resuming sandbox after checkpoint: {}",
+                    failure.message()
+                ))
             })?;
-        let info = started.info.lock().clone();
-        self.registry.activate(lifecycle, started.clone());
-        self.routing.on_insert(&routed_sandbox(&info)).await;
+        self.register(&lifecycle, &started)
+            .await
+            .map_err(|e| Status::internal(format!("error registering resumed sandbox after checkpoint: {e}")))?;
         Ok(started)
     }
 
@@ -135,7 +150,7 @@ impl Node {
     }
 
     async fn kill(&self, resumed: &SandboxHandle) {
-        self.registry.stop(&resumed.lifecycle());
+        self.mark_stopping(&resumed.lifecycle()).await;
         let _ = resumed.commands.send(Command::Delete).await;
     }
 }
@@ -150,7 +165,7 @@ async fn snapshot(handle: &SandboxHandle, build_id: Uuid) -> Result<LocalSnapsho
     snapshot.await.map_err(|_| "the sandbox stopped".to_owned())?
 }
 
-async fn trace(handle: &SandboxHandle) -> Option<crate::memory::trace::Trace> {
+async fn trace(handle: &SandboxHandle) -> Option<Trace> {
     let (reply, trace) = oneshot::channel();
     handle.commands.send(Command::Trace { reply }).await.ok()?;
     trace.await.ok().flatten()
