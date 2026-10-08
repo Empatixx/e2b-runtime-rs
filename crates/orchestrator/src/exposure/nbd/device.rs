@@ -10,7 +10,7 @@ use std::time::Duration;
 use super::ioctl;
 use super::pool::{DEFAULT_POOL_SIZE, DevicePool};
 
-const FLAGS: i32 = 1 | 4 | 32 | 64;
+const FLAGS: i32 = 1 | 32 | 64 | 256;
 const TIMEOUT_SECONDS: u64 = 90;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_micros(100);
