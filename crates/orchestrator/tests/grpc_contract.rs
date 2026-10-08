@@ -577,8 +577,16 @@ async fn sandbox_lifecycle_over_grpc() {
                 .map_or(true, |mut entries| entries.next().is_none())
             && !nbd_connected_with_size(template_size(&host)))
         .await,
-        "left behind: {:?}",
-        pool_namespaces_left(pool)
+        "left behind: namespaces {:?}, cgroups {:?}, sandbox dirs {:?}, nbd {}",
+        pool_namespaces_left(pool),
+        ["grpc-sbx", "grpc-race"].map(cgroup_left),
+        std::fs::read_dir(cluster.dir.path().join("sandboxes"))
+            .map(|entries| entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+        nbd_connected_with_size(template_size(&host))
     );
 }
 

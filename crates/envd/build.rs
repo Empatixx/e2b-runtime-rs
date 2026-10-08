@@ -3,6 +3,7 @@ fn main() {
         .files(&[
             "../../proto/envd/process/process.proto",
             "../../proto/envd/filesystem/filesystem.proto",
+            "../../proto/envd/upgrade/handover.proto",
         ])
         .includes(&["../../proto/envd/"])
         .include_file("_connectrpc.rs")

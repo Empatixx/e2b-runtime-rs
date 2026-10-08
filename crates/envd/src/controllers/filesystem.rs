@@ -1,9 +1,9 @@
 mod entry;
+pub mod handover;
 mod legacy;
 mod ops;
-mod watch;
+pub mod watch;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -23,7 +23,6 @@ use watch::{FileWatcher, PendingEvents};
 
 pub struct FilesystemService {
     pub state: Arc<AppState>,
-    pub watchers: Mutex<HashMap<String, FileWatcher>>,
 }
 
 #[allow(refining_impl_trait)]
@@ -152,9 +151,16 @@ impl Filesystem for FilesystemService {
         })?;
 
         let watcher_id = watch::watcher_id();
-        self.watchers
-            .lock()
-            .insert(watcher_id.clone(), FileWatcher { watcher, pending });
+        self.state.watchers.lock().insert(
+            watcher_id.clone(),
+            FileWatcher {
+                watcher,
+                pending,
+                path: path.clone(),
+                recursive: request.recursive,
+                include_entry: request.include_entry,
+            },
+        );
         Response::ok(CreateWatcherResponse {
             watcher_id,
             ..Default::default()
@@ -166,7 +172,7 @@ impl Filesystem for FilesystemService {
         ctx: RequestContext,
         request: ServiceRequest<'_, GetWatcherEventsRequest>,
     ) -> ServiceResult<GetWatcherEventsResponse> {
-        let watchers = self.watchers.lock();
+        let watchers = self.state.watchers.lock();
         let watcher = watchers
             .get(request.watcher_id)
             .ok_or_else(|| watcher_not_found(request.watcher_id))?;
@@ -192,7 +198,8 @@ impl Filesystem for FilesystemService {
         _ctx: RequestContext,
         request: ServiceRequest<'_, RemoveWatcherRequest>,
     ) -> ServiceResult<RemoveWatcherResponse> {
-        self.watchers
+        self.state
+            .watchers
             .lock()
             .remove(request.watcher_id)
             .ok_or_else(|| watcher_not_found(request.watcher_id))?;

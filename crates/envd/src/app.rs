@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
@@ -9,6 +10,8 @@ use crate::cgroups::freeze::WorkloadFreezer;
 use crate::cgroups::hierarchy::PROC_SELF_CGROUP;
 use crate::cgroups::memory::MemoryProtection;
 use crate::config::Config;
+use crate::controllers::filesystem::watch::FileWatcher;
+use crate::controllers::process::registry::Processes;
 use crate::envvars::EnvVars;
 use crate::host::cacerts::CaCertInstaller;
 use crate::host::metrics::{CpuUsage, read_metrics};
@@ -16,6 +19,8 @@ use crate::host::mmds::MmdsOpts;
 use crate::host::nfs::NfsMounts;
 use crate::host::oom::OomWatcher;
 use crate::logs::exporter::LogExporter;
+use crate::port::forward::Forwards;
+use crate::upgrade::HandoverReport;
 
 #[derive(Debug, Clone)]
 pub struct Defaults {
@@ -51,6 +56,10 @@ pub struct AppState {
     pub nfs: NfsMounts,
     pub hyperloop_lock: Mutex<()>,
     pub log_exporter: Option<Arc<LogExporter>>,
+    pub processes: Arc<Processes>,
+    pub watchers: Arc<Mutex<HashMap<String, FileWatcher>>>,
+    pub forwards: Forwards,
+    pub handover: Mutex<Option<HandoverReport>>,
 }
 
 impl AppState {
@@ -65,6 +74,10 @@ impl AppState {
             nfs: NfsMounts::default(),
             hyperloop_lock: Mutex::new(()),
             log_exporter: (!config.is_not_fc).then(Arc::default),
+            processes: Arc::default(),
+            watchers: Arc::default(),
+            forwards: Forwards::default(),
+            handover: Mutex::new(None),
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
             freezer,

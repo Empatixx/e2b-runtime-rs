@@ -64,6 +64,25 @@ impl Processes {
         });
     }
 
+    pub fn retained(&self) -> Vec<Exited> {
+        let now = Instant::now();
+        self.exited
+            .lock()
+            .by_pid
+            .values()
+            .filter(|exited| exited.expires > now)
+            .cloned()
+            .collect()
+    }
+
+    pub fn restore(&self, mut retained: Vec<Exited>) {
+        let running = self.running.lock();
+        retained.retain(|exited| !running.contains_key(&exited.pid));
+        retained.sort_by_key(|exited| exited.expires);
+        let mut exited = self.exited.lock();
+        retained.into_iter().for_each(|entry| exited.insert(entry));
+    }
+
     pub fn all(&self) -> Vec<Arc<Process>> {
         self.running.lock().values().cloned().collect()
     }

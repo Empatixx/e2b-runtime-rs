@@ -22,6 +22,9 @@ const ID_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz1234567890";
 pub struct FileWatcher {
     pub watcher: RecommendedWatcher,
     pub pending: Arc<Mutex<PendingEvents>>,
+    pub path: PathBuf,
+    pub recursive: bool,
+    pub include_entry: bool,
 }
 
 #[derive(Default)]

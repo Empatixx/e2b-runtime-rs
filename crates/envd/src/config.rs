@@ -7,6 +7,7 @@ pub struct Config {
     pub verbose: bool,
     pub version: bool,
     pub commit: bool,
+    pub resume_handover: bool,
 }
 
 impl Default for Config {
@@ -19,6 +20,7 @@ impl Default for Config {
             verbose: false,
             version: false,
             commit: false,
+            resume_handover: false,
         }
     }
 }
@@ -39,6 +41,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Config, String> {
             "verbose" => config.verbose = bool_flag(&name, inline)?,
             "version" => config.version = bool_flag(&name, inline)?,
             "commit" => config.commit = bool_flag(&name, inline)?,
+            "resume-handover" => config.resume_handover = bool_flag(&name, inline)?,
             "port" => {
                 let value = flag_value(&name, inline, &mut args)?;
                 config.port = value

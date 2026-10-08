@@ -4,18 +4,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::hierarchy::{
-    AuditResult, PROC_SELF_CGROUP, allowlisted, audit_frozen_state, descend_set, sample_path, scan_guest_frozen,
+    AuditResult, PROC_SELF_CGROUP, allowlisted, audit_frozen_state, descend_set, join, sample_path, scan_guest_frozen,
     self_cgroup_path,
 };
 use super::{
     CgroupError, CgroupManager, Failure, ProcessType, children_of, freeze_at, freeze_requested_at, frozen_at,
     process_type_name, unfreeze_at,
 };
+use crate::util::fs::clean;
 
 pub const THAW_WATCHDOG_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const THAW_MAX_CGROUPS: usize = 8192;
@@ -121,7 +122,8 @@ struct Poll {
 
 pub struct WorkloadFreezer {
     manager: Arc<CgroupManager>,
-    lock: Semaphore,
+    lock: Arc<Semaphore>,
+    thawed: watch::Sender<u64>,
     sweep: Mutex<Sweep>,
     watchdog: Mutex<Watchdog>,
     watchdog_window: Duration,
@@ -156,7 +158,8 @@ impl WorkloadFreezer {
     fn with(manager: Arc<CgroupManager>, watchdog_window: Duration, proc_self_cgroup: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             manager,
-            lock: Semaphore::new(1),
+            lock: Arc::new(Semaphore::new(1)),
+            thawed: watch::Sender::new(0),
             sweep: Mutex::default(),
             watchdog: Mutex::default(),
             watchdog_window,
@@ -166,6 +169,61 @@ impl WorkloadFreezer {
 
     pub fn manager(&self) -> &CgroupManager {
         &self.manager
+    }
+
+    pub async fn freeze_hold(
+        self: &Arc<Self>,
+        options: FreezeOptions,
+    ) -> (OwnedSemaphorePermit, FreezeResult, Vec<String>) {
+        let permit = self
+            .lock
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the freezer lock is never closed");
+        let (result, errors) = self.freeze_locked(options).await;
+        (permit, result, errors)
+    }
+
+    pub fn thawed(&self) -> watch::Receiver<u64> {
+        self.thawed.subscribe()
+    }
+
+    pub fn guest_frozen_paths(&self) -> Vec<String> {
+        let Some(root) = self.manager.walk_root() else {
+            return Vec::new();
+        };
+        let root = clean(root);
+        let mut relative: Vec<String> = self
+            .sweep
+            .lock()
+            .guest_frozen
+            .iter()
+            .filter_map(|path| {
+                clean(path)
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|rel| rel.display().to_string())
+            })
+            .map(|rel| if rel.is_empty() { ".".to_owned() } else { rel })
+            .collect();
+        relative.sort();
+        relative
+    }
+
+    pub fn set_guest_frozen_paths(&self, relative: &[String]) {
+        let Some(root) = self.manager.walk_root() else {
+            return;
+        };
+        if relative.is_empty() {
+            return;
+        }
+        self.sweep.lock().guest_frozen = relative.iter().map(|rel| join(root, rel)).collect();
+    }
+
+    pub fn resume_frozen(self: &Arc<Self>) {
+        self.sweep.lock().freeze_active = true;
+        self.arm_watchdog();
     }
 
     pub async fn freeze(self: &Arc<Self>, options: FreezeOptions) -> (FreezeResult, Vec<String>) {
@@ -412,6 +470,7 @@ impl WorkloadFreezer {
             self.disarm_watchdog();
             self.sweep.lock().freeze_active = false;
         }
+        self.thawed.send_modify(|generation| *generation += 1);
         (result, errors)
     }
 

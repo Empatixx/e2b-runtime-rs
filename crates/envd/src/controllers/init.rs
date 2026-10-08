@@ -24,6 +24,7 @@ use crate::util::rate_limit::RateLimit;
 const VERSION_HEADER: &str = "X-Envd-Version";
 const MEMORY_HEADER: &str = "X-Envd-Memory";
 const DEFAULTS_HEADER: &str = "X-Envd-Defaults";
+const HANDOVER_HEADER: &str = "X-Envd-Handover";
 const EVENTS_ADDRESS: &str = "E2B_EVENTS_ADDRESS";
 const MMDS_POLL_LIMIT: Duration = Duration::from_secs(60);
 
@@ -60,6 +61,10 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
         .and_then(|memory| memory.parse().ok())
     {
         headers.insert(MEMORY_HEADER, memory);
+    }
+    let handover = state.handover.lock().clone();
+    if let Some(report) = handover.and_then(|report| serde_json::to_string(&report).ok()?.parse().ok()) {
+        headers.insert(HANDOVER_HEADER, report);
     }
     response
 }

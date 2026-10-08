@@ -214,7 +214,7 @@ fn specs(mem_total: u64) -> Vec<CgroupSpec> {
     ]
 }
 
-pub(crate) fn process_type_name(process_type: ProcessType) -> &'static str {
+pub fn process_type_name(process_type: ProcessType) -> &'static str {
     match process_type {
         ProcessType::Pty => "pty",
         ProcessType::User => "user",

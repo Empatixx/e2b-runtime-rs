@@ -1,9 +1,11 @@
+pub mod adopt;
 #[cfg(target_os = "linux")]
 mod credentials;
 mod events;
 mod output;
-mod registry;
-mod spawn;
+pub mod registry;
+pub mod spawn;
+mod terminal;
 
 use std::sync::Arc;
 
@@ -35,8 +37,8 @@ pub struct ProcessService {
 impl ProcessService {
     pub fn new(state: Arc<AppState>) -> Self {
         Self {
+            processes: state.processes.clone(),
             state,
-            processes: Arc::default(),
         }
     }
 }
@@ -122,10 +124,12 @@ impl Process for ProcessService {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let request = request.to_owned_message();
-        let placement = self.state.freezer.manager().placement(process_type(&request));
+        let process_type = process_type(&request);
+        let placement = self.state.freezer.manager().placement(process_type);
         let launch = Launch {
             request,
             placement,
+            process_type,
             user,
             workdir: defaults.workdir,
             global_env: self.state.env_vars.all(),

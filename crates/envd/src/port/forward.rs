@@ -1,35 +1,89 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use parking_lot::{Mutex, MutexGuard};
 
 use super::scan::{Listener, local_listeners};
 use crate::cgroups::Placement;
+use crate::proto::upgrade::ForwardedPort;
 
 const SCAN_INTERVAL: Duration = Duration::from_millis(1000);
 const GATEWAY_IP: &str = "169.254.0.21";
 
-struct Forward {
+pub struct Forward {
     socat_pid: Option<u32>,
     listener: Listener,
 }
 
+#[derive(Clone, Default)]
+pub struct Forwards {
+    inner: Arc<Mutex<HashMap<String, Forward>>>,
+}
+
 pub struct Forwarder {
     placement: Option<Placement>,
-    forwards: HashMap<String, Forward>,
+    forwards: Forwards,
+}
+
+impl Forwards {
+    pub fn lock(&self) -> MutexGuard<'_, HashMap<String, Forward>> {
+        self.inner.lock()
+    }
+
+    pub fn import(&self, forwards: &[ForwardedPort]) -> usize {
+        let mut map = self.inner.lock();
+        forwards
+            .iter()
+            .filter(|forward| forward.socat_pid > 0)
+            .filter(|forward| kill(Pid::from_raw(forward.socat_pid), None).is_ok())
+            .map(|forward| {
+                map.insert(
+                    forward.key.clone(),
+                    Forward {
+                        socat_pid: Some(forward.socat_pid as u32),
+                        listener: Listener {
+                            pid: forward.listener_pid,
+                            ip: String::new(),
+                            port: forward.port,
+                            family: forward.family,
+                        },
+                    },
+                );
+                let pid = Pid::from_raw(forward.socat_pid);
+                tokio::task::spawn_blocking(move || {
+                    let _ = nix::sys::wait::waitpid(pid, None);
+                });
+            })
+            .count()
+    }
+}
+
+pub fn export(forwards: &HashMap<String, Forward>) -> Vec<ForwardedPort> {
+    forwards
+        .iter()
+        .filter_map(|(key, forward)| {
+            forward.socat_pid.map(|socat_pid| ForwardedPort {
+                key: key.clone(),
+                port: forward.listener.port,
+                listener_pid: forward.listener.pid,
+                family: forward.listener.family,
+                socat_pid: socat_pid as i32,
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 impl Forwarder {
-    pub fn new(placement: Option<Placement>) -> Self {
-        Self {
-            placement,
-            forwards: HashMap::new(),
-        }
+    pub fn new(placement: Option<Placement>, forwards: Forwards) -> Self {
+        Self { placement, forwards }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         let mut ticks = tokio::time::interval(SCAN_INTERVAL);
         loop {
             ticks.tick().await;
@@ -40,16 +94,17 @@ impl Forwarder {
         }
     }
 
-    fn reconcile(&mut self, listeners: Vec<Listener>) {
+    fn reconcile(&self, listeners: Vec<Listener>) {
+        let mut forwards = self.forwards.lock();
         let current: HashMap<String, Listener> = listeners
             .into_iter()
             .map(|listener| (format!("{}-{}", listener.pid, listener.port), listener))
             .collect();
         for (key, listener) in &current {
-            if !self.forwards.contains_key(key) {
+            if !forwards.contains_key(key) {
                 tracing::debug!(ip = %listener.ip, port = listener.port, family = listener.family, state = "LISTEN", "Detected new opened port on localhost that is not forwarded");
                 let socat_pid = self.start(listener);
-                self.forwards.insert(
+                forwards.insert(
                     key.clone(),
                     Forward {
                         socat_pid,
@@ -58,7 +113,7 @@ impl Forwarder {
                 );
             }
         }
-        self.forwards
+        forwards
             .iter_mut()
             .filter(|(key, _)| !current.contains_key(*key))
             .for_each(|(_, forward)| stop(forward));

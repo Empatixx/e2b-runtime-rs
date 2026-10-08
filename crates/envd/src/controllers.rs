@@ -7,3 +7,4 @@ pub mod fsfreeze;
 pub mod health;
 pub mod init;
 pub mod process;
+pub mod upgrade;

@@ -15,7 +15,7 @@ async fn init_sets_envs_user_and_token() {
         .await
         .unwrap();
     assert_eq!(res.status(), 204);
-    assert!(res.headers().contains_key("x-envd-version"));
+    assert_eq!(res.headers()["x-envd-version"], "0.9.0");
     assert_eq!(state.defaults().user, "user");
     assert_eq!(state.defaults().workdir.as_deref(), Some("/tmp"));
 

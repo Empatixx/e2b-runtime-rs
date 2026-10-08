@@ -1,11 +1,14 @@
 use axum::Router;
 use axum::serve::{Listener, ListenerExt};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use envd::cgroups::ProcessType;
 use envd::logs::layer::JsonLines;
 use envd::port::forward::Forwarder;
-use envd::{app::AppState, config, host, router};
+use envd::upgrade::HandoverReport;
+use envd::{app::AppState, config, host, router, upgrade};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
@@ -14,6 +17,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 const READ_BUFFER: usize = 64 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(640);
+const HANDOVER_FALLBACK_THAW: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     tracing::info!(port, "envd listening");
     host::mmds::mark_sandbox(&state.env_vars, state.config.is_not_fc);
+    if state.config.resume_handover {
+        resume_handover(&state).await;
+    }
     if !state.config.is_not_fc {
         let poller = state.clone();
         tokio::spawn(async move {
@@ -53,9 +60,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             poller.deliver_mmds(opts);
         });
     }
-    let forwarder = Forwarder::new(state.freezer.manager().placement(ProcessType::Socat));
+    let forwarder = Forwarder::new(
+        state.freezer.manager().placement(ProcessType::Socat),
+        state.forwards.clone(),
+    );
     tokio::spawn(forwarder.run());
     serve(listener, router::build_router(state)).await
+}
+
+async fn resume_handover(state: &Arc<AppState>) {
+    let resuming = state.clone();
+    let report = match tokio::spawn(async move { upgrade::incoming::resume(&resuming).await }).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            eprintln!("resume-from-handover failed: {e}");
+            failed_handover()
+        }
+        Err(panic) => {
+            eprintln!("resume-from-handover panic (recovered): {panic}");
+            let _ = state.freezer.unfreeze().await;
+            failed_handover()
+        }
+    };
+    *state.handover.lock() = Some(report);
+    let fallback = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(HANDOVER_FALLBACK_THAW).await;
+        if !fallback.initialized.load(Ordering::SeqCst) {
+            eprintln!("envd: post-upgrade /init did not arrive within 1m0s; thawing workload as fallback");
+            if let Err(e) = fallback.freezer.unfreeze().await {
+                tracing::warn!(error = %e, "handover: unfreeze failed");
+            }
+        }
+    });
+}
+
+fn failed_handover() -> HandoverReport {
+    HandoverReport {
+        failed: true,
+        ..HandoverReport::default()
+    }
 }
 
 async fn serve(mut listener: impl Listener, app: Router) -> ! {

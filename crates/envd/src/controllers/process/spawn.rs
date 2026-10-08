@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,9 @@ use connectrpc::{ConnectError, ErrorCode};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Gid, Pid, Uid};
-use pty_process::{OwnedWritePty, Size};
+use pty_process::Size;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::Child;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinSet;
@@ -21,7 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::output::Output;
 use super::registry::Processes;
+use super::terminal::{HandoverFds, Terminal, Writer};
 use crate::cgroups::Placement;
+use crate::cgroups::ProcessType;
 use crate::proto::process::__buffa::oneof::process_event::data_event::Output as Data;
 use crate::proto::process::process_event::{DataEvent, EndEvent};
 use crate::proto::process::{ProcessConfig, StartRequest};
@@ -32,8 +35,8 @@ use crate::util::paths::expand_and_resolve;
 const OOM_SCORE: i32 = 100;
 const IO_CLASS: u32 = 2;
 const IO_PRIORITY: u32 = 4;
-const PIPE_CHUNK: usize = 32 << 10;
-const PTY_CHUNK: usize = 16 << 10;
+pub(super) const PIPE_CHUNK: usize = 32 << 10;
+pub(super) const PTY_CHUNK: usize = 16 << 10;
 
 pub struct Process {
     pub pid: u32,
@@ -41,9 +44,12 @@ pub struct Process {
     pub config: ProcessConfig,
     pub output: Output,
     pub end: watch::Sender<Option<EndEvent>>,
-    pub stdin: Mutex<Option<ChildStdin>>,
-    pub pty: Option<Mutex<OwnedWritePty>>,
+    pub stdin: Mutex<Option<Writer>>,
+    pub pty: Option<Terminal>,
     pub stop_output: CancellationToken,
+    pub handover: HandoverFds,
+    pub process_type: ProcessType,
+    pub deadline: parking_lot::Mutex<Option<Instant>>,
 }
 
 impl Process {
@@ -67,7 +73,7 @@ impl Process {
             .pty
             .as_ref()
             .ok_or("tty not assigned to process — input should be written to the stdin, not the tty")?;
-        pty.lock().await.write_all(data).await.map_err(|e| {
+        pty.write_all(data).await.map_err(|e| {
             format!(
                 "error writing to tty of process '{}': write /dev/ptmx: {}",
                 self.pid,
@@ -86,10 +92,7 @@ impl Process {
 
     pub async fn resize(&self, rows: u32, cols: u32) -> Result<(), String> {
         let pty = self.pty.as_ref().ok_or("tty not assigned to process")?;
-        pty.lock()
-            .await
-            .resize(Size::new(rows as u16, cols as u16))
-            .map_err(|e| e.to_string())
+        pty.resize(rows as u16, cols as u16).map_err(|e| e.to_string())
     }
 
     pub fn signal(&self, signal: Signal) -> Result<(), String> {
@@ -110,21 +113,23 @@ pub struct Launch {
     pub workdir: Option<String>,
     pub global_env: BTreeMap<String, String>,
     pub deadline: Option<Instant>,
+    pub process_type: ProcessType,
 }
 
 static NICE_PREFIX: LazyLock<String> = LazyLock::new(nice_prefix);
 
-struct OutputPipe {
-    reader: Box<dyn AsyncRead + Send + Unpin>,
-    chunk_size: usize,
-    kind: fn(Vec<u8>) -> Data,
+pub(super) struct OutputPipe {
+    pub(super) reader: Box<dyn AsyncRead + Send + Unpin>,
+    pub(super) chunk_size: usize,
+    pub(super) kind: fn(Vec<u8>) -> Data,
 }
 
 struct Started {
     child: Child,
-    stdin: Option<ChildStdin>,
-    pty_writer: Option<OwnedWritePty>,
+    stdin: Option<Writer>,
+    pty: Option<Terminal>,
     pipes: Vec<OutputPipe>,
+    handover: HandoverFds,
 }
 
 pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>, Receiver<DataEvent>), ConnectError> {
@@ -135,6 +140,7 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
         workdir,
         global_env,
         deadline,
+        process_type,
     } = launch;
     let config = request.process.take().unwrap_or_default();
     let command_line: Vec<String> = std::iter::once(config.cmd.clone())
@@ -210,8 +216,9 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
     let Started {
         child,
         stdin,
-        pty_writer,
+        pty,
         pipes,
+        handover,
     } = started;
 
     let process = Arc::new(Process {
@@ -221,8 +228,11 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
         output: Output::new(),
         end: watch::Sender::new(None),
         stdin: Mutex::new(stdin),
-        pty: pty_writer.map(Mutex::new),
+        pty,
         stop_output: CancellationToken::new(),
+        handover,
+        process_type,
+        deadline: parking_lot::Mutex::new(deadline),
     });
     let subscription = process.output.subscribe();
     processes.add(process.clone());
@@ -254,6 +264,12 @@ fn start_pipes(
     }
 
     let mut child = spawn_as(&mut command, user)?;
+    let handover = HandoverFds {
+        stdout: child.stdout.as_ref().map(AsRawFd::as_raw_fd),
+        stderr: child.stderr.as_ref().map(AsRawFd::as_raw_fd),
+        stdin: child.stdin.as_ref().map(AsRawFd::as_raw_fd),
+        tty: None,
+    };
     let stdout = child.stdout.take().map(|stdout| OutputPipe {
         reader: Box::new(stdout),
         chunk_size: PIPE_CHUNK,
@@ -265,9 +281,10 @@ fn start_pipes(
         kind: Data::Stderr,
     });
     Ok(Started {
-        stdin: child.stdin.take(),
-        pty_writer: None,
+        stdin: child.stdin.take().map(|stdin| Box::pin(stdin) as Writer),
+        pty: None,
         pipes: stdout.into_iter().chain(stderr).collect(),
+        handover,
         child,
     })
 }
@@ -297,16 +314,21 @@ fn start_pty(
     };
     let child = command.spawn(pts).map_err(io::Error::other)?;
 
+    let master = pty.as_raw_fd();
     let (reader, writer) = pty.into_split();
     Ok(Started {
         child,
         stdin: None,
-        pty_writer: Some(writer),
+        pty: Some(Terminal::new(master, Box::pin(writer))),
         pipes: vec![OutputPipe {
             reader: Box::new(reader),
             chunk_size: PTY_CHUNK,
             kind: Data::Pty,
         }],
+        handover: HandoverFds {
+            tty: Some(master),
+            ..HandoverFds::default()
+        },
     })
 }
 
@@ -336,7 +358,7 @@ fn switch_user(user: &User) -> impl FnMut() -> io::Result<()> + Send + Sync + 's
     }
 }
 
-async fn pump(process: Arc<Process>, mut pipe: OutputPipe) {
+pub(super) async fn pump(process: Arc<Process>, mut pipe: OutputPipe) {
     let mut buffer = vec![0; pipe.chunk_size];
     loop {
         let read = tokio::select! {
@@ -496,7 +518,7 @@ fn exit_text(status: &ExitStatus) -> String {
     base
 }
 
-fn signal_name(signal: i32) -> String {
+pub(super) fn signal_name(signal: i32) -> String {
     const NAMES: [&str; 31] = [
         "hangup",
         "interrupt",

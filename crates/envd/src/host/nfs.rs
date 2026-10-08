@@ -24,6 +24,21 @@ pub struct NfsMounts {
 }
 
 impl NfsMounts {
+    pub fn export(&self) -> Vec<(String, String)> {
+        let mut mounts: Vec<(String, String)> = self
+            .mounted
+            .lock()
+            .iter()
+            .map(|(path, lifecycle)| (path.clone(), lifecycle.clone()))
+            .collect();
+        mounts.sort();
+        mounts
+    }
+
+    pub fn import(&self, mounts: impl IntoIterator<Item = (String, String)>) {
+        self.mounted.lock().extend(mounts);
+    }
+
     pub async fn setup(&self, lifecycle_id: Option<&str>, mounts: &[VolumeMount]) -> Result<(), String> {
         if self.mounting.swap(true, Ordering::SeqCst) {
             tracing::debug!("NFS volumes already mounting");

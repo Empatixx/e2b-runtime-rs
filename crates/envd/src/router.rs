@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tower::Layer;
@@ -10,7 +9,7 @@ use tower::Layer;
 use crate::app::AppState;
 use crate::controllers::filesystem::FilesystemService;
 use crate::controllers::process::ProcessService;
-use crate::controllers::{collapse, envs, files, freeze, fsfreeze, health, init};
+use crate::controllers::{collapse, envs, files, freeze, fsfreeze, health, init, upgrade};
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
 use crate::middleware::cors::cors;
@@ -19,10 +18,7 @@ use crate::proto::filesystem::FilesystemExt;
 use crate::proto::process::ProcessExt;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let filesystem = FilesystemService {
-        state: state.clone(),
-        watchers: Mutex::default(),
-    };
+    let filesystem = FilesystemService { state: state.clone() };
     let process = ProcessService::new(state.clone());
     let connect = Arc::new(process).register(Arc::new(filesystem).register(connectrpc::Router::new()));
 
@@ -44,6 +40,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/fsfreeze", post(fsfreeze::post_fsfreeze))
         .route("/fsthaw", post(fsfreeze::post_fsthaw))
         .route("/collapse", post(collapse::post_collapse))
+        .route(
+            "/upgrade",
+            post(upgrade::post_upgrade).layer(DefaultBodyLimit::disable()),
+        )
         .fallback_service(from_fn(legacy_sdk).layer(connect.into_axum_service()))
         .layer(from_fn(authenticate_user))
         .layer(from_fn_with_state(state.clone(), require_token));
