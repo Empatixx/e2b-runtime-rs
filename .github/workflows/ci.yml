@@ -23,7 +23,7 @@ jobs:
       - run: scripts/ci/guest-rootfs.sh
       - run: sudo chmod 666 /dev/kvm
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: sudo -E env "PATH=$PATH" cargo test --workspace
+      - run: sudo -E env "PATH=$PATH" cargo test --workspace -- --show-output
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

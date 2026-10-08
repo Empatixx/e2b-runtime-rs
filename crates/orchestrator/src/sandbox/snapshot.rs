@@ -19,6 +19,7 @@ pub struct Snapshot {
     pub memfile_bytes: u64,
     pub memory_bytes: u64,
     pub rootfs_bytes: u64,
+    pub tracked_writes: bool,
 }
 
 struct SnapshotFiles {
@@ -33,6 +34,7 @@ struct Exported {
 }
 
 struct MemoryPages {
+    tracked_writes: bool,
     regions: Vec<GuestRegion>,
     dirty: RoaringBitmap,
     empty: RoaringBitmap,
@@ -84,6 +86,7 @@ impl Sandbox {
         client.create_snapshot(&files.snapfile).await?;
         let pages = self.memory_pages(client).await?;
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
+        let tracked_writes = pages.tracked_writes;
         let memfile = self.export_memory(pages, pid, &files.memfile, build_id).await?;
         self.flush_disk().await?;
         let rootfs = self.export_rootfs(&files.rootfs, build_id).await?;
@@ -98,6 +101,7 @@ impl Sandbox {
             memfile_bytes: memfile.bytes,
             memory_bytes,
             rootfs_bytes: rootfs.bytes,
+            tracked_writes,
         })
     }
 
@@ -122,6 +126,7 @@ impl Sandbox {
             }
         };
         Ok(MemoryPages {
+            tracked_writes: tracked.is_some(),
             dirty: memfile_pages(&regions, &dirty),
             empty: memfile_pages(&regions, &empty) | removed,
             regions,

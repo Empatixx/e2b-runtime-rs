@@ -311,13 +311,22 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     write_file(&second, "/home/user/b.txt", "disk b").await;
     write_file(&second, "/dev/shm/b", "memory b").await;
     run_in_guest(&second, "sync").await;
+    let pause_started = Instant::now();
     let paused_again = second.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
+    println!("pause took {} ms", pause_started.elapsed().as_millis());
     println!(
-        "pause 2: memfile {} of {} bytes, rootfs {} bytes",
-        paused_again.memfile_bytes, paused_again.memory_bytes, paused_again.rootfs_bytes
+        "pause 1: memfile {} of {} bytes, rootfs {} bytes; pause 2: memfile {} bytes (tracked writes: {}), rootfs {} bytes",
+        paused.memfile_bytes,
+        paused.memory_bytes,
+        paused.rootfs_bytes,
+        paused_again.memfile_bytes,
+        paused_again.tracked_writes,
+        paused_again.rootfs_bytes
     );
 
+    let resume_started = Instant::now();
     let third = templates.resume(&host, "sbx-gen2", 4035, &paused_again.build).await;
+    println!("second resume took {} ms", resume_started.elapsed().as_millis());
     run_in_guest(
         &third,
         "kill -0 $(cat /dev/shm/sleep.pid) && echo alive > /dev/shm/alive",
@@ -334,6 +343,11 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
 
     let expected = ["disk a", "disk b", "memory a", "memory b", "alive\n"].map(|text| (200, text.to_owned()));
     assert_eq!(files, expected);
+    assert!(!paused.tracked_writes, "a cold-booted sandbox has no write tracking");
+    assert!(
+        paused_again.tracked_writes,
+        "the resumed sandbox did not use write-protect tracking"
+    );
     assert!(
         paused_again.memfile_bytes < paused_again.memory_bytes / 2,
         "second pause exported {} of {} memory bytes",
