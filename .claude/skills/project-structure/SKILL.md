@@ -31,15 +31,18 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        resume.rs (snapshot load over uffd)
   src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, network pool, template cache),
                        lifecycle.rs (task per sandbox: commands, end_time expiry, death watch), service.rs (SandboxService),
-                       registry.rs
+                       registry.rs, status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
+                       metrics poller, /proc parsers), info.rs (InfoService), health.rs (/health on the tonic router),
+                       admission.rs (max sandboxes, starting semaphore), shutdown.rs (drain), app.rs (App: one axum
+                       router for SandboxService, InfoService, grpc health and /health)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/orchestrator.proto (no package upstream)
-  src/main.rs          orchestrator binary: NodeConfig::from_env + tonic server on GRPC_PORT (5008)
+  src/main.rs          orchestrator binary: NodeConfig::from_env, App served by axum on GRPC_PORT (5008), upstream shutdown order
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
   tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
 docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
 scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh
 proto/envd/            envd .proto copied from upstream E2B (never edit)
-proto/orchestrator/    orchestrator.proto copied from upstream E2B (never edit), UPSTREAM_COMMIT
+proto/orchestrator/    orchestrator.proto and info.proto copied from upstream E2B (never edit), UPSTREAM_COMMIT
 crates/envd/build.rs   codegen from ../../proto/envd
 crates/envd/reference/ upstream envd OpenAPI + pinned commit
 crates/envd/src/

@@ -126,6 +126,14 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | M12 |
 | No nftables `slot-firewall` with allow/deny sets and DSCP; private ranges are dropped with iptables FORWARD rules | API |
 | NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn | M12 |
-| `NetworkPool::get` waits forever when no slot can be created; bounded only by the request timeout (M10) | M10 |
 | MMDS `address` stays `""` until hyperloop exists | API |
+
+## Orchestrator: node services (M10)
+
+| Item | Matters from |
+|---|---|
+| Deprecated `ServiceInfoResponse` fields 101–103 stay 0 (`#[allow(deprecated)]` is not allowed) | API |
+| `metric_memory_used_bytes` is total − available (sysinfo); gopsutil reports total − free − buffers − cached | API |
+| `max_sandboxes` and the starting limit are read once from env; upstream refreshes them from feature flags every 30 s | API |
+| Fresh (non-resume) creates use `TryAcquire` upstream; every Create here is a resume and waits up to 15 s | template build |
 
