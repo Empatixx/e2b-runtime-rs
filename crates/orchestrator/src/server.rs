@@ -1,2 +1,9 @@
+pub mod config;
+#[cfg(target_os = "linux")]
+pub mod lifecycle;
+#[cfg(target_os = "linux")]
+pub mod node;
 pub mod registry;
+#[cfg(target_os = "linux")]
+pub mod service;
 pub mod slots;

@@ -88,6 +88,14 @@ impl Storage {
             .map_err(|e| format!("head {path}: {e}"))
     }
 
+    pub async fn exists(&self, path: &str) -> Result<bool, String> {
+        match self.store.head(&ObjectPath::from(path)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(format!("head {path}: {e}")),
+        }
+    }
+
     pub async fn delete_prefix(&self, prefix: &str) -> Result<(), String> {
         let prefix_path = ObjectPath::from(prefix);
         let objects: Vec<_> = self
@@ -182,6 +190,16 @@ mod tests {
         storage.delete_prefix(prefix).await.unwrap();
         assert!(storage.get(&path).await.is_err());
         assert!(storage.get(&header_path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn exists_tells_present_from_missing_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(dir.path()).unwrap();
+        storage.put("b/present", Bytes::from_static(b"x")).await.unwrap();
+
+        assert_eq!(storage.exists("b/present").await, Ok(true));
+        assert_eq!(storage.exists("b/missing").await, Ok(false));
     }
 
     #[tokio::test]
