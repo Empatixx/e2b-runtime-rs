@@ -12,7 +12,7 @@ use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
 use crate::memory::handshake::UffdListener;
 use crate::memory::prefetch::prefetch;
-use crate::memory::server::{MemoryServer, Prefaulter};
+use crate::memory::server::{MemoryServer, MemoryWatch, Prefaulter};
 use crate::memory::trace::Trace;
 use crate::system::all_ok;
 
@@ -73,11 +73,19 @@ impl Sandbox {
         self.phases.mark("resume_vm");
         client.set_mmds(&self.mmds_metadata()).await?;
         self.phases.mark("mmds");
-        self.wait_for_envd().await?;
+        self.wait_for_envd_unless_memory_fails().await?;
         self.phases.mark("envd_init");
         self.phases.note("faults", self.faults_served());
         self.phases.note("prefetched", self.prefetch_stats.installed());
         Ok(())
+    }
+
+    async fn wait_for_envd_unless_memory_fails(&mut self) -> Result<(), String> {
+        let watch = self.resources.memory.as_ref().map(MemoryServer::watch);
+        tokio::select! {
+            initialised = self.wait_for_envd() => initialised,
+            error = memory_failure(watch) => Err(format!("uffd process exited: {error}; {}", self.resume_diagnostics())),
+        }
     }
 
     fn start_prefetch(&mut self, memfile: Arc<BuildFile>) -> Option<oneshot::Sender<Arc<Prefaulter>>> {
@@ -139,6 +147,13 @@ fn point_link(link: &Path, target: &Path) -> io::Result<()> {
     let _ = std::fs::remove_file(&staged);
     std::os::unix::fs::symlink(target, &staged)?;
     std::fs::rename(&staged, link)
+}
+
+async fn memory_failure(watch: Option<MemoryWatch>) -> String {
+    match watch {
+        Some(watch) => watch.failed().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn serve_memory(listener: UffdListener, memfile: Arc<BuildFile>) -> Result<MemoryServer, String> {

@@ -40,7 +40,7 @@ impl Header {
         Ok(Self { metadata, mappings })
     }
 
-    pub fn encode(&self) -> Vec<u8> {
+    fn encode(&self) -> Vec<u8> {
         self.metadata
             .encode()
             .into_iter()

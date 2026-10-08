@@ -47,8 +47,8 @@ impl UffdListener {
         let mut fds = received.fds.into_iter();
         let uffd = fds
             .next()
-            .map(Uffd::from_fd)
-            .ok_or("uffd handshake: no file descriptor")?;
+            .ok_or_else(|| "uffd handshake: no file descriptor".to_owned())
+            .and_then(|fd| Uffd::adopt(fd).map_err(|e| format!("uffd handshake: set non-blocking: {e}")))?;
         Ok(Handshake {
             uffd,
             regions,
@@ -96,6 +96,7 @@ mod tests {
     use std::io::IoSlice;
     use std::os::fd::AsRawFd;
 
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use nix::sys::socket::{ControlMessage, sendmsg};
 
     use super::*;
@@ -128,6 +129,11 @@ mod tests {
 
         assert_eq!(handshake.regions, Regions::parse(REGIONS.as_bytes()).unwrap());
         assert!(handshake.uffd.as_raw_fd() >= 0);
+        let flags = OFlag::from_bits_retain(fcntl(handshake.uffd.as_raw_fd(), FcntlArg::F_GETFL).unwrap());
+        assert!(
+            flags.contains(OFlag::O_NONBLOCK),
+            "the received uffd must be non-blocking"
+        );
     }
 
     #[tokio::test]

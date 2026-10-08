@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use nix::errno::Errno;
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 const UFFD_MSG_SIZE: usize = 32;
 const EVENTS_PER_READ: usize = 64;
@@ -56,6 +57,12 @@ mod ioctls {
 impl Uffd {
     pub fn from_fd(fd: OwnedFd) -> Self {
         Self { fd }
+    }
+
+    pub fn adopt(fd: OwnedFd) -> io::Result<Self> {
+        let flags = OFlag::from_bits_retain(fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL)?);
+        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+        Ok(Self::from_fd(fd))
     }
 
     pub fn read_events(&self) -> io::Result<Vec<Event>> {
@@ -191,12 +198,22 @@ pub mod testing {
             self.start.as_ptr() as u64
         }
 
-        pub fn read_byte(address: u64) -> u8 {
-            unsafe { (address as *const u8).read_volatile() }
+        pub fn read_byte(&self, offset: usize) -> u8 {
+            assert!(
+                offset < self.len,
+                "offset {offset} is outside the {} mapped bytes",
+                self.len
+            );
+            unsafe { self.start.as_ptr().cast::<u8>().add(offset).read_volatile() }
         }
 
-        pub fn write_byte(address: u64, value: u8) {
-            unsafe { (address as *mut u8).write_volatile(value) }
+        pub fn write_byte(&self, offset: usize, value: u8) {
+            assert!(
+                offset < self.len,
+                "offset {offset} is outside the {} mapped bytes",
+                self.len
+            );
+            unsafe { self.start.as_ptr().cast::<u8>().add(offset).write_volatile(value) }
         }
 
         pub fn discard(&self, offset: usize, len: usize) {
@@ -264,6 +281,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use super::testing::{Pages, available};
@@ -289,11 +307,14 @@ mod tests {
             eprintln!("skipping: userfaultfd needs root");
             return;
         }
-        let pages = Pages::map(4 * PAGE as usize);
+        let pages = Arc::new(Pages::map(4 * PAGE as usize));
         let uffd = pages.register().unwrap();
-        let faulting = pages.address() + 2 * PAGE + 7;
+        let faulting = 2 * PAGE as usize + 7;
 
-        let reader = std::thread::spawn(move || Pages::read_byte(faulting));
+        let reader = std::thread::spawn({
+            let pages = pages.clone();
+            move || pages.read_byte(faulting)
+        });
         let events = next_events(&uffd);
 
         assert_eq!(
@@ -343,7 +364,7 @@ mod tests {
             Pages::write_protected(pages.address()),
             "a read-installed page must be write-protected"
         );
-        Pages::write_byte(pages.address(), 9);
+        pages.write_byte(0, 9);
         assert!(
             !Pages::write_protected(pages.address()),
             "a written page must lose write-protection"

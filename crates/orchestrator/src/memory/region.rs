@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -50,14 +48,10 @@ impl Region {
         (self.base_host_virt_addr..self.base_host_virt_addr + self.size).contains(&address)
     }
 
-    fn address_range(&self, offsets: &Range<u64>) -> Option<Range<u64>> {
-        let start = offsets.start.max(self.offset);
-        let end = offsets.end.min(self.offset + self.size);
-        (start < end).then(|| self.address_at(start)..self.address_at(end))
-    }
-
-    fn address_at(&self, offset: u64) -> u64 {
-        offset - self.offset + self.base_host_virt_addr
+    fn address_of(&self, offset: u64) -> Option<u64> {
+        (self.offset..self.offset + self.size)
+            .contains(&offset)
+            .then(|| offset - self.offset + self.base_host_virt_addr)
     }
 }
 
@@ -72,10 +66,6 @@ impl Regions {
         self.page_size
     }
 
-    pub fn total_size(&self) -> u64 {
-        self.regions.iter().map(|region| region.size).sum()
-    }
-
     pub fn offset_of(&self, address: u64) -> Result<u64, String> {
         let page = address & !(self.page_size - 1);
         self.regions
@@ -85,11 +75,8 @@ impl Regions {
             .ok_or_else(|| format!("address {address:#x} is outside guest memory"))
     }
 
-    pub fn addresses_of(&self, offsets: Range<u64>) -> Vec<Range<u64>> {
-        self.regions
-            .iter()
-            .filter_map(|region| region.address_range(&offsets))
-            .collect()
+    pub fn address_of(&self, offset: u64) -> Option<u64> {
+        self.regions.iter().find_map(|region| region.address_of(offset))
     }
 }
 
@@ -162,12 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn memfile_ranges_map_back_to_addresses() {
+    fn memfile_offsets_map_back_to_addresses() {
         let regions = regions();
-        assert_eq!(
-            regions.addresses_of(PAGE..16384 + PAGE),
-            vec![1048576 + PAGE..1048576 + 16384, 8388608..8388608 + PAGE]
-        );
-        assert_eq!(regions.total_size(), 24576);
+        assert_eq!(regions.address_of(PAGE), Some(1048576 + PAGE));
+        assert_eq!(regions.address_of(16384 + PAGE), Some(8388608 + PAGE));
+        assert_eq!(regions.address_of(24576), None);
     }
 }

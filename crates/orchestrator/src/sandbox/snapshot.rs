@@ -183,17 +183,12 @@ impl Sandbox {
             return Err("the memory server has stopped; the guest memory is not consistent".to_owned());
         }
         let regions = client.memory_mappings().await?;
+        let removed = self.settled_removals().await?;
         let tracked = self
             .resources
             .memory
             .as_ref()
             .filter(|memory| memory.write_protecting());
-        let removed = self
-            .resources
-            .memory
-            .as_ref()
-            .map(|memory| memory.removed_pages())
-            .unwrap_or_default();
         let (dirty, empty) = match tracked {
             Some(_) => (client.memory_dirty().await?, RoaringBitmap::new()),
             None => {
@@ -203,10 +198,17 @@ impl Sandbox {
         };
         Ok(MemoryPages {
             tracked_writes: tracked.is_some(),
-            dirty: memfile_pages(&regions, &dirty),
-            empty: memfile_pages(&regions, &empty) | removed,
+            dirty: memfile_pages(&regions, &dirty)?,
+            empty: memfile_pages(&regions, &empty)? | removed,
             regions,
         })
+    }
+
+    async fn settled_removals(&self) -> Result<RoaringBitmap, String> {
+        match self.resources.memory.as_ref() {
+            Some(memory) => memory.settle().await.map(|()| memory.removed_pages()),
+            None => Ok(RoaringBitmap::new()),
+        }
     }
 
     async fn export_memory(
@@ -344,6 +346,7 @@ impl LocalSnapshot {
         let paths = build.paths();
         let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
+        let (memfile_bytes, rootfs_bytes) = (build.memfile.serialize()?, build.rootfs.serialize()?);
         let memfile_metadata = data_metadata(metadata, &build.memfile, self.snapshot.memfile_bytes);
         let rootfs_metadata = data_metadata(metadata, &build.rootfs, self.snapshot.rootfs_bytes);
         tokio::try_join!(
@@ -362,8 +365,8 @@ impl LocalSnapshot {
                 self.snapshot.rootfs_bytes,
                 &rootfs_metadata
             ),
-            storage.put_with(&memfile_header, Bytes::from(build.memfile.encode()), metadata),
-            storage.put_with(&rootfs_header, Bytes::from(build.rootfs.encode()), metadata),
+            storage.put_with(&memfile_header, Bytes::from(memfile_bytes), metadata),
+            storage.put_with(&rootfs_header, Bytes::from(rootfs_bytes), metadata),
         )
         .map(|_| ())
     }

@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -17,6 +17,7 @@ pub enum Prefaulted {
     Present,
     Skipped,
     Deferred,
+    Closed,
 }
 
 pub trait Installer: Send + Sync + 'static {
@@ -63,15 +64,25 @@ pub async fn prefetch<I: Installer>(
             installer.page_size()
         ));
     }
+    let closed = Arc::new(AtomicBool::new(false));
+    let fetching = warming.abort_handle();
     futures::stream::poll_fn(|context| ready.poll_recv(context))
+        .take_while(|_| std::future::ready(!closed.load(Ordering::Relaxed)))
         .for_each_concurrent(COPY_WORKERS, |offset| {
             let installer = installer.clone();
             let memfile = memfile.clone();
             let stats = stats.clone();
+            let closed = closed.clone();
+            let fetching = fetching.clone();
             async move {
                 let mut data = vec![0; block_size as usize];
                 match memfile.read_at(offset, &mut data).await {
-                    Ok(()) => install(&*installer, offset, &data, &stats),
+                    Ok(()) => {
+                        if install_blocking(installer, offset, data, stats).await == Flow::Stop {
+                            closed.store(true, Ordering::Relaxed);
+                            fetching.abort();
+                        }
+                    }
                     Err(_) => {
                         stats.skipped.fetch_add(1, Ordering::Relaxed);
                     }
@@ -123,19 +134,42 @@ async fn warm(
     }
 }
 
-fn install(installer: &dyn Installer, offset: u64, data: &[u8], stats: &PrefetchStats) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Stop,
+}
+
+async fn install_blocking<I: Installer>(
+    installer: Arc<I>,
+    offset: u64,
+    data: Vec<u8>,
+    stats: Arc<PrefetchStats>,
+) -> Flow {
+    tokio::task::spawn_blocking(move || install(&*installer, offset, &data, &stats))
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "prefault task failed"))
+        .unwrap_or(Flow::Continue)
+}
+
+fn install(installer: &dyn Installer, offset: u64, data: &[u8], stats: &PrefetchStats) -> Flow {
     match installer.prefault(offset, data) {
         Ok(Prefaulted::Installed) => stats.installed.fetch_add(1, Ordering::Relaxed),
+        Ok(Prefaulted::Closed) => return Flow::Stop,
         Ok(_) => stats.skipped.fetch_add(1, Ordering::Relaxed),
         Err(e) => {
             tracing::debug!(offset, error = %e, "prefault failed");
             stats.skipped.fetch_add(1, Ordering::Relaxed)
         }
     };
+    Flow::Continue
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
     use bytes::Bytes;
     use parking_lot::Mutex;
     use uuid::Uuid;
@@ -164,6 +198,43 @@ mod tests {
             }
             self.installed.lock().push((offset, data[0]));
             Ok(Prefaulted::Installed)
+        }
+    }
+
+    #[derive(Default)]
+    struct SlowGuest {
+        running: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Installer for SlowGuest {
+        fn page_size(&self) -> u64 {
+            PAGE
+        }
+
+        fn prefault(&self, _offset: u64, _data: &[u8]) -> Result<Prefaulted, String> {
+            let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(running, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            Ok(Prefaulted::Installed)
+        }
+    }
+
+    #[derive(Default)]
+    struct ClosedGuest {
+        attempts: AtomicUsize,
+    }
+
+    impl Installer for ClosedGuest {
+        fn page_size(&self) -> u64 {
+            PAGE
+        }
+
+        fn prefault(&self, _offset: u64, _data: &[u8]) -> Result<Prefaulted, String> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(Prefaulted::Closed)
         }
     }
 
@@ -226,5 +297,45 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "prefetch block size 2097152 differs from the page size 4096");
+    }
+
+    #[tokio::test]
+    async fn copies_run_in_parallel_on_blocking_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest = Arc::new(SlowGuest::default());
+
+        prefetch(
+            mapping((0..16).collect(), PAGE as i64),
+            memfile(&dir, 16).await,
+            std::future::ready(Some(guest.clone())),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            guest.peak.load(Ordering::SeqCst) >= 2,
+            "the copies ran one after another"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_guest_memory_ends_the_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest = Arc::new(ClosedGuest::default());
+        let stats = Arc::new(PrefetchStats::default());
+
+        prefetch(
+            mapping((0..200).collect(), PAGE as i64),
+            memfile(&dir, 200).await,
+            std::future::ready(Some(guest.clone())),
+            stats.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(guest.attempts.load(Ordering::SeqCst) <= 2 * COPY_WORKERS);
+        assert_eq!(stats.installed(), 0);
+        assert_eq!(stats.skipped.load(Ordering::Relaxed), 0);
     }
 }

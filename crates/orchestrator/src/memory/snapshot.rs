@@ -17,7 +17,7 @@ struct Run {
     length: u64,
 }
 
-pub fn memfile_pages(regions: &[GuestRegion], indices: &RoaringBitmap) -> RoaringBitmap {
+pub fn memfile_pages(regions: &[GuestRegion], indices: &RoaringBitmap) -> Result<RoaringBitmap, String> {
     let pages: Vec<u32> = regions
         .iter()
         .flat_map(|region| {
@@ -27,7 +27,12 @@ pub fn memfile_pages(regions: &[GuestRegion], indices: &RoaringBitmap) -> Roarin
         .collect();
     indices
         .iter()
-        .filter_map(|index| pages.get(index as usize).copied())
+        .map(|index| {
+            pages
+                .get(index as usize)
+                .copied()
+                .ok_or_else(|| format!("guest page {index} is beyond the {} pages of guest memory", pages.len()))
+        })
         .collect()
 }
 
@@ -166,9 +171,8 @@ mod tests {
     #[test]
     fn exports_dirty_pages_compactly_and_records_empty_ones() {
         let pages = Pages::map(4 * PAGE as usize);
-        let fill = |page: u64, value: u8| {
-            (0..PAGE).for_each(|byte| Pages::write_byte(pages.address() + page * PAGE + byte, value))
-        };
+        let fill =
+            |page: u64, value: u8| (0..PAGE).for_each(|byte| pages.write_byte((page * PAGE + byte) as usize, value));
         fill(0, 0x11);
         fill(2, 0x22);
         let region = GuestRegion {
@@ -214,7 +218,22 @@ mod tests {
             },
         ];
 
-        assert_eq!(memfile_pages(&regions, &set(&[0, 3])), set(&[4, 1]));
+        assert_eq!(memfile_pages(&regions, &set(&[0, 3])), Ok(set(&[4, 1])));
+    }
+
+    #[test]
+    fn a_bit_beyond_the_region_pages_is_an_error() {
+        let regions = [GuestRegion {
+            base_host_virt_addr: 0x100000,
+            size: 2 * PAGE,
+            offset: 0,
+            page_size: PAGE,
+        }];
+
+        assert_eq!(
+            memfile_pages(&regions, &set(&[1, 2])),
+            Err("guest page 2 is beyond the 2 pages of guest memory".to_owned())
+        );
     }
 
     #[test]
