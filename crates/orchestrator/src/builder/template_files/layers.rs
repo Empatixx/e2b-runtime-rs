@@ -14,12 +14,31 @@ pub fn files_layer(files: &BTreeMap<String, LayerFile>) -> Result<Vec<u8>, Strin
             header.set_entry_type(EntryType::Regular);
             header.set_size(file.bytes.len() as u64);
             header.set_mode(file.mode);
-            builder
-                .append_data(&mut header, name, file.bytes.as_slice())
-                .map(|()| builder)
+            zero_owner_and_time(&mut header);
+            set_name(&mut header, name)?;
+            builder.append(&header, file.bytes.as_slice()).map(|()| builder)
         })
         .and_then(Builder::into_inner)
         .map_err(|e| format!("error creating layer from files: {e}"))
+}
+
+fn zero_owner_and_time(header: &mut Header) {
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+}
+
+fn set_name(header: &mut Header, name: &str) -> std::io::Result<()> {
+    let raw = header
+        .as_ustar_mut()
+        .ok_or_else(|| std::io::Error::other("not a ustar header"))?;
+    let field = raw
+        .name
+        .get_mut(..name.len())
+        .ok_or_else(|| std::io::Error::other(format!("tar name too long: {name}")))?;
+    field.copy_from_slice(name.as_bytes());
+    header.set_cksum();
+    Ok(())
 }
 
 pub fn symlink_layer() -> Result<Vec<u8>, String> {
@@ -32,6 +51,7 @@ pub fn symlink_layer() -> Result<Vec<u8>, String> {
             header.set_entry_type(EntryType::Symlink);
             header.set_size(0);
             header.set_mode(SYMLINK_MODE);
+            zero_owner_and_time(&mut header);
             builder.append_link(&mut header, name, target).map(|()| builder)
         })
         .and_then(Builder::into_inner)
@@ -61,6 +81,13 @@ mod tests {
                     mode: 0o644,
                 },
             ),
+            (
+                "/usr/bin/envd".to_owned(),
+                LayerFile {
+                    bytes: b"e".to_vec(),
+                    mode: 0o777,
+                },
+            ),
         ]);
 
         let tar = files_layer(&files).unwrap();
@@ -80,6 +107,7 @@ mod tests {
         assert_eq!(
             entries,
             vec![
+                ("/usr/bin/envd".to_owned(), 0o777, 1),
                 ("etc/hostname".to_owned(), 0o644, 9),
                 ("usr/bin/init".to_owned(), 0o755, 2)
             ]

@@ -183,10 +183,18 @@ fn is_unsupported(error: &io::Error) -> bool {
 }
 
 fn owner(header: &Header) -> io::Result<Owner> {
+    let raw = header.as_old();
     Ok(Owner {
-        uid: header.uid()? as u32,
-        gid: header.gid()? as u32,
+        uid: numeric(header.uid(), &raw.uid)? as u32,
+        gid: numeric(header.gid(), &raw.gid)? as u32,
     })
+}
+
+fn numeric(parsed: io::Result<u64>, field: &[u8]) -> io::Result<u64> {
+    match parsed {
+        Err(_) if field.iter().all(|byte| matches!(byte, 0 | b' ')) => Ok(0),
+        parsed => parsed,
+    }
 }
 
 fn chown(path: &Path, owner: &Owner) -> io::Result<()> {
@@ -201,7 +209,7 @@ fn chown(path: &Path, owner: &Owner) -> io::Result<()> {
 }
 
 fn times(header: &Header) -> io::Result<Times> {
-    let modified = header.mtime()? as i64;
+    let modified = numeric(header.mtime(), &header.as_old().mtime)? as i64;
     let accessed = header
         .as_gnu()
         .and_then(|gnu| gnu.atime().ok())

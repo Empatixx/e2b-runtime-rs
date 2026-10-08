@@ -30,6 +30,7 @@ serde_json = "1"
 sha2 = "0.10"
 sysinfo = "0.37"
 tar = "0.4"
+tempfile = "3"
 xattr = "1"
 flate2 = "1"
 zstd = "0.13"
@@ -47,7 +48,6 @@ tonic-prost-build = "0.14"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
