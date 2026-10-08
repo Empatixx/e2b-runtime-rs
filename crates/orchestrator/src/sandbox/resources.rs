@@ -1,4 +1,5 @@
 use futures::future::OptionFuture;
+use tokio::task::JoinHandle;
 
 use crate::cgroup::Cgroup;
 use crate::exposure::nbd::Exposure;
@@ -14,6 +15,7 @@ pub struct Resources {
     pub cgroup: Option<Cgroup>,
     pub vm: Option<FirecrackerProcess>,
     pub memory: Option<MemoryServer>,
+    pub prefetch: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl Resources {
@@ -23,6 +25,7 @@ impl Resources {
             && self.cgroup.is_none()
             && self.vm.is_none()
             && self.memory.is_none()
+            && self.prefetch.is_none()
     }
 
     pub async fn release(self) -> Result<(), String> {
@@ -32,7 +35,11 @@ impl Resources {
             cgroup,
             vm,
             memory,
+            prefetch,
         } = self;
+        if let Some(prefetch) = prefetch {
+            prefetch.abort();
+        }
         let killed = OptionFuture::from(vm.map(FirecrackerProcess::kill)).await;
         let served = OptionFuture::from(memory.map(MemoryServer::stop)).await;
         let closed = OptionFuture::from(disk.map(Exposure::close)).await;

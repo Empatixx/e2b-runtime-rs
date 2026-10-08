@@ -11,6 +11,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
+use super::prefetch::{Installer, Prefaulted};
 use super::region::Regions;
 use super::trace::{Access, PrefetchTracker, Trace};
 use super::uffd::{CopyOutcome, Event, Uffd};
@@ -28,12 +29,11 @@ pub struct MemoryServer {
     regions: Regions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Prefaulted {
-    Installed,
-    Present,
-    Skipped,
-    Deferred,
+#[derive(Clone)]
+pub struct Prefaulter {
+    uffd: Arc<AsyncFd<Uffd>>,
+    regions: Regions,
+    state: Arc<SharedState>,
 }
 
 struct SharedState {
@@ -113,8 +113,52 @@ impl MemoryServer {
         self.state.trace.lock().collect()
     }
 
+    pub fn prefaulter(&self) -> Arc<Prefaulter> {
+        Arc::new(Prefaulter {
+            uffd: self.uffd.clone(),
+            regions: self.regions.clone(),
+            state: self.state.clone(),
+        })
+    }
+
     pub fn prefault(&self, offset: u64, data: &[u8]) -> Result<Prefaulted, String> {
-        let page_size = self.page_size();
+        self.prefaulter().prefault(offset, data)
+    }
+
+    pub fn faults_served(&self) -> u64 {
+        self.state.served.load(Ordering::Relaxed)
+    }
+
+    pub fn write_protecting(&self) -> bool {
+        self.state.write_protect.load(Ordering::Relaxed)
+    }
+
+    pub fn removed_pages(&self) -> RoaringBitmap {
+        self.state.removed.lock().clone()
+    }
+
+    pub async fn ended(&self) {
+        let mut running = self.running.clone();
+        while running.changed().await.is_ok() {}
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    pub async fn stop(self) -> Result<(), String> {
+        let _ = self.stop.send(());
+        self.task.await.map_err(|e| format!("memory server task: {e}"))?
+    }
+}
+
+impl Installer for Prefaulter {
+    fn page_size(&self) -> u64 {
+        self.regions.page_size()
+    }
+
+    fn prefault(&self, offset: u64, data: &[u8]) -> Result<Prefaulted, String> {
+        let page_size = self.regions.page_size();
         if data.len() as u64 != page_size {
             return Err(format!(
                 "prefault of {} bytes, the page size is {page_size}",
@@ -148,32 +192,6 @@ impl MemoryServer {
             CopyOutcome::Retry | CopyOutcome::NoWriteProtect => Ok(Prefaulted::Deferred),
             CopyOutcome::Gone => Err("the guest memory is gone".to_owned()),
         }
-    }
-
-    pub fn faults_served(&self) -> u64 {
-        self.state.served.load(Ordering::Relaxed)
-    }
-
-    pub fn write_protecting(&self) -> bool {
-        self.state.write_protect.load(Ordering::Relaxed)
-    }
-
-    pub fn removed_pages(&self) -> RoaringBitmap {
-        self.state.removed.lock().clone()
-    }
-
-    pub async fn ended(&self) {
-        let mut running = self.running.clone();
-        while running.changed().await.is_ok() {}
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.task.is_finished()
-    }
-
-    pub async fn stop(self) -> Result<(), String> {
-        let _ = self.stop.send(());
-        self.task.await.map_err(|e| format!("memory server task: {e}"))?
     }
 }
 

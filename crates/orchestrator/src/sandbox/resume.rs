@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::oneshot;
+
 use super::Sandbox;
 use super::config::SandboxBuilder;
 use crate::block::build_file::BuildFile;
 use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
 use crate::memory::handshake::UffdListener;
-use crate::memory::server::MemoryServer;
+use crate::memory::prefetch::prefetch;
+use crate::memory::server::{MemoryServer, Prefaulter};
+use crate::memory::trace::Trace;
 use crate::system::all_ok;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,10 +36,14 @@ impl Sandbox {
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
         let socket = self.config.work_dir.join("uffd.sock");
         let listener = UffdListener::bind(&socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
+        let prefaulter = self.start_prefetch(memfile.clone());
         let client = self.launch_with_rootfs().await?;
         self.phases.mark("rootfs+firecracker");
         let (loaded, served) = tokio::join!(client.load_snapshot(snapfile, &socket), serve_memory(listener, memfile));
         let started = served.map(|server| {
+            if let Some(prefaulter) = prefaulter {
+                let _ = prefaulter.send(server.prefaulter());
+            }
             self.resources.memory = Some(server);
         });
         all_ok([started, loaded]).map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
@@ -52,7 +60,28 @@ impl Sandbox {
         self.init_envd().await?;
         self.phases.mark("envd_init");
         self.phases.note("faults", self.faults_served());
+        self.phases.note("prefetched", self.prefetch_stats.installed());
         Ok(())
+    }
+
+    fn start_prefetch(&mut self, memfile: Arc<BuildFile>) -> Option<oneshot::Sender<Arc<Prefaulter>>> {
+        let mapping = self.config.prefetch.clone()?;
+        let (prefaulter, installer) = oneshot::channel();
+        let stats = self.prefetch_stats.clone();
+        self.resources.prefetch = Some(tokio::spawn(async move {
+            prefetch(mapping, memfile, async { installer.await.ok() }, stats)
+                .await
+                .inspect_err(|e| tracing::warn!(error = %e, "memory prefetch failed"))
+        }));
+        Some(prefaulter)
+    }
+
+    pub fn prefetched(&self) -> u64 {
+        self.prefetch_stats.installed()
+    }
+
+    pub fn memory_trace(&self) -> Option<Trace> {
+        self.resources.memory.as_ref().map(MemoryServer::trace)
     }
 
     async fn launch_with_rootfs(&mut self) -> Result<FirecrackerClient, String> {

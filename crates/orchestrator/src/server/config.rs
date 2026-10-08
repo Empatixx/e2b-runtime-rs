@@ -46,6 +46,7 @@ pub struct NodeConfig {
     pub max_starting: usize,
     pub drain_sleep: Duration,
     pub build_cache_max_usage: f64,
+    pub prefetch_from_trace: bool,
 }
 
 impl NodeConfig {
@@ -96,6 +97,7 @@ impl NodeConfig {
             ),
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
+            prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
         })
     }
 
@@ -135,6 +137,10 @@ fn storage_config(vars: &HashMap<String, String>) -> Result<StorageConfig, Strin
     }
 }
 
+fn prefetch_source(source: Option<&str>) -> bool {
+    !matches!(source, Some("off" | "last-cycle"))
+}
+
 fn number<T: std::str::FromStr>(vars: &HashMap<String, String>, name: &str) -> Result<Option<T>, String> {
     vars.get(name)
         .map(|value| value.parse().map_err(|_| format!("{name} is not a number: {value}")))
@@ -168,6 +174,9 @@ mod tests {
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
         assert_eq!(config.drain_sleep, Duration::from_secs(15));
+        assert!(config.prefetch_from_trace);
+        assert!(!prefetch_source(Some("off")));
+        assert!(prefetch_source(Some("unknown")));
         assert!(config.labels.is_empty());
         assert_eq!(
             config.storage,

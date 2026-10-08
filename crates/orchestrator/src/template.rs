@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod metadata;
+pub mod optimize;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

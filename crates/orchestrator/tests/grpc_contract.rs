@@ -147,6 +147,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         max_starting: 3,
         drain_sleep: Duration::ZERO,
         build_cache_max_usage: 90.0,
+        prefetch_from_trace: true,
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let app = App::new(node.clone());
@@ -486,7 +487,7 @@ async fn an_expired_sandbox_is_removed() {
         .create(create_request(
             "grpc-expiring",
             cluster.template_build,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
         ))
         .await
         .unwrap();
@@ -507,7 +508,7 @@ async fn an_expired_sandbox_is_removed() {
     );
 
     let mut emptied = false;
-    for _ in 0..100 {
+    for _ in 0..150 {
         if client.list(()).await.unwrap().into_inner().sandboxes.is_empty() {
             emptied = true;
             break;

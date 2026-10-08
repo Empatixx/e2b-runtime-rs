@@ -24,7 +24,7 @@ use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::template::cache::TemplateCache;
-use crate::template::metadata::TemplateMetadata;
+use crate::template::metadata::{MemoryPrefetch, TemplateMetadata};
 use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -49,6 +49,7 @@ pub struct Node {
     work_dir: PathBuf,
     envd_timeout: Duration,
     build_cache_max_usage: f64,
+    prefetch_from_trace: bool,
 }
 
 pub struct Lifetime {
@@ -77,6 +78,7 @@ impl Node {
             work_dir: config.work_dir.clone(),
             envd_timeout: config.envd_timeout,
             build_cache_max_usage: config.build_cache_max_usage,
+            prefetch_from_trace: config.prefetch_from_trace,
         })
     }
 
@@ -226,17 +228,21 @@ impl Node {
     async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
         let (files, slot) = tokio::join!(
-            async { tokio::try_join!(template.build(), template.snapfile()) },
+            async { tokio::try_join!(template.build(), template.snapfile(), template.metadata()) },
             tokio::time::timeout(REQUEST_TIMEOUT, self.network.get())
         );
         let slot = slot
             .unwrap_or_else(|_| Err("request timed out".to_owned()))
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
-        let (build, snapfile) = files.map_err(|e| {
+        let (build, snapfile, metadata) = files.map_err(|e| {
             self.network.return_slot(slot);
             template_status(&config, e)
         })?;
-        match self.resume(&config, &build, &snapfile, slot).await {
+        let prefetch = self
+            .prefetch_from_trace
+            .then(|| metadata.memory_prefetch().cloned())
+            .flatten();
+        match self.resume(&config, &build, &snapfile, prefetch, slot).await {
             Ok(sandbox) => Ok(lifecycle::spawn(
                 sandbox,
                 slot,
@@ -266,6 +272,7 @@ impl Node {
         config: &SandboxConfig,
         build: &Build,
         snapfile: &Path,
+        prefetch: Option<MemoryPrefetch>,
         slot: Slot,
     ) -> Result<Sandbox, String> {
         let work_dir = self.work_dir_of(&config.sandbox_id);
@@ -292,6 +299,7 @@ impl Node {
             .kernel(&self.kernel)
             .work_dir(work_dir)
             .envd_timeout(self.envd_timeout)
+            .prefetch(prefetch)
             .envd(EnvdInit {
                 access_token: config.envd_access_token.clone(),
                 env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),

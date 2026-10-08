@@ -5,6 +5,7 @@ pub mod snapshot;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::time::Instant;
 
@@ -18,12 +19,14 @@ use crate::firecracker::config::VmConfig;
 use crate::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
+use crate::memory::prefetch::PrefetchStats;
 use crate::phases::PhaseTimer;
 
 pub struct Sandbox {
     config: SandboxConfig,
     resources: Resources,
     phases: PhaseTimer,
+    prefetch_stats: Arc<PrefetchStats>,
 }
 
 impl SandboxBuilder {
@@ -94,6 +97,7 @@ impl Sandbox {
             config,
             resources: Resources::default(),
             phases: PhaseTimer::start(),
+            prefetch_stats: Arc::default(),
         }
     }
 

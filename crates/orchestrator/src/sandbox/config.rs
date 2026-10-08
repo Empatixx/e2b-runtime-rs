@@ -6,6 +6,7 @@ use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
 use crate::network::slot::Slot;
+use crate::template::metadata::MemoryPrefetch;
 
 const DEFAULT_INIT_PATH: &str = "/sbin/init";
 const DEFAULT_VCPUS: u32 = 2;
@@ -27,6 +28,7 @@ pub struct SandboxConfig {
     pub work_dir: PathBuf,
     pub envd: EnvdInit,
     pub envd_timeout: Duration,
+    pub prefetch: Option<MemoryPrefetch>,
 }
 
 #[derive(Default)]
@@ -45,6 +47,7 @@ pub struct SandboxBuilder {
     work_dir: Option<PathBuf>,
     envd: EnvdInit,
     envd_timeout: Option<Duration>,
+    prefetch: Option<MemoryPrefetch>,
 }
 
 impl SandboxBuilder {
@@ -119,6 +122,11 @@ impl SandboxBuilder {
         self
     }
 
+    pub fn prefetch(mut self, prefetch: Option<MemoryPrefetch>) -> Self {
+        self.prefetch = prefetch;
+        self
+    }
+
     pub fn build(self) -> Result<SandboxConfig, String> {
         Ok(SandboxConfig {
             id: self.id.ok_or("id is required")?,
@@ -135,6 +143,7 @@ impl SandboxBuilder {
             work_dir: self.work_dir.ok_or("work dir is required")?,
             envd: self.envd,
             envd_timeout: self.envd_timeout.unwrap_or(DEFAULT_ENVD_TIMEOUT),
+            prefetch: self.prefetch,
         })
     }
 }

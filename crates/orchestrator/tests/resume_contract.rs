@@ -15,6 +15,7 @@ use orchestrator::storage::backend::Storage;
 use orchestrator::storage::build::Build;
 use orchestrator::storage::header::{Header, Metadata};
 use orchestrator::template::cache::TemplateCache;
+use orchestrator::template::optimize::collect_prefetch;
 use uuid::Uuid;
 
 const ACCESS_TOKEN: &str = "resume-token";
@@ -371,4 +372,70 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
         paused_again.memfile_bytes,
         paused_again.memory_bytes
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_optimized_trace_prefetches_memory_on_resume() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    let templates = templates(&host).await;
+    let cold = templates
+        .sandbox(&host, "sbx-opt-cold", fresh_slot(4040).await)
+        .rootfs(templates.overlay(templates.template.clone(), "opt-cold"))
+        .cold_boot()
+        .await
+        .unwrap();
+    let build = cold.pause(&templates.storage, Uuid::new_v4()).await.unwrap().build;
+
+    let templates_ref = &templates;
+    let host_ref = &host;
+    let build_ref = &build;
+    let mapping = collect_prefetch(|run| async move {
+        let sandbox = templates_ref
+            .resume(host_ref, &format!("sbx-opt-{run}"), 4041 + run as u32, build_ref)
+            .await;
+        let trace = sandbox.memory_trace().ok_or("no memory server".to_owned());
+        sandbox.stop().await?;
+        trace
+    })
+    .await
+    .unwrap()
+    .expect("the two runs share no pages");
+
+    let plain_started = Instant::now();
+    let plain = templates.resume(&host, "sbx-opt-plain", 4043, &build).await;
+    let plain_took = plain_started.elapsed();
+    println!(
+        "resume without prefetch took {} ms: {}",
+        plain_took.as_millis(),
+        plain.phases()
+    );
+    plain.stop().await.unwrap();
+
+    let snapfile = templates.cache.get(build.build_id).snapfile().await.unwrap();
+    let prefetched_started = Instant::now();
+    let prefetched = templates
+        .sandbox(&host, "sbx-opt-prefetched", fresh_slot(4044).await)
+        .rootfs(templates.overlay(build.rootfs.clone(), "opt-prefetched"))
+        .memfile(templates.memfile(build.memfile.clone()))
+        .prefetch(Some(mapping.clone()))
+        .resume(&snapfile)
+        .await
+        .unwrap();
+    let prefetched_took = prefetched_started.elapsed();
+    println!(
+        "resume with a {}-page prefetch took {} ms: {}",
+        mapping.indices.len(),
+        prefetched_took.as_millis(),
+        prefetched.phases()
+    );
+    let installed = prefetched.prefetched();
+    let health = health(&prefetched).await;
+    prefetched.stop().await.unwrap();
+
+    assert!(!mapping.indices.is_empty());
+    assert!(installed > 0, "no page was prefetched");
+    assert_eq!(health, 204);
 }
