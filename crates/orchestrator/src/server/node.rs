@@ -49,6 +49,7 @@ use crate::template::{Template, TemplateError};
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
+const TEMPLATE_DEFAULT_USER: &str = "user";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub struct Node {
@@ -644,10 +645,8 @@ fn volume_mounts(config: &SandboxConfig, orchestrator_ip: &str) -> Result<Vec<Vo
 
 fn default_user(metadata: Option<&TemplateMetadata>) -> Option<String> {
     metadata
-        .and_then(|metadata| metadata.start.as_ref())
-        .and_then(|start| start.pointer("/context/user"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|user| *user == "user")
+        .and_then(|metadata| metadata.context.user.as_deref())
+        .filter(|user| *user == TEMPLATE_DEFAULT_USER)
         .map(str::to_owned)
 }
 
@@ -701,4 +700,32 @@ fn sweep_cgroups(root: &Path) {
             let _ = std::fs::write(cgroup.join("cgroup.kill"), "1");
             let _ = std::fs::remove_dir(&cgroup);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::template::metadata::Context;
+
+    fn metadata(context_user: Option<&str>, start_user: &str) -> TemplateMetadata {
+        TemplateMetadata {
+            context: Context {
+                user: context_user.map(str::to_owned),
+                ..Context::default()
+            },
+            start: Some(serde_json::json!({ "context": { "user": start_user } })),
+            ..TemplateMetadata::default()
+        }
+    }
+
+    #[test]
+    fn the_default_user_comes_from_the_template_context_like_upstream() {
+        assert_eq!(
+            default_user(Some(&metadata(Some("user"), "root"))),
+            Some("user".to_owned())
+        );
+        assert_eq!(default_user(Some(&metadata(Some("root"), "user"))), None);
+        assert_eq!(default_user(Some(&metadata(None, "user"))), None);
+        assert_eq!(default_user(None), None);
+    }
 }
