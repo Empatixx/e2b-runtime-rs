@@ -237,6 +237,7 @@ async fn pool_recycles_a_returned_slot() {
     let reachable = succeeds("ip", &["link", "show", &slot.host_veth()])
         && succeeds("ip", &["netns", "exec", &namespace, "ip", "link", "show", "tap0"])
         && succeeds("ip", &["netns", "exec", &namespace, "ip", "link", "show", "eth0"]);
+    pool.return_slot(recycled);
     pool.close().await;
 
     assert_eq!(recycled, slot);
