@@ -5,7 +5,6 @@ use parking_lot::Mutex;
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::app::AppState;
 use crate::controllers::filesystem::FilesystemService;
@@ -13,6 +12,7 @@ use crate::controllers::process::ProcessService;
 use crate::controllers::{collapse, envs, files, freeze, fsfreeze, health, init};
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
+use crate::middleware::cors::cors;
 use crate::proto::filesystem::FilesystemExt;
 use crate::proto::process::ProcessExt;
 
@@ -23,12 +23,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     let process = ProcessService::new(state.clone());
     let connect = Arc::new(process).register(Arc::new(filesystem).register(connectrpc::Router::new()));
-
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .expose_headers(Any);
 
     let public = Router::new()
         .route("/health", get(health::health))
@@ -52,5 +46,5 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(from_fn(authenticate_user))
         .layer(from_fn_with_state(state.clone(), require_token));
 
-    public.merge(protected).with_state(state).layer(cors)
+    public.merge(protected).with_state(state).layer(from_fn(cors))
 }

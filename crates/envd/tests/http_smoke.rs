@@ -206,3 +206,51 @@ async fn freeze_and_unfreeze_answer_like_upstream() {
     assert_eq!(thawed.status(), 204);
     assert_eq!(thawed.headers()["cache-control"], "no-store");
 }
+
+#[tokio::test]
+async fn cors_answers_like_rs_cors() {
+    let (addr, _) = spawn_server_with_state().await;
+    let c = reqwest::Client::new();
+
+    let preflight = c
+        .request(reqwest::Method::OPTIONS, format!("http://{addr}/envs"))
+        .header("origin", "https://app.example")
+        .header("access-control-request-method", "get")
+        .header("access-control-request-headers", "x-access-token, content-type")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 204);
+    let headers = preflight.headers();
+    assert_eq!(headers["access-control-allow-origin"], "*");
+    assert_eq!(headers["access-control-allow-methods"], "GET");
+    assert_eq!(headers["access-control-allow-headers"], "x-access-token, content-type");
+    assert_eq!(headers["access-control-max-age"], "7200");
+    assert_eq!(headers.get_all("vary").iter().count(), 3);
+
+    let refused = c
+        .request(reqwest::Method::OPTIONS, format!("http://{addr}/envs"))
+        .header("origin", "https://app.example")
+        .header("access-control-request-method", "TRACE")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 204);
+    assert!(!refused.headers().contains_key("access-control-allow-origin"));
+
+    let actual = c
+        .get(format!("http://{addr}/health"))
+        .header("origin", "https://app.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(actual.headers()["access-control-allow-origin"], "*");
+    assert_eq!(
+        actual.headers()["access-control-expose-headers"],
+        "Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin, Location, Cache-Control, X-Content-Type-Options"
+    );
+    assert_eq!(actual.headers()["vary"], "Origin");
+
+    let no_origin = c.get(format!("http://{addr}/health")).send().await.unwrap();
+    assert!(!no_origin.headers().contains_key("access-control-allow-origin"));
+}

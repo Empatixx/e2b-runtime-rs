@@ -12,8 +12,6 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Gid, Pid, Uid};
 use pty_process::{OwnedWritePty, Size};
-
-use crate::cgroups::Placement;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc::Receiver;
@@ -23,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::output::Output;
 use super::registry::Processes;
+use crate::cgroups::Placement;
 use crate::proto::process::__buffa::oneof::process_event::data_event::Output as Data;
 use crate::proto::process::process_event::{DataEvent, EndEvent};
 use crate::proto::process::{ProcessConfig, StartRequest};
@@ -163,45 +162,50 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
         .chain(command_line)
         .collect();
 
+    let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let started = match request.pty.as_option() {
-        Some(pty) => start_pty(
-            &args,
-            &env,
-            &cwd,
-            &user,
-            placement.as_ref(),
-            pty.size.rows,
-            pty.size.cols,
-        )
-        .map_err(|e| {
-            start_error(
-                &e,
-                format!(
-                    "error starting pty with command '{user_command}' in dir '{}' with '{}' cols and '{}' rows: {}",
-                    cwd.display(),
-                    pty.size.cols,
+        Some(pty) => unexpired(expired)
+            .and_then(|()| {
+                start_pty(
+                    &args,
+                    &env,
+                    &cwd,
+                    &user,
+                    placement.as_ref(),
                     pty.size.rows,
-                    reason(&e)
-                ),
-            )
-        })?,
-        None => start_pipes(
-            &args,
-            &env,
-            &cwd,
-            &user,
-            placement.as_ref(),
-            request.stdin.unwrap_or(true),
-        )
-        .map_err(|e| {
-            start_error(
-                &e,
-                format!(
-                    "error starting process '{user_command}': fork/exec /bin/sh: {}",
-                    reason(&e)
-                ),
-            )
-        })?,
+                    pty.size.cols,
+                )
+            })
+            .map_err(|e| {
+                start_error(
+                    &e,
+                    format!(
+                        "error starting pty with command '{user_command}' in dir '{}' with '{}' cols and '{}' rows: {}",
+                        cwd.display(),
+                        pty.size.cols,
+                        pty.size.rows,
+                        reason(&e)
+                    ),
+                )
+            })?,
+        None => unexpired(expired)
+            .and_then(|()| {
+                start_pipes(
+                    &args,
+                    &env,
+                    &cwd,
+                    &user,
+                    placement.as_ref(),
+                    request.stdin.unwrap_or(true),
+                )
+            })
+            .map_err(|e| {
+                let cause = match e.kind() {
+                    io::ErrorKind::TimedOut => reason(&e),
+                    _ => format!("fork/exec /bin/sh: {}", reason(&e)),
+                };
+                start_error(&e, format!("error starting process '{user_command}': {cause}"))
+            })?,
     };
     let Started {
         child,
@@ -434,6 +438,13 @@ fn look_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+fn unexpired(expired: bool) -> io::Result<()> {
+    match expired {
+        true => Err(io::Error::new(io::ErrorKind::TimedOut, "context deadline exceeded")),
+        false => Ok(()),
+    }
+}
+
 fn start_error(err: &io::Error, message: String) -> ConnectError {
     let exhausted = [
         Errno::EAGAIN,
@@ -444,10 +455,10 @@ fn start_error(err: &io::Error, message: String) -> ConnectError {
     ]
     .iter()
     .any(|errno| err.raw_os_error() == Some(*errno as i32));
-    let code = if exhausted {
-        ErrorCode::ResourceExhausted
-    } else {
-        ErrorCode::InvalidArgument
+    let code = match (exhausted, err.kind()) {
+        (true, _) => ErrorCode::ResourceExhausted,
+        (false, io::ErrorKind::TimedOut) => ErrorCode::DeadlineExceeded,
+        (false, _) => ErrorCode::InvalidArgument,
     };
     ConnectError::new(code, message)
 }

@@ -225,7 +225,12 @@ mod tests {
         };
 
         tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
-        drop(fixture.cache.get(build.build_id));
+        let looked_up = fixture.cache.get(build.build_id);
+        looked_up.fetch().await;
+        drop(looked_up);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
         tokio::time::advance(Duration::from_secs(2 * 60 * 60)).await;
         fixture.cache.evict_expired();
         assert_eq!(fixture.cache.len(), 1);

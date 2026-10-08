@@ -25,6 +25,7 @@ const VERSION_HEADER: &str = "X-Envd-Version";
 const MEMORY_HEADER: &str = "X-Envd-Memory";
 const DEFAULTS_HEADER: &str = "X-Envd-Defaults";
 const EVENTS_ADDRESS: &str = "E2B_EVENTS_ADDRESS";
+const MMDS_POLL_LIMIT: Duration = Duration::from_secs(60);
 
 static PIN_MMDS_WARN: RateLimit = RateLimit::new(Duration::from_secs(10));
 
@@ -106,7 +107,7 @@ async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
 fn initialized(state: &Arc<AppState>) -> Response {
     state.initialized.store(true, Ordering::SeqCst);
     let poller = state.clone();
-    tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars).await });
+    tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars, Some(MMDS_POLL_LIMIT)).await });
     let defaults = state.defaults();
     let effective = EffectiveDefaults {
         user: defaults.user,

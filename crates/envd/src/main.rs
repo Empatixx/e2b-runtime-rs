@@ -1,17 +1,24 @@
 use axum::Router;
 use axum::serve::{Listener, ListenerExt};
-use envd::{app::AppState, config, router};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use std::time::Duration;
+
+use envd::{app::AppState, config, host, router};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 
 const READ_BUFFER: usize = 64 * 1024;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(640);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::parse(std::env::args()).inspect_err(|e| eprintln!("{e}"))?;
     if config.version {
         println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if config.commit {
+        println!("{}", option_env!("ENVD_COMMIT_SHA").unwrap_or_default());
         return Ok(());
     }
 
@@ -28,12 +35,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|e| tracing::warn!(error = %e, "failed to set TCP_NODELAY"))
         });
     tracing::info!(port, "envd listening");
-    serve(listener, router::build_router(AppState::new(config))).await
+    let state = AppState::new(config);
+    host::mmds::mark_sandbox(&state.env_vars, state.config.is_not_fc);
+    if !state.config.is_not_fc {
+        let poller = state.clone();
+        tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars, None).await });
+    }
+    serve(listener, router::build_router(state)).await
 }
 
 async fn serve(mut listener: impl Listener, app: Router) -> ! {
     let mut builder = Builder::new(TokioExecutor::new());
-    builder.http1().max_buf_size(READ_BUFFER);
+    builder
+        .http1()
+        .max_buf_size(READ_BUFFER)
+        .timer(TokioTimer::new())
+        .header_read_timeout(IDLE_TIMEOUT);
     builder.http2().enable_connect_protocol();
     loop {
         let (stream, _) = listener.accept().await;
