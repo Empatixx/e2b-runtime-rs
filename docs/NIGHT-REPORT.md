@@ -1,117 +1,125 @@
-# Noční report: orchestrator M6 → M8
+# Report: orchestrator M9 → M12
 
-M6, M7 i M8 jsou hotové a zelené v CI (GitHub Actions, KVM, root). Po každém milníku proběhlo review na opusu. Jeho kritické a důležité nálezy jsou opravené, drobnosti jsou v `docs/BACKLOG.md`.
+M9 až M12 jsou hotové a poslední běh CI je zelený. Je to přepis upstream E2B logiky z Go do Rustu: limity, výchozí hodnoty, stavové kódy a texty chyb odpovídají upstreamu, struktury a styl jsou podle našich konvencí. Po M9–M11 a po M12 proběhlo review na opusu. Důležité nálezy jsou opravené, drobnosti jsou v `docs/BACKLOG.md`.
 
-Poslední zelený běh s kódem je **37718282273**. Commit s tímto reportem spouští ještě jeden běh, jeho výsledek je na konci reportu.
+Předchozí report (M6–M8) je v historii gitu.
+
+## Čísla (CI runner, 1 GiB guest)
+
+| Co | Před (M8) | Teď |
+|---|---|---|
+| Resume s prefetchem ze záznamu (optimize) | — | **463 ms** (`envd_init` 251 ms, 460 faultů, 4551 stránek předem) |
+| Resume bez prefetche, teplá cache chunků | — | 872 ms (5408 faultů) |
+| Resume, studená cache | 1,5–2,1 s | 1,5 s |
+| Pause přes gRPC | 556–705 ms (včetně uploadu) | **84–217 ms** (upload běží na pozadí) |
+| Resume na stejném uzlu hned po pause | stahovalo se všechno ze storage | čte jen lokální soubory, ~2 s bez záznamu |
+
+**Kde mizel čas.** Baseline v M9 ukázala, že síť a rootfs zaberou jen ~130 ms. Zbytek, 1,4–1,9 s, zabíralo `envd_init`. Šlo hlavně o tisíce page faultů, kdy guest po resume dotahuje paměť. Proto přinesl největší zrychlení prefetch ze záznamu, ne pool slotů.
+
+Rozpad jednotlivých fází vypisuje `resume_contract` (`resume phases: …`).
 
 ## Co je hotové
 
-### M6: resume ze snapshotu přes userfaultfd
+### M9: rychlý resume
 
-- Firecracker běží v `unshare -m` se stabilními cestami `/fc-vm/rootfs.ext4` a `/fc-vm/kernel/vmlinux`. Díky tomu snapshot funguje na libovolném `/dev/nbdN`. Tap má MAC `02:FC:00:00:00:06`.
-- `memory/`:
-  - `region.rs`: regiony z handshaku. Firecracker 1.14 posílá `page_size` i `page_size_kib`.
-  - `uffd.rs`: bezpečný typ nad uffd fd (copy, wake, write-protect).
-  - `handshake.rs`: přenos fd přes `SCM_RIGHTS`.
-  - `server.rs`: page-fault server, faulty běží nezávisle přes `FuturesUnordered`.
-  - `snapshot.rs`: export paměti přes `process_vm_readv`.
-- `Sandbox::snapshot` a `SandboxBuilder::resume`. `Build` drží headery memfile a rootfs (V3).
-- Chunker: stahování jednoho chunku sdílí všichni čekající, I/O běží přes `spawn_blocking`.
-- `/init` envd: pokusy omezené deadlinem, závod s pádem Firecrackeru, MMDS se zapisuje před startem VM.
-- **Důkaz v CI:**
-  - `resume_contract`: soubor zapsaný před snapshotem je po resume vidět. Po `sync` v hostu je i v rootfs diffu, ověřeno studeným startem jen z disku.
-  - Oficiální SDK testy (105 prošlo, 9 přeskočeno) projdou proti studenému i obnovenému sandboxu.
+- **Cache šablon** (`template/`): snapfile a headery se stahují jednou na build a drží se 25 h s klouzavým TTL. „Pin“ je počet `Arc` referencí plus 1 min grace po posledním uvolnění.
+- **Pool síťových slotů** (`network/pool.rs`):
+  - 32 nových a 100 recyklovaných slotů, vrácení se zpožděním 3 s;
+  - indexy přeskakují existující `ns-N` a uniklé namespacy se použijí až jako poslední;
+  - namespace zůstane jako kotva, když teardown selže.
+- **Pool NBD zařízení** (64 připravených) a souběžné zpracování NBD požadavků. Chyba backendu vrací kód 1 a zápis nad 32 MB server ukončí, obojí jako upstream.
+- **Souběžný resume:**
+  - Firecracker startuje zároveň s připojením NBD, rootfs je symlink na `/dev/null` a později se přepojí;
+  - cgroup se přiřadí už v `pre_exec` (obdoba `CLONE_INTO_CGROUP`);
+  - žádný `PUT /logger`; nastavují se prázdné rate limitery;
+  - envd `/init` zkouší po 50 ms s celkovým limitem 10 s.
+- **Měření fází** (`phases.rs`).
 
-### M7: pause s diffy
+### M10: služby uzlu
 
-- Read faulty se vkládají s `UFFDIO_COPY_MODE_WP`, tedy async write-protect. U obnoveného sandboxu se dirty stránky berou z `GET /memory/dirty`. Když Firecracker write-protect nepodporuje, použije se fallback resident − empty.
-- Diff paměti i rootfs se slučuje nad rodičovskými headery. `Sandbox::pause` = snapshot + stop.
-- **Důkaz v CI:** studený start, soubor A, pause, resume, přepis stránky v tmpfs a soubor B, pause, resume. Pak jsou vidět A, B i obsah tmpfs a proces `sleep` na pozadí pořád žije. Disk druhé generace je ověřený studeným startem jen z rootfs.
+- **`InfoService`** (`info.proto` beze změn): stav uzlu, metriky hostitele a součty prostředků přidělených sandboxům. Override stavu má stejná pravidla a texty chyb jako upstream.
+- **Jeden port pro gRPC, gRPC health a `GET /health`** (axum místo cmux). `/health` vrací `{"status":"healthy|draining|unhealthy","version":"<commit>"}`, kód 503 jen pro unhealthy.
+- **Admission:** max 200 sandboxů a 3 souběžné starty s čekáním 15 s, texty chyb jako upstream.
+- **Shutdown jako upstream:**
+  1. stav ShuttingDown;
+  2. 15 s pauza;
+  3. drain, tedy čekání, až API sandboxy odebere;
+  4. dokončení uploadů;
+  5. teprve pak zavření poolů.
+  - Druhý SIGTERM sandboxy smaže.
 
-### M8: gRPC `SandboxService`
+### M11: asynchronní pause
 
-- Upstream `orchestrator.proto` beze změn: nemá `package`, cesty jsou `/SandboxService/*`. Codegen přes tonic 0.14.
-- **RPC:** Create (resume z buildu), Update (`end_time`), List, Delete a Pause. Checkpoint vrací `Unimplemented`.
-- **Lifecycle:** každý sandbox má vlastní task, který čeká na příkaz, na pád (Firecracker, NBD server nebo memory server) nebo volitelně na expiraci.
-- **Registry** má stavy Starting, Running a Stopping. Id se uvolní až po dokončení úklidu, takže resume se stejným id funguje.
-- **Odolnost:** Create a Pause doběhnou, i když klient spojení zruší. Binárka `orchestrator` reaguje na SIGTERM tak, že smaže všechny sandboxy. Při startu uklidí zbytky po předchozím běhu.
-- Z backlogu: `Drop` pro `NbdDevice`, `setsid` pro Firecracker, cgroup controllers `+cpu +memory` a sledování smrti NBD a uffd serveru.
-- **Důkaz v CI:**
-  - `grpc_contract::sandbox_lifecycle_over_grpc`: Create, List, duplicitní Create vrátí `AlreadyExists`, Update, Pause, Create stejného id z pauznutého buildu přečte soubor, souběžný Create, Delete, druhý Delete vrátí `NotFound`, chybějící build vrátí `FailedPrecondition`. Nakonec nezůstane netns, cgroup, nbd ani pracovní adresář.
-  - `an_expired_sandbox_is_removed`.
+- **Pause** uloží snapshot do cache šablon (`AddSnapshot`) a odpoví hned. Upload běží na pozadí: 20 min na pokus, 2 h celkem, prodleva mezi pokusy 5 s zdvojnásobovaná až do 2 min.
+- **Pořadí uploadů:** potomek je označený jako nahraný až po rodiči.
+- **Selhaný upload** nechá build v cache, kde se dá dál resumovat na tomto uzlu, dokud nevyprší TTL.
+- **`DiffStore`:** TTL 25 h, lokální diffy připíchnuté do konce uploadu, vyklízení při zaplnění disku přes `BUILD_CACHE_MAX_USAGE_PERCENTAGE` (výchozí 90).
 
-### Opravy, které se objevily cestou
+### M12: prefetch
 
-- **Skutečná příčina flaky NBD testů:** kernel publikuje `pid` dřív, než nastaví kapacitu zařízení. Připojení teď čeká na `pid` i správnou velikost a indexy zařízení se rotují.
-- **CI:**
-  - SDK checkout je mimo `target`, protože rust-cache obnovoval rozbitý klon.
-  - Runner se uklidí od dotnet, android, ghc a CodeQL, aby nedošel disk.
-  - RustFS je připíchnutý na 1.0.1 a vytvoření bucketu se zkouší opakovaně.
-
-## Čísla (CI runner, 2 vCPU guest, 1 GiB RAM)
-
-| Co | Hodnota |
-|---|---|
-| Resume (load snapshotu, uffd, envd `/init`) | 1,5–2,1 s; poslední běh 1507–1623 ms |
-| Pause obnoveného sandboxu | 556–705 ms; poslední běh 583 ms |
-| Diff paměti, 1. pause (studený start, resident − empty) | ~133 MB z 1 GiB |
-| Diff paměti, 2. pause (write-protect tracking) | 30–35 MB z 1 GiB |
-| Diff rootfs, 1. a 2. pause | ~2,1 MB a ~200 KB |
-
-Resume zahrnuje vytvoření síťového slotu (`ip` a `iptables`) a připojení NBD. Předem vytvořené sloty (upstream jich drží 32) jsou v backlogu a čas by zkrátily.
+- **`metadata.json`** se stejnými klíči jako upstream, s fallbackem na V1. Pause zapisuje `same_version` a metadata nahrává.
+- **Záznam faultů:** u každé stránky se zaznamená první dotek, pořadí a typ přístupu (`r`/`w`/`p`).
+- **`collect_prefetch`:** průnik dvou resumů jako upstream optimize.
+- **Prefetcher:** 16 workerů stahuje stránky a 8 je kopíruje přes `UFFDIO_COPY` s write-protect. Stahování začíná hned na začátku resume, kopírování až po handshaku.
+- **Streamovaný chunker:** čtenář čeká jen na svoje bloky. Zkrácený stream neoznačí žádnou stránku jako hotovou.
+- **memfd:** Firecracker 1.14.1 ho posílá, takže pause kopíruje dirty stránky z memfd místo `process_vm_readv`.
 
 ## Rozhodnutí, která jsem udělal za tebe (Ruling)
 
-### M6
+**Síť a NBD:**
+- Pool slotů po chybě čeká 50 ms (upstream nečeká), aby rozbitý host nezatěžoval CPU.
+- Sloty se dál vytvářejí přes `ip` a `iptables`, protože po zavedení poolu jsou mimo rychlou cestu. Přechod na netlink je v backlogu.
+- `Slot::create` přes existující namespace ho nejdřív smaže, jako upstream `CreateNetwork`.
+- NBD dál používá ioctl a `SEND_FLUSH`, protože flush synchronizuje rootfs před exportem. Multi-conn proto nemáme.
+- Pool NBD zařízení je jeden na proces a běží na std vláknech. Testy mají každý vlastní tokio runtime. Úloha poolu v jednom runtime by skončila spolu s testem.
+- Čekání na připojení NBD používá `sleep(100 µs)`, který tokio zaokrouhlí zhruba na 1 ms.
 
-- Test se sdíleným fetchem stojí na FIFO, protože lokální chyba nastane okamžitě a čekající by se jinak nepotkali.
-- SDK se klonuje do `$RUNNER_TEMP`, protože rust-cache obnovoval rozbitý `target/e2b-sdk`.
-- Test zrušeného bootu startuje rootfs s `init=/bin/sleep -- 3600`, protože prázdný disk teď selže hned.
-- `Build` je v `storage/build.rs`, aby šel testovat na macOS.
-- Rodič memfile studeného sandboxu je nil header: generation 1, `base_build_id` nil.
-- Úkoly 5–8 šly do CI najednou: linuxový kód lokálně nepřeložím a ušetří se tři běhy CI.
-- Resume nastavuje `PUT /logger` a při chybě vypisuje diagnostiku. Bez toho nešel najít zaseklý load.
-- `Region` přijímá obě pole s velikostí stránky najednou.
-- NBD kontrola v `sandbox_contract` hledá jen zařízení vlastní velikosti, protože paralelní testy drží jiná zařízení.
-- V testu `serves_faults` byl race: počítadlo faultů se zvyšuje až po `UFFDIO_COPY`. Test teď na počítadlo počká.
-- **Cena:** u několika oprav jsem neviděl test nejdřív padat. Část linuxových testů šla do CI rovnou s kódem.
+**Resume a envd:**
+- Výchozí timeout envd v knihovně zůstává 60 s, protože studený boot systemd guestu v CI to potřebuje. `Node` předává `ENVD_TIMEOUT_MS` (10 s).
+- MMDS `address` zůstává prázdná, dokud nebude hyperloop.
 
-### M7
+**Node a API:**
+- `memory_used` počítá sysinfo jako total − available, gopsutil to dělá trochu jinak.
+- Deprecated pole ServiceInfo 101–103 zůstávají 0, protože `#[allow]` je zakázané.
+- Limit 60 s na Create omezuje čekání (na slot), ale běžící resume neruší, aby neunikly prostředky z poolů.
+- **SIGTERM už sandboxy nemaže**, drainuje jako upstream. Mažou se až druhým signálem. To nahrazuje rozhodnutí z M8.
 
-- Linuxové testy šly do CI spolu s kódem. Lokálně jsem viděl padat jen `memory_dirty`, který běží i na Macu.
-- Proces na pozadí se ověřuje přes `nohup sleep`, PID v `/dev/shm` a `kill -0`, ne přes `process.List` v envd.
-- `Snapshot` dostal pole `memory_bytes` a `tracked_writes`, aby test dokázal, že se použil write-protect.
-- `pause` vrátí uložený snapshot i v případě, že selže úklid. Chybu úklidu zaloguje.
-- Testovací soubory v tmpfs jsou v `/dev/shm/e2b`. V `/dev/shm` brání přepisu `protected_regular` a Go envd se chová stejně.
-- NBD: připojení čeká na pid i velikost a indexy se rotují.
-- RustFS je připíchnutý na 1.0.1.
+**Pause a upload:**
+- Headery V3 jdou nahoru souběžně s daty a na rodiče se čeká až před označením „nahráno“, stejně jako v upstream.
+- `BUILD_CACHE_MAX_USAGE_PERCENTAGE` má výchozí hodnotu 90.
 
-### M8
+**Prefetch:**
+- Verze kernelu a Firecrackeru v `metadata.json` se kopírují z rodiče.
+- `RESUME_PREFETCH_SOURCE` umí jen `off` a `init`. `last-cycle` je v backlogu.
+- Stream chunků jde po dávkách 256 KiB.
 
-- **Lokální expirace je opt-in** (`E2B_LOCAL_EXPIRY=1`). Výchozí chování je jako upstream: expiraci a auto-pause řídí API. Původně jsem expiraci zapnul natvrdo, ale review ukázalo, že by zabíjela auto-pause sandboxy dřív, než je API pozastaví.
-- **`SlotPool` přiděluje jen indexy.** Síť se vytváří a ruší pro každý sandbox zvlášť, předem vytvořené sloty jsou v backlogu.
-- `RunningSandbox.config` je v upstream proto deprecated a nevyplňuji ho, protože `#[allow]` je zakázané. Stejná data jsou v plochých polích, která API čte.
-- CI maže předinstalované toolchainy kvůli místu na disku.
-- Opravy z review M8 (zrušení RPC, SIGTERM) nemají deterministický padající test, stavy registry jsou pokryté unit testy.
+**Review:**
+- Pro M9–M11 proběhlo jedno společné review místo tří, protože milníky sdílejí kód uzlu.
 
-## Co zůstalo otevřené a proč
+## Testy, které jsem neviděl nejdřív padat
 
-- **M3b ublk:** potřebuje bare-metal node s kernelem 6.12+. Runner GitHubu nemá `ublk_drv`.
-- **Template build, API, client-proxy a nasazení na K8s:** jsou to samostatné specy mimo tenhle cíl.
-- **Backlog** (`docs/BACKLOG.md`), hlavní položky:
-  - předem vytvořené síťové sloty;
-  - `InfoService` a health, které API potřebuje k objevení uzlu;
-  - asynchronní upload při Pause;
+Linuxový kód lokálně nepřeložím, takže opravy jako unpin po selhaném uploadu nebo pořadí uploadu před odpovědí na pause ověřilo až CI.
+
+Naopak skutečně padaly a pak prošly:
+- zkrácený stream;
+- tolerantní `metadata.json`;
+- prefault bez write-protect;
+- tři testy, u kterých byla chyba v samotném testu: velikost NBD zařízení, ping blokovaný pravidlem hostitele a nevrácený slot.
+
+## Co zůstává
+
+- **Template builder (navrhuju jako M13):** OCI image → ext4 → provisioning → snapshot → optimize. Bez něj vznikají buildy jen v testech a záznam faultů pro prefetch nemá kdo zapsat do `metadata.json` produkčního buildu. `collect_prefetch` je na to připravený.
+- **Backlog:**
+  - netlink a nftables firewall;
+  - generic-netlink NBD;
+  - `last-cycle` prefetch a harvest po pause;
   - huge pages;
-  - prefetch z trace;
-  - memfd a `use_sync_wp`;
-  - admission limity;
-  - přeřazení položek s cílem „M8“.
-- Startovní úklid v binárce předpokládá dedikovaný node: maže všechny `ns-<N>`, `/sys/fs/cgroup/e2b/*` a `E2B_WORK_DIR`.
-- Na tvém Macu nic nespouštěj. Všechno linuxové běží v CI.
+  - peer-to-peer chunky;
+  - drobnosti z obou review.
+- **M3b ublk** pořád čeká na bare-metal node.
 
 ## Kde to je
 
 - Větev `main` v `Empatixx/e2b-runtime-rs`, všechno pushnuté.
-- **Plány:** `docs/superpowers/plans/2026-10-10-orchestrator-m6-resume.md`, `2026-10-11-orchestrator-m7-pause.md` a `2026-10-12-orchestrator-m8-grpc.md`.
-- **Spuštění gRPC serveru:** viz README, sekce „Orchestrator gRPC server“.
+- **Spec:** `docs/superpowers/specs/2026-10-13-orchestrator-fast-resume-design.md`.
+- **Plány:** `docs/superpowers/plans/2026-10-13-…-m9-…` až `2026-10-16-…-m12-prefetch.md`.
