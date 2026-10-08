@@ -1,23 +1,29 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::panic::AssertUnwindSafe;
+
+use futures::FutureExt;
 use futures::future::BoxFuture;
+use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 use tonic::{Request, Response, Status};
 
 use super::builds::{BuildCache, BuildInfo, BuildResult};
+use super::index::join_path;
 use super::logs::LogQuery;
-use super::phase::BuildError;
+use super::phase::{BuildError, CANCELLED};
 use crate::proto::template_service_server::TemplateService;
 use crate::proto::{
     InitLayerFileUploadRequest, InitLayerFileUploadResponse, LogLevel, LogsDirection, TemplateBuildDeleteRequest,
-    TemplateBuildMetadata, TemplateBuildState, TemplateBuildStatusResponse, TemplateCreateRequest,
-    TemplateStatusRequest, template_config,
+    TemplateBuildMetadata, TemplateBuildState, TemplateBuildStatusReason, TemplateBuildStatusResponse,
+    TemplateCreateRequest, TemplateStatusRequest, template_config,
 };
 use crate::storage::backend::Storage;
 
 pub const DEFAULT_VERSION: &str = "v2.0.0";
 const SIGNED_URL_EXPIRATION: Duration = Duration::from_secs(30 * 60);
+const PANIC_MESSAGE: &str = "fatal error occurred during template build, please contact us";
 
 pub trait TemplateBuilder: Send + Sync + 'static {
     fn build(
@@ -50,12 +56,23 @@ impl<B: TemplateBuilder> TemplateServer<B> {
     }
 
     fn start(&self, mut request: TemplateCreateRequest, info: Arc<BuildInfo>, build_id: String) {
-        request.version.get_or_insert_with(|| DEFAULT_VERSION.to_owned());
-        let build = self.builder.build(request, info.clone());
+        if request.version.as_deref().is_none_or(str::is_empty) {
+            request.version = Some(DEFAULT_VERSION.to_owned());
+        }
+        let template_id = request
+            .template
+            .as_ref()
+            .map(|template| template.template_id.clone())
+            .unwrap_or_default();
         let storage = self.storage.clone();
+        let builder = self.builder.clone();
         self.tasks.spawn(async move {
+            let started = Instant::now();
+            info.log
+                .push(LogLevel::Info, format!("Building template {template_id}/{build_id}"));
+            let build = AssertUnwindSafe(builder.build(request, info.clone())).catch_unwind();
             let built = tokio::select! {
-                built = build => built,
+                built = build => built.unwrap_or_else(|_| Err(BuildError::Internal(PANIC_MESSAGE.to_owned()))),
                 () = info.cancel.cancelled() => Err(BuildError::cancelled()),
             };
             if let Err(e) = &built {
@@ -64,8 +81,32 @@ impl<B: TemplateBuilder> TemplateServer<B> {
                     tracing::warn!(build = %build_id, error = %e, "could not remove the failed build's files");
                 }
             }
+            info.log.push(
+                match built {
+                    Ok(_) => LogLevel::Info,
+                    Err(_) => LogLevel::Error,
+                },
+                outcome_line(&built, started.elapsed()),
+            );
             info.finish(result_of(built));
         });
+    }
+}
+
+fn outcome_line(built: &Result<TemplateBuildMetadata, BuildError>, took: Duration) -> String {
+    match built {
+        Ok(_) => format!("Build finished, took {}", go_duration_seconds(took)),
+        Err(e) => format!("Build failed: {}", e.reason().message),
+    }
+}
+
+fn go_duration_seconds(took: Duration) -> String {
+    let seconds = took.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds}s"),
+        (0, _) => format!("{minutes}m{seconds}s"),
+        _ => format!("{hours}h{minutes}m{seconds}s"),
     }
 }
 
@@ -89,10 +130,12 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
     async fn template_create(&self, request: Request<TemplateCreateRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let config = request.template.clone().unwrap_or_default();
-        if !matches!(
-            config.source,
-            Some(template_config::Source::FromImage(_) | template_config::Source::FromTemplate(_))
-        ) {
+        let has_source = match &config.source {
+            Some(template_config::Source::FromImage(image)) => !image.is_empty(),
+            Some(template_config::Source::FromTemplate(_)) => true,
+            None => false,
+        };
+        if !has_source {
             return Err(Status::invalid_argument(
                 "template build requires either fromImage or fromTemplate",
             ));
@@ -115,10 +158,7 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
             .get(&request.build_id)
             .map_err(|e| Status::unknown(format!("error while getting build info, maybe already expired: {e}")))?;
         let query = LogQuery {
-            level: request
-                .level
-                .and_then(|level| LogLevel::try_from(level).ok())
-                .unwrap_or_default(),
+            level: request.level.unwrap_or_default(),
             start: request.start.and_then(|start| start.try_into().ok()),
             end: request.end.and_then(|end| end.try_into().ok()),
             direction: request
@@ -154,16 +194,25 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
         if request.build_id.is_empty() || request.template_id.is_empty() {
             return Err(Status::unknown("template id and build id are required fields"));
         }
+        let _tracked = self.tasks.token();
         if let Ok(info) = self.builds.get(&request.build_id)
             && info.result().is_none()
         {
-            info.finish(result_of(Err(BuildError::cancelled())));
+            tracing::info!(template = %request.template_id, build = %request.build_id, "Canceling running template build");
+            info.finish(BuildResult {
+                status: TemplateBuildState::Failed,
+                reason: Some(TemplateBuildStatusReason {
+                    message: CANCELLED.to_owned(),
+                    step: None,
+                }),
+                metadata: None,
+            });
             info.cancel.cancel();
         }
         self.storage
             .delete_prefix(&request.build_id)
             .await
-            .map_err(|e| Status::unknown(format!("error deleting template files from storage: {e}")))?;
+            .map_err(|e| Status::unknown(format!("error when deleting template objects: {e}")))?;
         Ok(Response::new(()))
     }
 
@@ -173,7 +222,7 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
     ) -> Result<Response<InitLayerFileUploadResponse>, Status> {
         let request = request.into_inner();
         let scope = request.cache_scope.clone().unwrap_or(request.template_id.clone());
-        let path = format!("{scope}/files/{}.tar", request.hash);
+        let path = join_path(&[&scope, "files", &format!("{}.tar", request.hash)]);
         let present = self
             .storage
             .exists(&path)
@@ -205,6 +254,7 @@ mod tests {
     use futures::FutureExt;
 
     use super::*;
+    use crate::builder::phase::INTERNAL_ERROR_MESSAGE;
     use crate::proto::TemplateConfig;
 
     struct Stub;
@@ -220,6 +270,7 @@ mod tests {
                 match request.template.unwrap_or_default().start_command.as_str() {
                     "fail" => Err(BuildError::Internal("disk".to_owned())),
                     "hang" => std::future::pending().await,
+                    "panic" => panic!("builder bug"),
                     _ => Ok(TemplateBuildMetadata {
                         rootfs_size_key: 1024,
                         ..TemplateBuildMetadata::default()
@@ -295,6 +346,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_image_is_no_source_and_an_empty_version_gets_the_default() {
+        let fixture = fixture();
+        let mut request = create("b0", "");
+        request.get_mut().template.as_mut().unwrap().source = Some(template_config::Source::FromImage(String::new()));
+
+        let error = fixture.server.template_create(request).await.unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_build_fails_with_the_internal_reason() {
+        let fixture = fixture();
+        fixture.server.template_create(create("bp", "panic")).await.unwrap();
+        fixture.server.wait_for_builds().await;
+
+        let done = status(&fixture.server, "bp").await.unwrap();
+
+        assert_eq!(done.status, TemplateBuildState::Failed as i32);
+        assert_eq!(done.reason.unwrap().message, INTERNAL_ERROR_MESSAGE);
+        assert_eq!(
+            done.log_entries.last().unwrap().message,
+            format!("Build failed: {INTERNAL_ERROR_MESSAGE}")
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_running_build_cancels_it_without_a_step() {
+        let fixture = fixture();
+        fixture.server.template_create(create("bc", "hang")).await.unwrap();
+        fixture
+            .server
+            .template_build_delete(Request::new(TemplateBuildDeleteRequest {
+                build_id: "bc".to_owned(),
+                template_id: "t1".to_owned(),
+            }))
+            .await
+            .unwrap();
+        fixture.server.wait_for_builds().await;
+
+        let done = status(&fixture.server, "bc").await.unwrap();
+
+        assert_eq!(
+            done.reason,
+            Some(TemplateBuildStatusReason {
+                message: "build was cancelled".to_owned(),
+                step: None,
+            })
+        );
+        assert_eq!(
+            done.log_entries.last().unwrap().message,
+            "Build failed: build was cancelled"
+        );
+    }
+
+    #[test]
+    fn durations_print_like_go() {
+        assert_eq!(go_duration_seconds(Duration::from_millis(900)), "0s");
+        assert_eq!(go_duration_seconds(Duration::from_secs(65)), "1m5s");
+        assert_eq!(go_duration_seconds(Duration::from_secs(3600)), "1h0m0s");
+    }
+
+    #[tokio::test]
     async fn a_build_completes_with_logs_and_a_build_id_registers_once() {
         let fixture = fixture();
         fixture.server.template_create(create("b1", "")).await.unwrap();
@@ -304,7 +418,9 @@ mod tests {
 
         assert_eq!(done.status, TemplateBuildState::Completed as i32);
         assert_eq!(done.metadata.unwrap().rootfs_size_key, 1024);
-        assert_eq!(done.log_entries[0].message, "building");
+        let lines: Vec<&str> = done.log_entries.iter().map(|entry| entry.message.as_str()).collect();
+        assert_eq!(lines[..2], ["Building template t1/b1", "building"]);
+        assert_eq!(lines[2], "Build finished, took 0s");
         assert_eq!(
             duplicate.message(),
             "error while creating build cache: build b1 already exists in cache"

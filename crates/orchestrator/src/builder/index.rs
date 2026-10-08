@@ -2,8 +2,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::backend::Storage;
-use crate::storage::paths::BuildPaths;
-use crate::template::metadata::{CURRENT_VERSION, TemplateMetadata};
+use crate::template::metadata::TemplateMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IndexEntry {
@@ -15,15 +14,26 @@ struct IndexTemplate {
     build_id: String,
 }
 
+const MINIMAL_CACHED_VERSION: u64 = 2;
+const DEPRECATED_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedLayer {
+    pub build_id: String,
+    pub metadata: TemplateMetadata,
+}
+
 pub struct LayerIndex {
-    storage: Storage,
+    index_storage: Storage,
+    template_storage: Storage,
     scope: String,
 }
 
 impl LayerIndex {
-    pub fn new(storage: Storage, scope: &str) -> Self {
+    pub fn new(index_storage: Storage, template_storage: Storage, scope: &str) -> Self {
         Self {
-            storage,
+            index_storage,
+            template_storage,
             scope: scope.to_owned(),
         }
     }
@@ -35,31 +45,59 @@ impl LayerIndex {
             },
         };
         let json = serde_json::to_vec(&entry).map_err(|e| format!("error marshalling layer metadata: {e}"))?;
-        self.storage.put(&self.object(hash), Bytes::from(json)).await
+        self.index_storage.put(&self.object(hash), Bytes::from(json)).await
     }
 
-    pub async fn cached(&self, hash: &str) -> Result<Option<(String, TemplateMetadata)>, String> {
-        let Some(bytes) = self.storage.find(&self.object(hash)).await? else {
-            return Ok(None);
-        };
-        let entry: IndexEntry =
-            serde_json::from_slice(&bytes).map_err(|e| format!("error unmarshalling layer index: {e}"))?;
-        let Ok(build_id) = uuid::Uuid::parse_str(&entry.template.build_id) else {
-            return Ok(None);
-        };
-        let metadata = self
-            .storage
-            .find(&BuildPaths::new(build_id).metadata())
-            .await?
-            .map(|bytes| TemplateMetadata::from_json(&bytes))
-            .transpose()?;
-        Ok(metadata
-            .filter(|metadata| metadata.version >= CURRENT_VERSION)
-            .map(|metadata| (entry.template.build_id, metadata)))
+    pub async fn cached(&self, hash: &str) -> Option<CachedLayer> {
+        let build_id = self.layer_build_id(hash).await?;
+        let bytes = self
+            .template_storage
+            .find(&format!("{build_id}/metadata.json"))
+            .await
+            .ok()
+            .flatten()?;
+        TemplateMetadata::from_json(&bytes)
+            .ok()
+            .filter(|metadata| metadata.version >= MINIMAL_CACHED_VERSION && metadata.version > DEPRECATED_VERSION)
+            .map(|metadata| CachedLayer { build_id, metadata })
+    }
+
+    async fn layer_build_id(&self, hash: &str) -> Option<String> {
+        let bytes = self.index_storage.find(&self.object(hash)).await.ok().flatten()?;
+        serde_json::from_slice::<IndexEntry>(&bytes)
+            .ok()
+            .map(|entry| entry.template.build_id)
+            .filter(|build_id| !build_id.is_empty())
     }
 
     fn object(&self, hash: &str) -> String {
-        format!("{}/index/{hash}", self.scope)
+        join_path(&[&self.scope, "index", hash])
+    }
+}
+
+pub fn join_path(parts: &[&str]) -> String {
+    let joined = parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("/");
+    let absolute = joined.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in joined.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if segments.last().is_some_and(|last| *last != "..") => {
+                segments.pop();
+            }
+            ".." if absolute => {}
+            segment => segments.push(segment),
+        }
+    }
+    match (absolute, segments.is_empty()) {
+        (true, _) => format!("/{}", segments.join("/")),
+        (false, true) => String::new(),
+        (false, false) => segments.join("/"),
     }
 }
 
@@ -68,20 +106,21 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::storage::paths::BuildPaths;
 
     #[tokio::test]
     async fn a_saved_layer_is_cached_only_with_v2_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::local(dir.path()).unwrap();
-        let index = LayerIndex::new(storage.clone(), "scope");
+        let index = LayerIndex::new(storage.clone(), storage.clone(), "scope");
         let build_id = Uuid::new_v4();
         let metadata = TemplateMetadata {
-            version: CURRENT_VERSION,
+            version: 2,
             ..TemplateMetadata::default()
         };
 
         index.save("h1", &build_id.to_string()).await.unwrap();
-        assert_eq!(index.cached("h1").await.unwrap(), None);
+        assert_eq!(index.cached("h1").await, None);
 
         storage
             .put(
@@ -90,20 +129,36 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(index.cached("h1").await.unwrap(), None);
+        assert_eq!(index.cached("h1").await, None);
 
         storage
             .put(&BuildPaths::new(build_id).metadata(), Bytes::from(metadata.to_json()))
             .await
             .unwrap();
         assert_eq!(
-            index.cached("h1").await.unwrap(),
-            Some((build_id.to_string(), metadata))
+            index.cached("h1").await,
+            Some(CachedLayer {
+                build_id: build_id.to_string(),
+                metadata
+            })
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("scope/index/h1")).unwrap(),
             format!(r#"{{"template":{{"build_id":"{build_id}"}}}}"#)
         );
-        assert_eq!(index.cached("missing").await.unwrap(), None);
+        assert_eq!(index.cached("missing").await, None);
+        storage
+            .put("scope/index/broken", Bytes::from_static(b"{"))
+            .await
+            .unwrap();
+        assert_eq!(index.cached("broken").await, None);
+    }
+
+    #[test]
+    fn paths_join_like_go_path_join() {
+        assert_eq!(join_path(&["scope", "index", "h"]), "scope/index/h");
+        assert_eq!(join_path(&["scope", "files", "../x.tar"]), "scope/x.tar");
+        assert_eq!(join_path(&["", "files", "h.tar"]), "files/h.tar");
+        assert_eq!(join_path(&["a", "..", ".."]), "..");
     }
 }

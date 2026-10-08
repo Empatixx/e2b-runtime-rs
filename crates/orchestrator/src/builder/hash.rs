@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
 pub const INDEX_VERSION: &str = "v2";
+const GO_NIL: &str = "<nil>";
 
 pub fn hash_keys<'a>(base: &str, keys: impl IntoIterator<Item = &'a str>) -> String {
     let digest = keys
@@ -21,7 +22,7 @@ pub fn user_hash(previous: &str) -> String {
 }
 
 pub fn step_hash(previous: &str, kind: &str, args: &[String], files_hash: Option<&str>) -> String {
-    hash_keys(previous, [kind, &args.join(" "), files_hash.unwrap_or_default()])
+    hash_keys(previous, [kind, &args.join(" "), files_hash.unwrap_or(GO_NIL)])
 }
 
 pub fn finalize_hash(previous: &str, configure_script: &str, cert_bundle_command: &str) -> String {
@@ -56,7 +57,7 @@ mod tests {
         assert_eq!(user_hash("p"), sha("p;DEFAULT USER;user"));
         assert_eq!(
             step_hash("p", "RUN", &["echo".to_owned(), "hi".to_owned()], None),
-            sha("p;RUN;echo hi;")
+            sha("p;RUN;echo hi;<nil>")
         );
         assert_eq!(step_hash("p", "COPY", &[], Some("f")), sha("p;COPY;;f"));
         assert_eq!(

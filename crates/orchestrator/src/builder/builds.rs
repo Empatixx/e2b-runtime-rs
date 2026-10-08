@@ -62,59 +62,47 @@ pub struct BuildCache {
 
 struct Entry {
     info: Arc<BuildInfo>,
-    finished_at: Option<Instant>,
+    expires: Instant,
 }
 
 impl BuildCache {
     pub fn register(&self, build_id: &str) -> Result<Arc<BuildInfo>, String> {
+        let now = Instant::now();
         let mut builds = self.builds.lock();
-        if builds.contains_key(build_id) {
+        if builds.get(build_id).is_some_and(|entry| entry.expires > now) {
             return Err(format!("build {build_id} already exists in cache"));
         }
         let info = Arc::new(BuildInfo {
             log: BuildLog::default(),
             cancel: CancellationToken::new(),
-            result: watch::channel(None).0,
+            result: watch::Sender::new(None),
         });
         builds.insert(
             build_id.to_owned(),
             Entry {
                 info: info.clone(),
-                finished_at: None,
+                expires: now + BUILD_EXPIRATION,
             },
         );
         Ok(info)
     }
 
     pub fn get(&self, build_id: &str) -> Result<Arc<BuildInfo>, String> {
+        let now = Instant::now();
         self.builds
             .lock()
-            .get(build_id)
-            .map(|entry| entry.info.clone())
+            .get_mut(build_id)
+            .filter(|entry| entry.expires > now)
+            .map(|entry| {
+                entry.expires = now + BUILD_EXPIRATION;
+                entry.info.clone()
+            })
             .ok_or_else(|| format!("build {build_id} not found in cache"))
-    }
-
-    pub fn running(&self) -> Vec<Arc<BuildInfo>> {
-        self.builds
-            .lock()
-            .values()
-            .filter(|entry| entry.info.result().is_none())
-            .map(|entry| entry.info.clone())
-            .collect()
     }
 
     pub fn evict_expired(&self) {
         let now = Instant::now();
-        let mut builds = self.builds.lock();
-        builds
-            .values_mut()
-            .filter(|entry| entry.finished_at.is_none() && entry.info.result().is_some())
-            .for_each(|entry| entry.finished_at = Some(now));
-        builds.retain(|_, entry| {
-            entry
-                .finished_at
-                .is_none_or(|finished| now < finished + BUILD_EXPIRATION)
-        });
+        self.builds.lock().retain(|_, entry| entry.expires > now);
     }
 
     pub async fn run_eviction(self: Arc<Self>) {
@@ -151,7 +139,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_finished_build_expires_after_ten_minutes_and_the_first_result_wins() {
+    async fn builds_expire_ten_minutes_after_the_last_lookup_and_the_first_result_wins() {
         let cache = BuildCache::default();
         let info = cache.register("b1").unwrap();
         info.finish(completed());
@@ -161,11 +149,22 @@ mod tests {
         });
         assert_eq!(info.finished().await, completed());
 
-        cache.evict_expired();
+        tokio::time::advance(BUILD_EXPIRATION - Duration::from_secs(1)).await;
+        assert!(cache.get("b1").is_ok());
         tokio::time::advance(BUILD_EXPIRATION - Duration::from_secs(1)).await;
         cache.evict_expired();
         assert!(cache.get("b1").is_ok());
-        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::advance(BUILD_EXPIRATION + Duration::from_secs(1)).await;
+        assert!(cache.get("b1").is_err());
+        cache.evict_expired();
+        assert!(cache.register("b1").is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_running_build_nobody_polls_expires_too() {
+        let cache = BuildCache::default();
+        cache.register("b1").unwrap();
+        tokio::time::advance(BUILD_EXPIRATION + Duration::from_secs(1)).await;
         cache.evict_expired();
         assert!(cache.get("b1").is_err());
     }

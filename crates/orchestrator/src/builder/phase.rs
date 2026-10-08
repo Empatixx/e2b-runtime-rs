@@ -1,6 +1,8 @@
 use futures::future::BoxFuture;
 
-use super::logs::BuildLog;
+use std::collections::BTreeMap;
+
+use super::logs::{BuildLog, ScopedLog};
 use crate::proto::{LogLevel, TemplateBuildStatusReason};
 use crate::template::metadata::TemplateMetadata;
 
@@ -8,6 +10,7 @@ pub const INTERNAL_ERROR_MESSAGE: &str =
     "An internal error occurred. Please try again or contact support with the build ID.";
 pub const CANCELLED: &str = "build was cancelled";
 pub const TIMED_OUT: &str = "build timed out";
+const GO_NIL: &str = "<nil>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhaseMeta {
@@ -17,6 +20,19 @@ pub struct PhaseMeta {
 }
 
 impl PhaseMeta {
+    pub fn log_fields(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("phase".to_owned(), self.phase.to_owned()),
+            ("step_type".to_owned(), self.step_type.clone()),
+            (
+                "step_number".to_owned(),
+                self.step_number
+                    .map_or_else(|| GO_NIL.to_owned(), |number| number.to_string()),
+            ),
+            ("step".to_owned(), self.step()),
+        ])
+    }
+
     pub fn step(&self) -> String {
         self.step_number
             .map_or_else(|| self.step_type.clone(), |number| number.to_string())
@@ -87,7 +103,7 @@ pub trait Phase: Send + Sync {
     fn layer<'a>(&'a self, source: &'a LayerResult, hash: String) -> BoxFuture<'a, Result<LayerResult, BuildError>>;
     fn build<'a>(
         &'a self,
-        log: &'a BuildLog,
+        log: ScopedLog<'a>,
         source: &'a LayerResult,
         current: LayerResult,
     ) -> BoxFuture<'a, Result<LayerResult, BuildError>>;
@@ -102,6 +118,8 @@ pub async fn run_phases(log: &BuildLog, phases: &[Box<dyn Phase>]) -> Result<Lay
 }
 
 async fn run_phase(log: &BuildLog, phase: &dyn Phase, source: &LayerResult) -> Result<LayerResult, BuildError> {
+    let fields = phase.meta().log_fields();
+    let log = log.scoped(&fields);
     let hash = phase
         .hash(source)
         .await
@@ -226,7 +244,7 @@ mod tests {
 
         fn build<'a>(
             &'a self,
-            _: &'a BuildLog,
+            _: ScopedLog<'a>,
             _: &'a LayerResult,
             current: LayerResult,
         ) -> BoxFuture<'a, Result<LayerResult, BuildError>> {
@@ -269,6 +287,16 @@ mod tests {
             .map(|entry| entry.message)
             .collect();
         assert_eq!(lines, vec!["CACHED [a] RUN a [a]", "[b] RUN b [ab]"]);
+        let fields = log.query(&Default::default())[0].fields.clone();
+        assert_eq!(
+            fields.into_iter().collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("phase".to_owned(), "steps".to_owned()),
+                ("step_type".to_owned(), "RUN".to_owned()),
+                ("step_number".to_owned(), "1".to_owned()),
+                ("step".to_owned(), "1".to_owned()),
+            ])
+        );
     }
 
     #[tokio::test]
