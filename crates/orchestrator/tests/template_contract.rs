@@ -11,7 +11,7 @@ use orchestrator::network::settings::NetworkSettings;
 use orchestrator::proto::template_config::Source;
 use orchestrator::proto::template_service_client::TemplateServiceClient;
 use orchestrator::proto::{
-    FromTemplateConfig, TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest,
+    FromTemplateConfig, TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest, TemplateStep,
 };
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
@@ -25,6 +25,8 @@ const SLOTS: std::ops::RangeInclusive<u32> = 4106..=4109;
 const BASE_IMAGE: &str = "debian:trixie-slim";
 const LOG_PAGE: u32 = 100;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const V2_VERSION: &str = "v2.1.0";
+const FILES_HASH: &str = "contract-files";
 
 struct Host {
     firecracker: PathBuf,
@@ -222,12 +224,130 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
             .iter()
             .any(|log| log.starts_with("CACHED [base] FROM TEMPLATE base ["))
     );
+
+    write_layer_files(&dir.path().join("build-cache").join(&template_id).join("files"));
+    let derived = Source::FromTemplate(FromTemplateConfig {
+        alias: "base".to_owned(),
+        build_id: base_build["template"]["build_id"].as_str().unwrap().to_owned(),
+    });
+    let (steps_state, steps_logs, _, steps_reason) =
+        build_with(&mut templates, &template_id, derived.clone(), steps(), V2_VERSION).await;
+    eprintln!("steps build logs:\n{}", steps_logs.join("\n"));
+    assert_eq!(
+        steps_state,
+        TemplateBuildState::Completed as i32,
+        "steps build failed: {steps_reason}"
+    );
+    let total = steps().len();
+    for prefix in [
+        "[base] DEFAULT USER user [".to_owned(),
+        format!("[builder 1/{total}] ENV GREETING Hello, World! ["),
+    ] {
+        assert!(
+            steps_logs.iter().any(|log| log.starts_with(&prefix)),
+            "missing {prefix:?}"
+        );
+    }
+    assert!(
+        steps_logs
+            .iter()
+            .any(|log| log == &format!("[builder 3/{total}] [stdout]: Hello, World!"))
+    );
+
+    let (rebuilt_state, rebuilt_logs, _, _) =
+        build_with(&mut templates, &template_id, derived, steps(), V2_VERSION).await;
+    assert_eq!(rebuilt_state, TemplateBuildState::Completed as i32);
+    assert!(
+        rebuilt_logs
+            .iter()
+            .any(|log| log.starts_with(&format!("CACHED [builder 1/{total}] ENV GREETING Hello, World! [")))
+    );
+}
+
+fn step(kind: &str, args: &[&str]) -> TemplateStep {
+    TemplateStep {
+        r#type: kind.to_owned(),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        ..TemplateStep::default()
+    }
+}
+
+fn steps() -> Vec<TemplateStep> {
+    vec![
+        step("ENV", &["GREETING", "Hello, World!"]),
+        step(
+            "ENV",
+            &[
+                "QUOTED",
+                r#"say "hello""#,
+                "LITERAL",
+                "`echo pwned` $(echo pwned)",
+                "BACKSLASH",
+                r"path\to\file",
+                "MY_PATH",
+                "${PATH}:/my/path",
+                "LINES",
+                "line1\nline2\nline3",
+            ],
+        ),
+        step("RUN", &["echo 'Hello, World!'"]),
+        step(
+            "RUN",
+            &[concat!(
+                r#"[[ "$GREETING" == "Hello, World!" ]] && [[ "$QUOTED" == 'say "hello"' ]]"#,
+                r#" && [[ "$LITERAL" == '`echo pwned` $(echo pwned)' ]] && [[ "$BACKSLASH" == 'path\to\file' ]]"#,
+                r#" && [[ "$MY_PATH" == *:/my/path ]] && [[ "$(printf '%s' "$LINES" | wc -l)" == 2 ]]"#,
+            )],
+        ),
+        step("WORKDIR", &["app"]),
+        step("RUN", &[r#"[[ "$(pwd)" == "/app" ]]"#]),
+        step("USER", &["root"]),
+        step("RUN", &[r#"[[ "$(whoami)" == "root" ]]"#]),
+        TemplateStep {
+            files_hash: Some(FILES_HASH.to_owned()),
+            ..step("COPY", &["hello.txt", "/app/"])
+        },
+        step("USER", &["user"]),
+        step(
+            "RUN",
+            &[
+                r#"[[ "$(whoami)" == "user" ]] && [[ "$(cat /app/hello.txt)" == "hello" ]] && [[ "$(stat -c %U /app/hello.txt)" == "root" ]]"#,
+            ],
+        ),
+    ]
+}
+
+fn write_layer_files(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let file = std::fs::File::create(dir.join(format!("{FILES_HASH}.tar"))).unwrap();
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(5);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append_data(&mut header, "hello.txt", &b"hello"[..]).unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
 }
 
 async fn build(
     templates: &mut TemplateServiceClient<tonic::transport::Channel>,
     template_id: &str,
     source: Source,
+) -> (
+    i32,
+    Vec<String>,
+    Option<orchestrator::proto::TemplateBuildMetadata>,
+    String,
+) {
+    build_with(templates, template_id, source, Vec::new(), "").await
+}
+
+async fn build_with(
+    templates: &mut TemplateServiceClient<tonic::transport::Channel>,
+    template_id: &str,
+    source: Source,
+    steps: Vec<TemplateStep>,
+    version: &str,
 ) -> (
     i32,
     Vec<String>,
@@ -245,8 +365,10 @@ async fn build(
                 disk_size_mb: 2048,
                 source: Some(source),
                 team_id: "team".to_owned(),
+                steps,
                 ..TemplateConfig::default()
             }),
+            version: Some(version.to_owned()).filter(|version| !version.is_empty()),
             ..TemplateCreateRequest::default()
         })
         .await

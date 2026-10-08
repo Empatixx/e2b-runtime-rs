@@ -44,7 +44,11 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/oom.rs           OOM kill watermark from envd /metrics
   src/builder/         template-manager role: service.rs (TemplateService RPCs, TemplateBuilder trait), builds.rs
                        (BuildCache, 10 min TTL), logs.rs (BuildLog), phase.rs (Phase trait, run_phases, BuildError),
-                       pipeline.rs (PhasePipeline), hash.rs (HashKeys), index.rs (LayerIndex)
+                       pipeline.rs (PhasePipeline), hash.rs (HashKeys), index.rs (LayerIndex), uploads.rs
+                       (LayerUploads: background layer uploads, index written after landing), layer.rs
+                       (LayerExecutor: resume or cold boot, update_envd, pause and upload), sandbox_command.rs
+                       (logStream adapter), commands.rs + commands/ (RUN, ENV, WORKDIR, USER, COPY; script.rs
+                       renders the embedded assets/template/commands/*.sh), phases/ (base, steps: steps and default user)
   src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
