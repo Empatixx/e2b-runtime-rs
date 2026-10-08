@@ -20,6 +20,7 @@ pub struct TemplateCache {
     storage: Storage,
     dir: PathBuf,
     entries: Mutex<HashMap<Uuid, Entry>>,
+    retired: Mutex<Vec<Arc<Template>>>,
 }
 
 struct Entry {
@@ -41,6 +42,7 @@ impl TemplateCache {
             storage,
             dir,
             entries: Mutex::default(),
+            retired: Mutex::default(),
         }
     }
 
@@ -82,12 +84,27 @@ impl TemplateCache {
             expires: Instant::now() + TEMPLATE_EXPIRATION,
             ttl: TEMPLATE_EXPIRATION,
         };
-        if let Some(replaced) = self.entries.lock().insert(build_id, entry)
-            && Arc::strong_count(&replaced.template) == 1
-        {
-            remove_dir(&replaced.template);
+        if let Some(replaced) = self.entries.lock().insert(build_id, entry) {
+            self.retire(replaced.template);
         }
         template
+    }
+
+    fn retire(&self, template: Arc<Template>) {
+        match Arc::strong_count(&template) {
+            1 => remove_dir(&template),
+            _ => self.retired.lock().push(template),
+        }
+    }
+
+    fn remove_released_retired(&self) {
+        let mut retired = self.retired.lock();
+        let (pinned, released): (Vec<_>, Vec<_>) = std::mem::take(&mut *retired)
+            .into_iter()
+            .partition(|template| Arc::strong_count(template) > 1);
+        *retired = pinned;
+        drop(retired);
+        released.iter().for_each(|template| remove_dir(template));
     }
 
     pub fn len(&self) -> usize {
@@ -107,6 +124,7 @@ impl TemplateCache {
     }
 
     pub fn evict_expired(&self) {
+        self.remove_released_retired();
         let now = Instant::now();
         let mut entries = self.entries.lock();
         entries
@@ -286,6 +304,41 @@ mod tests {
         assert_eq!(template.build().await.unwrap(), build);
         assert_eq!(template.metadata().await.unwrap(), metadata);
         assert_eq!(template.snapfile().await.unwrap(), dir.join("snapfile"));
+    }
+
+    #[tokio::test]
+    async fn a_replaced_pinned_template_loses_its_dir_after_the_last_release() {
+        let fixture = fixture();
+        let build_id = Uuid::new_v4();
+        let build = Build {
+            build_id,
+            memfile: Header::new(Metadata::template(build_id, 4096, 8192), Vec::new()).unwrap(),
+            rootfs: Header::new(Metadata::template(build_id, 4096, 8192), Vec::new()).unwrap(),
+        };
+        let first_dir = fixture.cache.instance_dir(build_id);
+        let second_dir = fixture.cache.instance_dir(build_id);
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        let first = fixture.cache.add_snapshot(
+            build.clone(),
+            first_dir.join("snapfile"),
+            TemplateMetadata::v1(),
+            first_dir.clone(),
+        );
+
+        fixture.cache.add_snapshot(
+            build,
+            second_dir.join("snapfile"),
+            TemplateMetadata::v1(),
+            second_dir.clone(),
+        );
+        fixture.cache.evict_expired();
+        assert!(first_dir.exists());
+
+        drop(first);
+        fixture.cache.evict_expired();
+        assert!(!first_dir.exists());
+        assert!(second_dir.exists());
     }
 
     #[tokio::test(start_paused = true)]
