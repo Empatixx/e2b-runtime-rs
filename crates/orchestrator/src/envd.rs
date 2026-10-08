@@ -27,13 +27,24 @@ pub struct EnvdInit {
 
 impl EnvdInit {
     pub fn body(&self, timestamp: DateTime<Utc>) -> Value {
-        json!({
+        let mut body = json!({
             "envVars": self.env_vars,
-            "accessToken": self.access_token.clone().unwrap_or_default(),
             "timestamp": timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true),
-            "defaultUser": self.default_user.clone().unwrap_or_default(),
-            "defaultWorkdir": self.default_workdir.clone().unwrap_or_default(),
+        });
+        [
+            ("accessToken", &self.access_token),
+            ("defaultUser", &self.default_user),
+            ("defaultWorkdir", &self.default_workdir),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .map(|value| (key, value))
         })
+        .for_each(|(key, value)| body[key] = json!(value));
+        body
     }
 }
 
@@ -187,10 +198,7 @@ mod tests {
             EnvdInit::default().body(timestamp),
             json!({
                 "envVars": {},
-                "accessToken": "",
-                "timestamp": "2026-10-09T10:00:00.000000001Z",
-                "defaultUser": "",
-                "defaultWorkdir": ""
+                "timestamp": "2026-10-09T10:00:00.000000001Z"
             })
         );
     }

@@ -45,6 +45,9 @@ impl SandboxService for SandboxServer {
     async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let handle = self.running(&request.sandbox_id, "sandbox not found")?;
+        if request.egress.is_some() {
+            return Err(Status::unimplemented("updating sandbox egress is not supported yet"));
+        }
         if let Some(end) = request.end_time {
             handle.info.lock().end = system_time(end);
             let _ = handle.commands.send(Command::Extend).await;

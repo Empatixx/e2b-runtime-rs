@@ -173,7 +173,9 @@ impl Sandbox {
             sandbox_id: self.config.id.clone(),
             template_id: self.config.template_id.clone(),
             logs_collector_address: String::new(),
-            access_token_hash: self.config.envd.access_token.as_deref().map(envd::hash_access_token),
+            access_token_hash: Some(envd::hash_access_token(
+                self.config.envd.access_token.as_deref().unwrap_or_default(),
+            )),
         }
     }
 

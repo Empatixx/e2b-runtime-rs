@@ -12,7 +12,7 @@ const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_SANDBOXES: i64 = 200;
 const DEFAULT_MAX_STARTING: usize = 3;
 const DEFAULT_DRAIN_SLEEP_MS: u64 = 15_000;
-const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 90.0;
+const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {

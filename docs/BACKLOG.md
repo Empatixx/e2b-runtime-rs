@@ -151,7 +151,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Host metrics sampling (`statvfs` per mount, `/proc`) runs on a runtime worker; move it to `spawn_blocking` | API |
 | `return_slot` after `NetworkPool::close`, and sandboxes still `Starting` at forced shutdown, are only cleaned by the next startup sweep | API |
 | `Flush` is answered at once while earlier writes may still be in flight (overlay is never fsynced anyway) | ublk |
-| Admission counts running sandboxes only; check whether upstream `Count()` includes reservations | API |
 
 ## Orchestrator: prefetch (M12)
 
