@@ -36,6 +36,10 @@ impl Watermark {
         self.seq = kills.iter().map(|kill| kill.seq).max().unwrap_or(self.seq);
     }
 
+    pub fn seed_done(&self) -> bool {
+        self.started || self.seed_failed
+    }
+
     pub fn seed_failed(&mut self) {
         self.seed_failed = true;
     }

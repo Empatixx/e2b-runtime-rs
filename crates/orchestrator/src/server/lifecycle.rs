@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
 use super::node::{Node, event_sandbox, execution, stats_identity};
-use super::oom_monitor::OomMonitor;
+use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
@@ -37,6 +37,7 @@ pub struct SandboxInfo {
     pub scheduling: SchedulingMetadata,
     pub template: Arc<Template>,
     pub started_at: SystemTime,
+    pub oom_watermark: SharedWatermark,
 }
 
 pub enum Command {
@@ -116,6 +117,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         sandbox.envd_address(),
         handle.info.lock().config.envd_access_token.clone(),
         sandbox.id().to_owned(),
+        handle.info.lock().oom_watermark.clone(),
     );
     let running = Running {
         host_stats,

@@ -13,6 +13,7 @@ pub use self::checkpoint::CheckpointRequest;
 use super::admission::Admission;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
+use super::oom_monitor::SharedWatermark;
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::scheduling::from_headers;
@@ -88,6 +89,7 @@ struct StartRequest {
     config: SandboxConfig,
     lifetime: Lifetime,
     lifecycle: Lifecycle,
+    oom_watermark: SharedWatermark,
 }
 
 enum StartFailure {
@@ -300,6 +302,7 @@ impl Node {
                 config,
                 lifetime,
                 lifecycle: lifecycle.clone(),
+                oom_watermark: SharedWatermark::default(),
             })
             .await
             .map_err(|failure| failure.create_status(&id))
@@ -388,6 +391,7 @@ impl Node {
             config,
             lifetime,
             lifecycle,
+            oom_watermark,
         } = request;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
         let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))
@@ -449,6 +453,7 @@ impl Node {
                 template: template.clone(),
                 scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
                 started_at: SystemTime::now(),
+                oom_watermark,
             },
             self.clone(),
         ))

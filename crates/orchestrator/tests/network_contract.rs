@@ -204,7 +204,10 @@ async fn slot_has_upstream_nat_redirects_and_nftables_firewall() {
     assert!(has_tcp_firewall, "missing the TCP firewall REDIRECT");
     assert!(forward, "missing FORWARD from the veth to the gateway");
     assert!(ruleset.contains("filtered_always_denylist"), "{ruleset}");
-    assert!(ruleset.contains("priority -150"), "{ruleset}");
+    assert!(
+        ruleset.contains("type filter hook prerouting priority mangle"),
+        "{ruleset}"
+    );
     assert!(ruleset.contains("10.0.0.0/8"), "{ruleset}");
     assert!(restricted.contains("0.0.0.0-255.255.255.255"), "{restricted}");
     assert!(
