@@ -6,7 +6,7 @@ use orchestrator::builder::logs::BuildLog;
 use orchestrator::builder::oci::pull::Puller;
 use orchestrator::builder::phase::PhaseMeta;
 use orchestrator::builder::rootfs::{RootfsRequest, create_ext4_filesystem};
-use orchestrator::builder::template_files::{InjectedFiles, provision_script};
+use orchestrator::builder::template_files::{InjectedSources, provision_script};
 use orchestrator::go_exec::GoCommand;
 
 const DISK_SIZE_MB: i64 = 512;
@@ -36,6 +36,10 @@ async fn an_alpine_image_becomes_an_ext4_with_the_injected_files() {
         step_number: None,
     };
     let puller = Puller::new(&BuilderConfig::from_vars(&Default::default())).unwrap();
+    let envd_file = dir.path().join("envd-binary");
+    let busybox_file = dir.path().join("busybox-binary");
+    std::fs::write(&envd_file, "#!/bin/sh\necho envd\n").unwrap();
+    std::fs::write(&busybox_file, "busybox").unwrap();
 
     let config = create_ext4_filesystem(
         &log.scoped(&fields),
@@ -45,9 +49,9 @@ async fn an_alpine_image_becomes_an_ext4_with_the_injected_files() {
             from_image: "alpine:3.20",
             registry: None,
             disk_size_mb: DISK_SIZE_MB,
-            injected: InjectedFiles {
-                envd: b"#!/bin/sh\necho envd\n".to_vec(),
-                busybox: b"busybox".to_vec(),
+            injected: InjectedSources {
+                envd: envd_file,
+                busybox: busybox_file,
                 provision_script: provision_script("gcp").unwrap(),
                 memory_mb: 1024,
                 envd_memory_protection: false,
@@ -92,9 +96,17 @@ async fn an_alpine_image_becomes_an_ext4_with_the_injected_files() {
         "{lines:?}"
     );
     assert!(lines.contains(&"Layers extracted".to_owned()));
-    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+    let mut leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
-    assert_eq!(leftovers, vec![std::ffi::OsString::from("rootfs.filesystem.build")]);
+    leftovers.sort();
+    assert_eq!(
+        leftovers,
+        vec![
+            std::ffi::OsString::from("busybox-binary"),
+            std::ffi::OsString::from("envd-binary"),
+            std::ffi::OsString::from("rootfs.filesystem.build")
+        ]
+    );
 }

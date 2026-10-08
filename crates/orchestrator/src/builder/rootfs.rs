@@ -1,15 +1,20 @@
 pub mod teardown;
 pub mod unpack;
 
+use std::io::Write;
 use std::path::Path;
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 use super::ext4::{BLOCK_SIZE, Ext4};
 use super::logs::ScopedLog;
 use super::oci::export::{ImageLayer, LayerSource, remote_layers};
 use super::oci::pull::{ImageConfig, Puller};
+use super::oci::registry::digest_of;
 use super::phase::{BuildError, PhaseMeta};
-use super::template_files::InjectedFiles;
 use super::template_files::layers::{files_layer, symlink_layer};
+use super::template_files::{InjectedFiles, InjectedSources};
 use crate::go_humanize::bytes;
 use crate::proto::{FromImageRegistry, LogLevel};
 use teardown::{Step, Teardown};
@@ -17,15 +22,13 @@ use unpack::{UnpackError, temp_dir, unpack_rootfs};
 
 pub const MB: i64 = 1 << 20;
 pub const BASE_ROOTFS_SIZE_LIMIT_MB: i64 = 25_000;
-const FILES_LAYER_DIGEST: &str = "files";
-const SYMLINK_LAYER_DIGEST: &str = "symlinks";
 
 pub struct RootfsRequest<'a> {
     pub meta: &'a PhaseMeta,
     pub from_image: &'a str,
     pub registry: Option<&'a FromImageRegistry>,
     pub disk_size_mb: i64,
-    pub injected: InjectedFiles,
+    pub injected: InjectedSources,
     pub path: &'a Path,
 }
 
@@ -45,8 +48,12 @@ pub async fn create_ext4_filesystem(
     );
     log.push(LogLevel::Debug, "Setting up system files");
     let mut layers = remote_layers(&image);
-    layers
-        .extend(injected_layers(&request.injected).map_err(|e| internal(format!("error populating filesystem: {e}")))?);
+    let injected = request
+        .injected
+        .read()
+        .and_then(|files| injected_layers(&files))
+        .map_err(|e| internal(format!("error populating filesystem: {e}")))?;
+    layers.extend(injected);
     log.push(LogLevel::Info, "Creating file system and pulling Docker image");
     let ext4 = Ext4::new(request.path);
     let ext4_size = to_ext4(log, &ext4, layers, BASE_ROOTFS_SIZE_LIMIT_MB * MB)
@@ -82,16 +89,24 @@ pub async fn create_ext4_filesystem(
 }
 
 fn injected_layers(injected: &InjectedFiles) -> Result<Vec<ImageLayer>, String> {
-    let files = files_layer(&injected.files()?)?;
-    let links = symlink_layer()?;
-    Ok([(FILES_LAYER_DIGEST, files), (SYMLINK_LAYER_DIGEST, links)]
+    [files_layer(&injected.files()?)?, symlink_layer()?]
         .into_iter()
-        .map(|(digest, tar)| ImageLayer {
-            digest: digest.to_owned(),
-            size: tar.len() as u64,
-            source: LayerSource::Bytes(tar),
+        .map(|tar| {
+            gzipped(&tar).map(|layer| ImageLayer {
+                digest: digest_of(&layer),
+                size: layer.len() as u64,
+                source: LayerSource::Bytes(layer),
+            })
         })
-        .collect())
+        .collect()
+}
+
+fn gzipped(tar: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(tar)
+        .and_then(|()| encoder.finish())
+        .map_err(|e| format!("error appending layers: {e}"))
 }
 
 async fn to_ext4(log: &ScopedLog<'_>, ext4: &Ext4, layers: Vec<ImageLayer>, max_size: i64) -> Result<i64, UnpackError> {

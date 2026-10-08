@@ -11,10 +11,19 @@ struct IndexEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IndexTemplate {
+    #[serde(default)]
     build_id: String,
 }
 
 const MINIMAL_CACHED_VERSION: u64 = 2;
+
+const NOT_EXIST: &str = "object does not exist";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheMiss {
+    NoLayer(String),
+    NoMetadata(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataError {
@@ -50,21 +59,20 @@ impl LayerIndex {
             },
         };
         let json = serde_json::to_vec(&entry).map_err(|e| format!("error marshalling layer metadata: {e}"))?;
-        self.index_storage.put(&self.object(hash), Bytes::from(json)).await
+        self.index_storage
+            .put(&self.object(hash), Bytes::from(json))
+            .await
+            .map_err(|e| format!("error writing layer metadata to object: {e}"))
     }
 
-    pub async fn cached(&self, hash: &str) -> Option<CachedLayer> {
-        let build_id = self.layer_build_id(hash).await?;
-        let bytes = self
-            .template_storage
-            .find(&format!("{build_id}/metadata.json"))
+    pub async fn cached(&self, hash: &str) -> Result<CachedLayer, CacheMiss> {
+        let build_id = self.layer_build_id(hash).await.map_err(CacheMiss::NoLayer)?;
+        self.metadata_of(&build_id)
             .await
-            .ok()
-            .flatten()?;
-        TemplateMetadata::from_json(&bytes)
-            .ok()
-            .filter(|metadata| metadata.version >= MINIMAL_CACHED_VERSION)
             .map(|metadata| CachedLayer { build_id, metadata })
+            .map_err(|e| match e {
+                MetadataError::Missing(e) | MetadataError::Failed(e) => CacheMiss::NoMetadata(e),
+            })
     }
 
     pub async fn metadata_of(&self, build_id: &str) -> Result<TemplateMetadata, MetadataError> {
@@ -73,12 +81,21 @@ impl LayerIndex {
             .template_storage
             .find(&path)
             .await
-            .map_err(|e| MetadataError::Failed(format!("error reading template metadata: {e}")))?
+            .map_err(|e| {
+                MetadataError::Failed(format!(
+                    "error reading template metadata: error reading template metadata from object: {e}"
+                ))
+            })?
             .ok_or_else(|| {
-                MetadataError::Missing(format!("error reading template metadata: object {path} does not exist"))
+                MetadataError::Missing(format!(
+                    "error reading template metadata: error reading template metadata from object: {NOT_EXIST}"
+                ))
             })?;
-        let metadata = TemplateMetadata::from_json(&bytes)
-            .map_err(|e| MetadataError::Failed(format!("error reading template metadata: {e}")))?;
+        let metadata = TemplateMetadata::from_json(&bytes).map_err(|e| {
+            MetadataError::Failed(format!(
+                "error reading template metadata: error unmarshaling template version: {e}"
+            ))
+        })?;
         match metadata.version >= MINIMAL_CACHED_VERSION {
             true => Ok(metadata),
             false => Err(MetadataError::Failed(format!(
@@ -89,12 +106,19 @@ impl LayerIndex {
         }
     }
 
-    async fn layer_build_id(&self, hash: &str) -> Option<String> {
-        let bytes = self.index_storage.find(&self.object(hash)).await.ok().flatten()?;
-        serde_json::from_slice::<IndexEntry>(&bytes)
-            .ok()
-            .map(|entry| entry.template.build_id)
-            .filter(|build_id| !build_id.is_empty())
+    pub async fn layer_build_id(&self, hash: &str) -> Result<String, String> {
+        let bytes = self
+            .index_storage
+            .find(&self.object(hash))
+            .await
+            .map_err(|e| format!("error reading layer metadata from object: {e}"))?
+            .ok_or_else(|| format!("error reading layer metadata from object: {NOT_EXIST}"))?;
+        let entry = serde_json::from_slice::<IndexEntry>(&bytes)
+            .map_err(|e| format!("error unmarshaling layer metadata: {e}"))?;
+        match entry.template.build_id.is_empty() {
+            true => Err("layer metadata is missing required fields: {{}}".to_owned()),
+            false => Ok(entry.template.build_id),
+        }
     }
 
     fn object(&self, hash: &str) -> String {
@@ -147,7 +171,13 @@ mod tests {
         };
 
         index.save("h1", &build_id.to_string()).await.unwrap();
-        assert_eq!(index.cached("h1").await, None);
+        assert_eq!(
+            index.cached("h1").await,
+            Err(CacheMiss::NoMetadata(
+                "error reading template metadata: error reading template metadata from object: object does not exist"
+                    .to_owned()
+            ))
+        );
 
         storage
             .put(
@@ -156,7 +186,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(index.cached("h1").await, None);
+        assert_eq!(
+            index.cached("h1").await,
+            Err(CacheMiss::NoMetadata(
+                "outdated template metadata: expected 2, got 1".to_owned()
+            ))
+        );
 
         storage
             .put(&BuildPaths::new(build_id).metadata(), Bytes::from(metadata.to_json()))
@@ -164,7 +199,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.cached("h1").await,
-            Some(CachedLayer {
+            Ok(CachedLayer {
                 build_id: build_id.to_string(),
                 metadata
             })
@@ -173,12 +208,30 @@ mod tests {
             std::fs::read_to_string(dir.path().join("scope/index/h1")).unwrap(),
             format!(r#"{{"template":{{"build_id":"{build_id}"}}}}"#)
         );
-        assert_eq!(index.cached("missing").await, None);
+        assert_eq!(
+            index.cached("missing").await,
+            Err(CacheMiss::NoLayer(
+                "error reading layer metadata from object: object does not exist".to_owned()
+            ))
+        );
         storage
             .put("scope/index/broken", Bytes::from_static(b"{"))
             .await
             .unwrap();
-        assert_eq!(index.cached("broken").await, None);
+        assert!(matches!(
+            index.cached("broken").await,
+            Err(CacheMiss::NoLayer(e)) if e.starts_with("error unmarshaling layer metadata: ")
+        ));
+        storage
+            .put("scope/index/empty", Bytes::from_static(br#"{"template":{}}"#))
+            .await
+            .unwrap();
+        assert_eq!(
+            index.cached("empty").await,
+            Err(CacheMiss::NoLayer(
+                "layer metadata is missing required fields: {{}}".to_owned()
+            ))
+        );
     }
 
     #[test]

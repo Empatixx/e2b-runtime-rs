@@ -3,6 +3,9 @@ pub mod layers;
 pub mod render;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use crate::go_os::path_error;
 
 use render::{Value, Values, render};
 
@@ -97,6 +100,36 @@ pub struct InjectedFiles {
     pub provision_script: String,
     pub memory_mb: i64,
     pub envd_memory_protection: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedSources {
+    pub envd: PathBuf,
+    pub busybox: PathBuf,
+    pub provision_script: String,
+    pub memory_mb: i64,
+    pub envd_memory_protection: bool,
+}
+
+impl InjectedSources {
+    pub fn read(&self) -> Result<InjectedFiles, String> {
+        let envd = std::fs::read(&self.envd)
+            .map_err(|e| format!("error reading envd file: {}", path_error("open", &self.envd, &e)))?;
+        let busybox = std::fs::read(&self.busybox).map_err(|e| {
+            format!(
+                "error reading busybox file {}: {}",
+                self.busybox.display(),
+                path_error("open", &self.busybox, &e)
+            )
+        })?;
+        Ok(InjectedFiles {
+            envd,
+            busybox,
+            provision_script: self.provision_script.clone(),
+            memory_mb: self.memory_mb,
+            envd_memory_protection: self.envd_memory_protection,
+        })
+    }
 }
 
 impl InjectedFiles {

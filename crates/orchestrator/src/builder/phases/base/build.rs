@@ -8,11 +8,11 @@ use uuid::Uuid;
 use super::{BasePhase, BaseSource};
 use crate::builder::ext4::{BLOCK_SIZE, Ext4};
 use crate::builder::logs::ScopedLog;
-use crate::builder::oci::pull::parse_envs;
+use crate::builder::oci::pull::{ImageConfig, parse_envs};
 use crate::builder::phase::{BuildError, Phase};
 use crate::builder::provision::wait_for_provisioning;
 use crate::builder::rootfs::{MB, RootfsRequest, create_ext4_filesystem};
-use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedFiles, PROVISION_RESULT_PATH, provision_script};
+use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISION_RESULT_PATH, provision_script};
 use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
 use crate::proto::LogLevel;
@@ -90,15 +90,13 @@ impl BaseBuild<'_> {
             .map_err(|e| BuildError::Internal(format!("error creating template build directory: {e}")))
     }
 
-    async fn construct_rootfs(&self, rootfs: &Path) -> Result<crate::builder::oci::pull::ImageConfig, BuildError> {
+    async fn construct_rootfs(&self, rootfs: &Path) -> Result<ImageConfig, BuildError> {
         let BaseSource::Image { image, registry } = &self.phase.request.source else {
             return Err(BuildError::Internal("build has no base image or template".to_owned()));
         };
         let script = provision_script(&self.phase.env.config.provider)
             .map_err(|e| BuildError::Internal(format!("error getting provision script: {e}")))?;
-        let injected = self
-            .injected_files(script)
-            .map_err(|e| BuildError::Internal(format!("error populating filesystem: {e}")))?;
+        let injected = self.injected_sources(script);
         create_ext4_filesystem(
             self.log,
             &self.phase.env.puller,
@@ -112,20 +110,18 @@ impl BaseBuild<'_> {
             },
         )
         .await
+        .map_err(|e| internal_context("error creating ext4 filesystem", e))
     }
 
-    fn injected_files(&self, provision_script: String) -> Result<InjectedFiles, String> {
+    fn injected_sources(&self, provision_script: String) -> InjectedSources {
         let config = &self.phase.env.config;
-        let envd = std::fs::read(&config.envd).map_err(|e| format!("error reading envd file: {e}"))?;
-        let busybox = std::fs::read(&config.busybox)
-            .map_err(|e| format!("error reading busybox file {}: {e}", config.busybox.display()))?;
-        Ok(InjectedFiles {
-            envd,
-            busybox,
+        InjectedSources {
+            envd: config.envd.clone(),
+            busybox: config.busybox.clone(),
             provision_script,
             memory_mb: self.phase.request.memory_mb,
             envd_memory_protection: false,
-        })
+        }
     }
 
     async fn provision(&self, rootfs: &Path) -> Result<(), BuildError> {

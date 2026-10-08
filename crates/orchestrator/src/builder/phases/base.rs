@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::BuildEnv;
 use crate::builder::hash::{BaseKey, template_source};
-use crate::builder::index::{LayerIndex, MetadataError};
+use crate::builder::index::{CacheMiss, LayerIndex, MetadataError};
 use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta};
 use crate::builder::template_files::hash::provision_version;
@@ -113,13 +113,17 @@ impl BaseLayers<'_> {
             return fresh;
         }
         match self.index.cached(&hash).await {
-            Some(layer) => LayerResult {
+            Ok(layer) => LayerResult {
                 metadata: layer.metadata,
                 cached: true,
                 hash,
             },
-            None => {
-                tracing::info!(hash = %hash, "base layer not found in cache, building new base layer");
+            Err(CacheMiss::NoLayer(e)) => {
+                tracing::info!(error = %e, hash = %hash, "base layer not found in cache, building new base layer");
+                fresh
+            }
+            Err(CacheMiss::NoMetadata(e)) => {
+                tracing::info!(error = %e, hash = %hash, "base layer metadata not found in cache, building new base layer");
                 fresh
             }
         }
