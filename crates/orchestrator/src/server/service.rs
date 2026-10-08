@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use super::lifecycle::{Command, SandboxHandle};
-use super::node::{Lifetime, Node};
+use super::node::{Lifetime, Node, egress_rules};
 use crate::proto::sandbox_service_server::SandboxService;
 use crate::proto::{
     RunningSandbox, SandboxCheckpointRequest, SandboxCheckpointResponse, SandboxCreateRequest, SandboxCreateResponse,
@@ -45,11 +45,32 @@ impl SandboxService for SandboxServer {
     async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let handle = self.running(&request.sandbox_id, "sandbox not found")?;
-        if request.egress.is_some() {
-            return Err(Status::unimplemented("updating sandbox egress is not supported yet"));
-        }
+        let rules = request
+            .egress
+            .as_ref()
+            .map(|egress| egress_rules(Some(egress)).map(Option::unwrap_or_default))
+            .transpose()?;
+        let previous_end = handle.info.lock().end;
         if let Some(end) = request.end_time {
             handle.info.lock().end = system_time(end);
+        }
+        if let (Some(rules), Some(egress)) = (rules, request.egress) {
+            let slot = handle.info.lock().slot;
+            if let Err(e) = self.node.network.configure(slot, &rules).await {
+                handle.info.lock().end = previous_end;
+                return Err(Status::internal(format!(
+                    "failed to update sandbox: failed to update sandbox network: {e}"
+                )));
+            }
+            handle
+                .info
+                .lock()
+                .config
+                .network
+                .get_or_insert_with(Default::default)
+                .egress = Some(egress);
+        }
+        if request.end_time.is_some() {
             let _ = handle.commands.send(Command::Extend).await;
         }
         Ok(Response::new(()))

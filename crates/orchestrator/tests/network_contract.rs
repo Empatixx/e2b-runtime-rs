@@ -100,7 +100,7 @@ fn gateway() -> String {
 }
 
 #[tokio::test]
-async fn slot_masquerades_egress_and_firewalls_the_guest() {
+async fn slot_has_upstream_nat_redirects_and_nftables_firewall() {
     if !root() {
         eprintln!("skipping: needs root");
         return;
@@ -122,51 +122,96 @@ async fn slot_masquerades_egress_and_firewalls_the_guest() {
         "-j",
         "MASQUERADE",
     ];
-    let spoofing = [
-        "netns",
-        "exec",
-        "ns-4008",
-        "iptables",
+    let hyperloop = [
         "-w",
+        "-t",
+        "nat",
         "-C",
-        "FORWARD",
+        "PREROUTING",
         "-i",
-        "tap0",
-        "!",
-        "-s",
-        "169.254.0.21",
-        "-j",
-        "DROP",
-    ];
-    let metadata = [
-        "netns",
-        "exec",
-        "ns-4008",
-        "iptables",
-        "-w",
-        "-C",
-        "FORWARD",
-        "-i",
-        "tap0",
+        "veth-4008",
+        "-p",
+        "tcp",
         "-d",
-        "169.254.0.0/16",
+        "192.0.2.1",
+        "--dport",
+        "80",
         "-j",
-        "DROP",
+        "REDIRECT",
+        "--to-port",
+        "5010",
+    ];
+    let tcp_firewall = [
+        "-w",
+        "-t",
+        "nat",
+        "-C",
+        "PREROUTING",
+        "-i",
+        "veth-4008",
+        "-p",
+        "tcp",
+        "-j",
+        "REDIRECT",
+        "--to-port",
+        "5018",
     ];
     let has_masquerade = succeeds("iptables", &masquerade);
-    let blocks_spoofing = succeeds("ip", &spoofing);
-    let blocks_metadata = succeeds("ip", &metadata);
-    let broad_forward = succeeds("iptables", &["-w", "-C", "FORWARD", "-i", "veth-4008", "-j", "ACCEPT"]);
+    let has_hyperloop = succeeds("iptables", &hyperloop);
+    let has_tcp_firewall = succeeds("iptables", &tcp_firewall);
+    let forward = succeeds(
+        "iptables",
+        &["-w", "-C", "FORWARD", "-i", "veth-4008", "-o", &gateway, "-j", "ACCEPT"],
+    );
+    let ruleset = output(
+        "ip",
+        &[
+            "netns",
+            "exec",
+            "ns-4008",
+            "nft",
+            "list",
+            "table",
+            "inet",
+            "slot-firewall",
+        ],
+    );
+    slot.apply_egress(&orchestrator::network::firewall::EgressRules {
+        byop: false,
+        allowed: vec!["8.8.8.8/32".to_owned()],
+        denied: vec!["0.0.0.0/0".to_owned()],
+    })
+    .await
+    .unwrap();
+    let restricted = output(
+        "ip",
+        &[
+            "netns",
+            "exec",
+            "ns-4008",
+            "nft",
+            "list",
+            "set",
+            "inet",
+            "slot-firewall",
+            "filtered_denylist",
+        ],
+    );
     slot.destroy().await.unwrap();
 
     assert!(has_masquerade, "missing MASQUERADE for the slot host IP");
-    assert!(blocks_spoofing, "guest source spoofing is not dropped");
-    assert!(blocks_metadata, "guest can reach link-local (metadata) addresses");
-    assert!(!broad_forward, "FORWARD accepts everything from the guest veth");
+    assert!(has_hyperloop, "missing the hyperloop REDIRECT");
+    assert!(has_tcp_firewall, "missing the TCP firewall REDIRECT");
+    assert!(forward, "missing FORWARD from the veth to the gateway");
+    assert!(ruleset.contains("filtered_always_denylist"), "{ruleset}");
+    assert!(ruleset.contains("priority -150"), "{ruleset}");
+    assert!(ruleset.contains("10.0.0.0/8"), "{ruleset}");
+    assert!(restricted.contains("0.0.0.0-255.255.255.255"), "{restricted}");
     assert!(
         !succeeds("iptables", &masquerade),
         "MASQUERADE left behind after destroy"
     );
+    assert!(!succeeds("iptables", &hyperloop), "REDIRECT left behind after destroy");
     assert_eq!(output("ip", &["route", "show", "10.11.15.168"]).trim(), "");
 }
 

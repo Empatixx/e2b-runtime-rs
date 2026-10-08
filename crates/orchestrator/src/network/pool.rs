@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use super::firewall::EgressRules;
 use super::slot::Slot;
 use super::storage::SlotStorage;
 
@@ -19,6 +20,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(50);
 pub trait SlotFactory: Send + Sync + 'static {
     fn create(&self, index: u32) -> impl Future<Output = Result<Slot, String>> + Send;
     fn destroy(&self, slot: Slot) -> impl Future<Output = Result<(), String>> + Send;
+    fn configure(&self, slot: Slot, rules: &EgressRules) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 pub struct SlotLease<F: SlotFactory> {
@@ -50,6 +52,7 @@ pub struct NetworkPool<F> {
     new_slots: tokio::sync::Mutex<mpsc::Receiver<Slot>>,
     new_sender: mpsc::Sender<Slot>,
     reused: Mutex<VecDeque<Slot>>,
+    custom_rules: Mutex<HashSet<u32>>,
     tasks: TaskTracker,
     done: CancellationToken,
 }
@@ -63,6 +66,7 @@ impl<F: SlotFactory> NetworkPool<F> {
             new_slots: tokio::sync::Mutex::new(new_slots),
             new_sender,
             reused: Mutex::default(),
+            custom_rules: Mutex::default(),
             tasks: TaskTracker::new(),
             done: CancellationToken::new(),
         })
@@ -82,11 +86,21 @@ impl<F: SlotFactory> NetworkPool<F> {
         }
     }
 
-    pub async fn lease(self: &Arc<Self>) -> Result<SlotLease<F>, String> {
-        self.get().await.map(|slot| SlotLease {
+    pub async fn lease(self: &Arc<Self>, egress: Option<&EgressRules>) -> Result<SlotLease<F>, String> {
+        let slot = self.get().await?;
+        let lease = SlotLease {
             pool: self.clone(),
             slot: Some(slot),
-        })
+        };
+        if let Some(rules) = egress {
+            self.configure(slot, rules).await?;
+        }
+        Ok(lease)
+    }
+
+    pub async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
+        self.custom_rules.lock().insert(slot.index);
+        self.factory.configure(slot, rules).await
     }
 
     pub fn return_slot(self: &Arc<Self>, slot: Slot) {
@@ -144,6 +158,13 @@ impl<F: SlotFactory> NetworkPool<F> {
     }
 
     async fn recycle(&self, slot: Slot) {
+        if self.custom_rules.lock().remove(&slot.index)
+            && let Err(e) = self.factory.configure(slot, &EgressRules::default()).await
+        {
+            tracing::warn!(slot = slot.index, error = %e, "could not reset the slot firewall");
+            self.cleanup(slot).await;
+            return;
+        }
         let rejected = {
             let mut reused = self.reused.lock();
             match reused.len() < REUSED_SLOTS_POOL_SIZE {
@@ -178,6 +199,7 @@ mod tests {
         created: Mutex<Vec<u32>>,
         destroyed: Mutex<BTreeSet<u32>>,
         failures: Mutex<u32>,
+        configured: Mutex<Vec<(u32, EgressRules)>>,
     }
 
     impl SlotFactory for Arc<FakeSlots> {
@@ -193,6 +215,11 @@ mod tests {
 
         async fn destroy(&self, slot: Slot) -> Result<(), String> {
             self.destroyed.lock().insert(slot.index);
+            Ok(())
+        }
+
+        async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
+            self.configured.lock().push((slot.index, rules.clone()));
             Ok(())
         }
     }
@@ -279,14 +306,35 @@ mod tests {
     async fn a_dropped_lease_returns_its_slot_and_a_kept_one_does_not() {
         let (pool, _) = pool(1..=100);
         pool.start();
-        let dropped = pool.lease().await.unwrap();
+        let dropped = pool.lease(None).await.unwrap();
         let first = dropped.slot().unwrap();
         drop(dropped);
-        let kept = pool.lease().await.unwrap().keep().unwrap();
+        let kept = pool.lease(None).await.unwrap().keep().unwrap();
 
         tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
 
         assert_eq!(pool.get().await.unwrap(), first);
         assert_ne!(kept, first);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn custom_egress_is_applied_on_lease_and_reset_before_reuse() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+        let rules = EgressRules {
+            byop: false,
+            allowed: vec!["8.8.8.8/32".to_owned()],
+            denied: vec!["0.0.0.0/0".to_owned()],
+        };
+
+        let slot = pool.lease(Some(&rules)).await.unwrap().keep().unwrap();
+        pool.return_slot(slot);
+        tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
+
+        assert_eq!(
+            slots.configured.lock().clone(),
+            vec![(slot.index, rules), (slot.index, EgressRules::default())]
+        );
+        assert_eq!(pool.get().await.unwrap(), slot);
     }
 }

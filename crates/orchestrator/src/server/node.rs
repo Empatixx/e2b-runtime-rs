@@ -19,9 +19,10 @@ use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::{EnvdInit, VolumeMount};
 use crate::hyperloop::logs::SourceSandbox;
+use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
-use crate::proto::SandboxConfig;
+use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
@@ -286,7 +287,8 @@ impl Node {
     ) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
-        let lease = self.network.lease();
+        let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))?;
+        let lease = self.network.lease(egress.as_ref());
         tokio::pin!(files, lease);
         let (files, lease) = tokio::select! {
             files = &mut files => match files {
@@ -336,6 +338,7 @@ impl Node {
                 metadata,
                 lifecycle,
                 host_ip: slot.host_ip(),
+                slot,
                 started_at: SystemTime::now(),
             },
             self.clone(),
@@ -388,6 +391,22 @@ impl Node {
             .resume(snapfile)
             .await
     }
+}
+
+pub fn egress_rules(egress: Option<&SandboxNetworkEgressConfig>) -> Result<Option<EgressRules>, Status> {
+    let Some(egress) = egress else {
+        return Ok(None);
+    };
+    if !egress.egress_proxy_address.is_empty() {
+        return Err(Status::permission_denied("egress proxy is not enabled for this team"));
+    }
+    let unrestricted =
+        egress.allowed_cidrs.is_empty() && egress.denied_cidrs.is_empty() && egress.allowed_domains.is_empty();
+    Ok((!unrestricted).then(|| EgressRules {
+        byop: false,
+        allowed: egress.allowed_cidrs.clone(),
+        denied: egress.denied_cidrs.clone(),
+    }))
 }
 
 fn volume_mounts(config: &SandboxConfig, orchestrator_ip: &str) -> Result<Vec<VolumeMount>, String> {

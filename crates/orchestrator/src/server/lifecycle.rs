@@ -27,6 +27,7 @@ pub struct SandboxInfo {
     pub metadata: Option<TemplateMetadata>,
     pub lifecycle: Lifecycle,
     pub host_ip: Ipv4Addr,
+    pub slot: Slot,
     pub started_at: SystemTime,
 }
 

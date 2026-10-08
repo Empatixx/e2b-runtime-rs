@@ -4,11 +4,15 @@ use std::net::Ipv4Addr;
 use futures::StreamExt;
 
 #[cfg(target_os = "linux")]
+use super::firewall::EgressRules;
+#[cfg(target_os = "linux")]
 use super::pool::SlotFactory;
+#[cfg(target_os = "linux")]
+use super::settings::NetworkSettings;
 #[cfg(target_os = "linux")]
 use super::storage::SlotStorage;
 #[cfg(target_os = "linux")]
-use crate::system::{all_ok, output, run};
+use crate::system::{all_ok, output, run, run_with_input};
 
 pub const MAX_SLOT: u32 = 16383;
 pub const TAP_NAME: &str = "tap0";
@@ -66,7 +70,36 @@ struct Rule {
 }
 
 #[cfg(target_os = "linux")]
-const BLOCKED_GUEST_DESTINATIONS: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"];
+impl Rule {
+    fn new(table: &'static str, chain: &'static str, spec: &[&str]) -> Self {
+        Self {
+            table,
+            chain,
+            spec: spec.iter().map(|part| (*part).to_owned()).collect(),
+        }
+    }
+
+    fn redirect(veth: &str, destination: Option<&str>, port: Option<u16>, to: u16) -> Self {
+        let destination = destination.map(|destination| ["-d".to_owned(), destination.to_owned()]);
+        let port = port.map(|port| ["--dport".to_owned(), port.to_string()]);
+        Self {
+            table: "nat",
+            chain: "PREROUTING",
+            spec: ["-i", veth, "-p", "tcp"]
+                .map(str::to_owned)
+                .into_iter()
+                .chain(destination.into_iter().flatten())
+                .chain(port.into_iter().flatten())
+                .chain([
+                    "-j".to_owned(),
+                    "REDIRECT".to_owned(),
+                    "--to-port".to_owned(),
+                    to.to_string(),
+                ])
+                .collect(),
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 impl Slot {
@@ -145,6 +178,7 @@ impl Slot {
     }
 
     async fn guest_nat_and_firewall(&self) -> Result<(), String> {
+        let settings = NetworkSettings::current();
         let host_ip = self.host_ip().to_string();
         let guest_ip = GUEST_IP.to_string();
         let host_veth_ip = self.host_veth_ip().to_string();
@@ -181,26 +215,39 @@ impl Slot {
             &guest_ip,
         ])
         .await?;
-        self.iptables_inside(&[
-            "-A",
-            "FORWARD",
-            "-i",
-            TAP_NAME,
-            "-m",
-            "conntrack",
-            "--ctstate",
-            "ESTABLISHED,RELATED",
-            "-j",
-            "ACCEPT",
-        ])
-        .await?;
-        self.iptables_inside(&["-A", "FORWARD", "-i", TAP_NAME, "!", "-s", &guest_ip, "-j", "DROP"])
+        if settings.egress_dscp > 0 {
+            let dscp = settings.egress_dscp.to_string();
+            self.iptables_inside(&[
+                "-t",
+                "mangle",
+                "-A",
+                "POSTROUTING",
+                "-o",
+                "eth0",
+                "-j",
+                "DSCP",
+                "--set-dscp",
+                &dscp,
+            ])
             .await?;
-        for destination in BLOCKED_GUEST_DESTINATIONS {
-            self.iptables_inside(&["-A", "FORWARD", "-i", TAP_NAME, "-d", destination, "-j", "DROP"])
-                .await?;
         }
-        Ok(())
+        self.nft_inside(&settings.firewall().initialize()).await
+    }
+
+    pub async fn apply_egress(&self, rules: &EgressRules) -> Result<(), String> {
+        self.nft_inside(&NetworkSettings::current().firewall().apply(rules))
+            .await
+            .map_err(|e| {
+                format!(
+                    "error setting slot internet access: failed execution in network namespace '{}': {e}",
+                    self.namespace()
+                )
+            })
+    }
+
+    async fn nft_inside(&self, script: &str) -> Result<(), String> {
+        let namespace = self.namespace();
+        run_with_input("ip", &["netns", "exec", &namespace, "nft", "-f", "-"], script).await
     }
 
     async fn host_route_and_rules(&self) -> Result<(), String> {
@@ -220,41 +267,24 @@ impl Slot {
     }
 
     fn host_rules(&self, gateway: &str) -> Vec<Rule> {
+        let settings = NetworkSettings::current();
         let veth = self.host_veth();
         let source = format!("{}/32", self.host_ip());
-        let rule = |table: &'static str, chain: &'static str, spec: &[&str]| Rule {
-            table,
-            chain,
-            spec: spec.iter().map(|part| part.to_string()).collect(),
-        };
+        let orchestrator = settings.orchestrator_ip.as_str();
         vec![
-            rule("filter", "FORWARD", &["-i", &veth, "-o", gateway, "-j", "ACCEPT"]),
-            rule(
-                "filter",
-                "FORWARD",
-                &[
-                    "-i",
-                    gateway,
-                    "-o",
-                    &veth,
-                    "-m",
-                    "conntrack",
-                    "--ctstate",
-                    "ESTABLISHED,RELATED",
-                    "-j",
-                    "ACCEPT",
-                ],
-            ),
-            rule(
-                "filter",
-                "INPUT",
-                &["-i", &veth, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"],
-            ),
-            rule(
+            Rule::new("filter", "FORWARD", &["-i", &veth, "-o", gateway, "-j", "ACCEPT"]),
+            Rule::new("filter", "FORWARD", &["-i", gateway, "-o", &veth, "-j", "ACCEPT"]),
+            Rule::new(
                 "nat",
                 "POSTROUTING",
                 &["-s", &source, "-o", gateway, "-j", "MASQUERADE"],
             ),
+            Rule::redirect(&veth, Some(orchestrator), Some(80), settings.hyperloop_port),
+            Rule::redirect(&veth, Some(orchestrator), Some(111), settings.portmapper_port),
+            Rule::redirect(&veth, Some(orchestrator), Some(2049), settings.nfs_proxy_port),
+            Rule::redirect(&veth, None, Some(80), settings.tcp_firewall_http_port),
+            Rule::redirect(&veth, None, Some(443), settings.tcp_firewall_tls_port),
+            Rule::redirect(&veth, None, None, settings.tcp_firewall_other_port),
         ]
     }
 
@@ -285,6 +315,10 @@ impl SlotFactory for HostSlots {
 
     async fn destroy(&self, slot: Slot) -> Result<(), String> {
         slot.destroy().await
+    }
+
+    async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
+        slot.apply_egress(rules).await
     }
 }
 
