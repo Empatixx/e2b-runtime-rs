@@ -39,10 +39,16 @@ impl Sandbox {
         let prefaulter = self.start_prefetch(memfile.clone());
         let client = self.launch_with_rootfs().await?;
         self.phases.mark("rootfs+firecracker");
-        let (loaded, served) = tokio::join!(
-            client.load_snapshot(snapfile, &socket, self.config.use_memfd),
-            serve_memory(listener, memfile)
-        );
+        let loading = client.load_snapshot(snapfile, &socket, self.config.use_memfd);
+        let serving = serve_memory(listener, memfile);
+        tokio::pin!(loading, serving);
+        let (loaded, served) = tokio::select! {
+            loaded = &mut loading => match loaded {
+                Err(e) => (Err(e), Err("firecracker never connected to the memory server".to_owned())),
+                loaded => (loaded, serving.await),
+            },
+            served = &mut serving => (loading.await, served),
+        };
         let started = served.map(|server| {
             if let Some(prefaulter) = prefaulter {
                 let _ = prefaulter.send(server.prefaulter());

@@ -12,7 +12,7 @@ use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
 use super::retry::Failure;
 use super::status::NodeStatus;
-use super::uploads::{Outcome, Uploads};
+use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
@@ -121,9 +121,7 @@ impl Node {
         self.uploads
             .start(build.build_id, parents(&build), attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
-                if outcome == Outcome::Landed {
-                    store.unpin(build.build_id);
-                }
+                store.unpin(build.build_id);
             });
     }
 
@@ -229,10 +227,16 @@ impl Node {
 
     async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
-        let (files, slot) = tokio::join!(
-            async { tokio::try_join!(template.build(), template.snapfile(), template.metadata()) },
-            tokio::time::timeout(REQUEST_TIMEOUT, self.network.get())
-        );
+        let files = async { tokio::try_join!(template.build(), template.snapfile(), template.metadata()) };
+        let slot = tokio::time::timeout(REQUEST_TIMEOUT, self.network.get());
+        tokio::pin!(files, slot);
+        let (files, slot) = tokio::select! {
+            files = &mut files => match files {
+                Err(e) => return Err(template_status(&config, e)),
+                files => (files, slot.await),
+            },
+            slot = &mut slot => (files.await, slot),
+        };
         let slot = slot
             .unwrap_or_else(|_| Err("request timed out".to_owned()))
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;

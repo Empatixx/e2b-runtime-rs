@@ -145,4 +145,11 @@ Every final review ends with minors and deferred rulings. They are collected her
 | A failed upload is only logged; upstream also counts it in a metric and keeps the template marked for the superseded-release logic | API |
 | `metadata.json` is not written or uploaded yet (M12 adds it with the prefetch trace) | M12 |
 | Disk-pressure eviction dooms one entry per second; upstream re-ticks immediately after an eviction | API |
+| A slot is recycled even when the sandbox teardown failed; destroy it instead (M9–M11 review) | API |
+| The snapshot dir leaks when caching fails, a cached template is replaced while pinned, or `snapshot_into` fails (empty dirs) | API |
+| `Uploads` keeps one outcome per pause forever; drop landed ones | API |
+| Host metrics sampling (`statvfs` per mount, `/proc`) runs on a runtime worker; move it to `spawn_blocking` | API |
+| `return_slot` after `NetworkPool::close`, and sandboxes still `Starting` at forced shutdown, are only cleaned by the next startup sweep | API |
+| `Flush` is answered at once while earlier writes may still be in flight (overlay is never fsynced anyway) | ublk |
+| Admission counts running sandboxes only; check whether upstream `Count()` includes reservations | API |
 

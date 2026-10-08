@@ -80,7 +80,13 @@ impl NbdDevice {
             reset(&control);
             return Err(e);
         }
-        let worker = spawn_worker(control.try_clone()?);
+        let worker = match control.try_clone() {
+            Ok(worker_control) => spawn_worker(worker_control),
+            Err(e) => {
+                reset(&control);
+                return Err(e);
+            }
+        };
         let device = Self {
             index: claim.index,
             attached: Some(Attached {

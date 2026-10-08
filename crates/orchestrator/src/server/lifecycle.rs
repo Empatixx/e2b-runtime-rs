@@ -92,19 +92,14 @@ impl Running {
                 None
             }
         };
+        if let Some((Ok(local), _)) = &paused {
+            self.node.upload(local.clone());
+        }
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
         self.node.network.return_slot(self.slot);
         self.node.registry.finish(&id);
         if let Some((local, reply)) = paused {
-            let _ = reply.send(
-                local
-                    .as_ref()
-                    .map(|local| local.snapshot.clone())
-                    .map_err(String::clone),
-            );
-            if let Ok(local) = local {
-                self.node.upload(local);
-            }
+            let _ = reply.send(local.map(|local| local.snapshot));
         }
     }
 
