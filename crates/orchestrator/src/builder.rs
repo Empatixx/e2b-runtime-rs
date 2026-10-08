@@ -4,6 +4,7 @@ pub mod ext4;
 pub mod hash;
 pub mod index;
 pub mod logs;
+pub mod oci;
 pub mod phase;
 pub mod pipeline;
 pub mod service;

@@ -30,6 +30,9 @@ serde_json = "1"
 sha2 = "0.10"
 sysinfo = "0.37"
 tar = "0.4"
+xattr = "1"
+flate2 = "1"
+zstd = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = "0.14"

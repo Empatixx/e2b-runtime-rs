@@ -1858,6 +1858,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "flate2",
  "fred",
  "futures",
  "hmac",
@@ -1892,6 +1893,8 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots",
+ "xattr",
+ "zstd",
 ]
 
 [[package]]
