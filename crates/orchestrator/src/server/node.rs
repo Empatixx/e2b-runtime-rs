@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 pub use self::checkpoint::CheckpointRequest;
 use super::admission::Admission;
+use super::build_id;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::oom_monitor::SharedWatermark;
@@ -460,9 +461,12 @@ impl Node {
     }
 
     fn template_of(&self, config: &SandboxConfig) -> Result<Arc<Template>, Status> {
-        Uuid::parse_str(&config.build_id)
+        build_id::parse(&config.build_id)
             .map(|build_id| self.templates.get_for(build_id, config.max_sandbox_length))
-            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))
+            .map_err(|_| {
+                StartFailure::Template(TemplateError::NotFound(config.build_id.clone()))
+                    .create_status(&config.sandbox_id)
+            })
     }
 
     async fn resume(&self, request: ResumeRequest<'_>) -> Result<Sandbox, String> {

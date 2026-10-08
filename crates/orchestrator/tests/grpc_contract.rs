@@ -547,6 +547,13 @@ async fn sandbox_lifecycle_over_grpc() {
         (missing.code(), missing.message()),
         (Code::FailedPrecondition, "sandbox files for 'grpc-missing' not found")
     );
+    let mut garbage = create_request("grpc-garbage", Uuid::new_v4(), Duration::from_secs(60));
+    garbage.sandbox.as_mut().unwrap().build_id = "not-a-build".to_owned();
+    let garbage = cluster.client.create(garbage).await.unwrap_err();
+    assert_eq!(
+        (garbage.code(), garbage.message()),
+        (Code::FailedPrecondition, "sandbox files for 'grpc-garbage' not found")
+    );
 
     cluster.node.close().await;
     let stored = Storage::local(&cluster.dir.path().join("store")).unwrap();
