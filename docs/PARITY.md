@@ -36,6 +36,7 @@ Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of t
 | 15 | Upload object metadata, empty diffs | `team_id`, `template_id`, `build_origin`; empty diffs skip the body |
 | 16 | Storage configuration | `TEMPLATE_STORAGE_URL` / `BUILD_CACHE_STORAGE_URL` with upstream URL parsing and texts, legacy `STORAGE_PROVIDER` envs, separate build-cache storage, GCS/S3/Azure/local providers |
 | 17 | Layer file uploads | `InitLayerFileUpload` on the build cache with signed-URL headers (Azure `x-ms-blob-type`), local HMAC `PUT /upload` |
+| 19 | Template base phase (M14) | OCI pull with go-containerregistry texts, moby-like untar with whiteouts, overlayfs + rsync into ext4, upstream injected files byte for byte, provisioning console scan, Go kernel args, base layer upload and index |
 | 18 | Shutdown | 15 s pause unless `ENVIRONMENT=local`, template builds drained with a 15 s consumer grace, `FORCE_STOP` |
 
 Also: cgroups are named `sbx-<id>-<random>` as upstream, so a same-id resume or checkpoint never shares the old sandbox's cgroup.
@@ -51,7 +52,7 @@ These paths are off by default upstream. We follow the default:
 - ClickHouse alternate endpoints are parsed and logged only;
 - resume-time envd live upgrade.
 
-Not ported yet: the template builder phases (M14–M16) and the envd `oom_kills` metric in envd-rs.
+Not ported yet: the template builder steps and finalize (M15–M16) and the envd `oom_kills` metric in envd-rs.
 
 ## Same as upstream (checked)
 

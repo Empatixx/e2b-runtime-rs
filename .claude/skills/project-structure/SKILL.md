@@ -14,6 +14,15 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        backend/providers.rs: S3, GCS, Azure builders), spec.rs (StorageSpec, upstream storage URL
                        parsing), local_upload.rs (HMAC UploadSigner), build paths, header V3
   src/go_url.rs        Go net/url parse and String (go_url/escape.rs, go_url/query.rs url.Values)
+  src/go_exec.rs       commands with Go exec error texts (exit status N, signal: killed, not found in $PATH);
+                       go_humanize.rs (humanize.Bytes)
+  src/builder/         template builder: config.rs (BuilderConfig env), template_files.rs (+ render.rs Go template
+                       subset, layers.rs files/symlink tars, hash.rs filesHash/provision version; assets/template/),
+                       ext4.rs (+ stats.rs debugfs parsing), oci/ (reference.rs go-containerregistry names, registry.rs
+                       distribution client, auth.rs, ecr.rs SigV4, pull.rs GetPublicImage, untar.rs moby untar with
+                       whiteouts, export.rs layers top-first, overlay_mount.rs new mount API, copy.rs rsync),
+                       rootfs.rs (+ unpack.rs CreateExt4Filesystem), provision.rs (console marker scan),
+                       phases.rs (BuildEnv) + phases/base.rs (+ build.rs), pipeline.rs (PhasePipeline)
   src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
@@ -41,13 +50,15 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
   src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset
-  src/firecracker/     config (VmConfig builder), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
+  src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (line tap with the
+                       FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
                        pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
                        trace.rs (PrefetchTracker, Trace intersection), prefetch.rs (init-trace prefetcher)
-  src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0)
+  src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0);
+                       envd/process.rs (Connect process.Start client, bash -l -c as a user)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
