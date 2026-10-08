@@ -69,8 +69,10 @@ async fn dispatch<D: BlockDevice>(
     in_flight: &mut JoinSet<Result<(), String>>,
 ) -> Result<(), String> {
     while let Some(request) = next_request(reader).await? {
-        if request.command == Command::Disconnect {
-            return Ok(());
+        match request.command {
+            Command::Disconnect => return Ok(()),
+            Command::Flush => return Err("not supported: Flush".to_owned()),
+            _ => {}
         }
         let payload = payload(reader, &request).await?;
         in_flight.spawn(answer(device.clone(), replies.clone(), request, payload));
@@ -257,12 +259,18 @@ mod tests {
         assert_eq!(client.reply().await, 0);
         client.send(Command::Trim, 8192, 4096).await;
         assert_eq!(client.reply().await, 0);
-        client.send(Command::Flush, 0, 0).await;
-        assert_eq!(client.reply().await, 0);
         assert_eq!(client.read(4096, 8192).await, vec![0; 8192]);
 
         client.send(Command::Disconnect, 0, 0).await;
         assert_eq!(client.server.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_flush_request_ends_the_server_like_upstream() {
+        let mut client = start().await;
+        client.send(Command::Flush, 0, 0).await;
+
+        assert_eq!(client.server.await.unwrap(), Err("not supported: Flush".to_owned()));
     }
 
     #[tokio::test]
