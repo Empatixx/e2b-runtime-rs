@@ -1,3 +1,4 @@
+pub mod teardown;
 pub mod unpack;
 
 use std::path::Path;
@@ -11,7 +12,8 @@ use super::template_files::InjectedFiles;
 use super::template_files::layers::{files_layer, symlink_layer};
 use crate::go_humanize::bytes;
 use crate::proto::{FromImageRegistry, LogLevel};
-use unpack::{Mounted, UnpackError, temp_dir, unpack_rootfs};
+use teardown::{Step, Teardown};
+use unpack::{UnpackError, temp_dir, unpack_rootfs};
 
 pub const MB: i64 = 1 << 20;
 pub const BASE_ROOTFS_SIZE_LIMIT_MB: i64 = 25_000;
@@ -118,18 +120,37 @@ async fn extract_to_ext4(
     layers: Vec<ImageLayer>,
     max_size: i64,
 ) -> Result<(), UnpackError> {
+    let mut teardown = Teardown::default();
+    let extracted = extract_into(log, ext4, layers, max_size, &mut teardown).await;
+    teardown.finish().await;
+    extracted
+}
+
+async fn extract_into(
+    log: &ScopedLog<'_>,
+    ext4: &Ext4,
+    layers: Vec<ImageLayer>,
+    max_size: i64,
+    teardown: &mut Teardown,
+) -> Result<(), UnpackError> {
     let temp_root = crate::go_os::parent(&ext4.file);
     let mount_dir = temp_dir(&temp_root, ".ext4-mount-", "error creating temporary mount point")?;
-    ext4.mount(mount_dir.path())
+    let mount_path = mount_dir.path().to_path_buf();
+    teardown.push(Step::Remove {
+        dir: mount_dir,
+        failure_log: "error removing temporary mount point",
+    });
+    ext4.mount(&mount_path)
         .await
         .map_err(|e| UnpackError::Failed(format!("error mounting ext4 filesystem: {e}")))?;
-    let mounted = Mounted::new(mount_dir.path(), "error unmounting ext4 filesystem");
-    tracing::debug!(rootfs_path = %ext4.file.display(), tmp_mount = %mount_dir.path().display(), "extracting image to ext4 filesystem");
-    let unpacked = unpack_rootfs(log, layers, mount_dir.path(), &temp_root, max_size)
+    teardown.push(Step::Unmount {
+        path: mount_path.clone(),
+        failure_log: "error unmounting ext4 filesystem",
+    });
+    tracing::debug!(rootfs_path = %ext4.file.display(), tmp_mount = %mount_path.display(), "extracting image to ext4 filesystem");
+    unpack_rootfs(log, layers, &mount_path, &temp_root, max_size)
         .await
-        .map_err(|e| e.context("error extracting tar to directory"));
-    drop(mounted);
-    unpacked
+        .map_err(|e| e.context("error extracting tar to directory"))
 }
 
 fn internal(message: String) -> BuildError {

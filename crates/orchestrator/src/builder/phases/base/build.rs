@@ -1,3 +1,4 @@
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use crate::sandbox::Sandbox;
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
+const BUILD_DIR_MODE: u32 = 0o777;
 const ROOTFS_FILE: &str = "rootfs.filesystem.build";
 const IO_ENGINE: &str = "Sync";
 const SYSTEMD_INIT: &str = "/sbin/init";
@@ -40,8 +42,15 @@ struct BuildDir {
 
 impl Drop for BuildDir {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.path) {
-            tracing::error!(error = %e, "Error while removing template build directory");
+        let path = std::mem::take(&mut self.path);
+        let remove = move || {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::error!(error = %e, "Error while removing template build directory");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+            Err(_) => remove(),
         }
     }
 }
@@ -72,8 +81,10 @@ impl BaseBuild<'_> {
 
     fn build_dir(&self, build_id: &str) -> Result<BuildDir, BuildError> {
         let path = self.phase.env.config.templates_dir.join(build_id);
-        std::fs::create_dir_all(&path)
-            .and_then(|()| std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o777)))
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(BUILD_DIR_MODE)
+            .create(&path)
             .map(|()| BuildDir { path })
             .map_err(|e| BuildError::Internal(format!("error creating template build directory: {e}")))
     }
