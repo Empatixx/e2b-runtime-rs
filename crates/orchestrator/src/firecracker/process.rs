@@ -1,5 +1,6 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -28,15 +29,23 @@ impl FirecrackerProcess {
         let console_err = console_file
             .try_clone()
             .map_err(|e| format!("clone console {}: {e}", console.display()))?;
-        let child = Command::new("setsid")
+        let mut command = Command::new("setsid");
+        command
             .args(["unshare", "-m", "--", "sh", "-c"])
             .arg(launch.script())
             .stdin(Stdio::null())
             .stdout(console_file)
             .stderr(console_err)
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        let membership = launch
+            .cgroup
+            .as_deref()
+            .map(|cgroup| CgroupMembership::on_exec(&mut command, cgroup))
+            .transpose()?;
+        let child = command
             .spawn()
             .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
+        drop(membership);
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
@@ -95,6 +104,29 @@ impl FirecrackerProcess {
         let console = std::fs::read_to_string(&self.console).unwrap_or_default();
         let start = console.len().saturating_sub(CONSOLE_TAIL);
         console.get(start..).unwrap_or_default().trim().to_owned()
+    }
+}
+
+struct CgroupMembership {
+    procs: File,
+}
+
+impl CgroupMembership {
+    fn on_exec(command: &mut Command, cgroup: &Path) -> Result<Self, String> {
+        let path = cgroup.join("cgroup.procs");
+        let procs = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        let fd = procs.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                nix::unistd::write(BorrowedFd::borrow_raw(fd), b"0")
+                    .map(|_| ())
+                    .map_err(io::Error::from)
+            });
+        }
+        Ok(Self { procs })
     }
 }
 

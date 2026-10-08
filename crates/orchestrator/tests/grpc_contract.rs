@@ -139,9 +139,10 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
         template_cache_dir: dir.path().join("templates"),
         slots: pool.indices(),
         local_expiry,
+        envd_timeout: Duration::from_secs(10),
     };
     let node = Arc::new(Node::new(&config).unwrap());
-    node.start();
+    node.start_background();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(

@@ -130,8 +130,7 @@ impl Sandbox {
     async fn spawn_firecracker(&mut self, rootfs: PathBuf) -> Result<FirecrackerClient, String> {
         std::fs::create_dir_all(&self.config.work_dir)
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
-        let cgroup = Cgroup::create(&self.config.id).map_err(|e| format!("create cgroup {}: {e}", self.config.id))?;
-        let cgroup = self.resources.cgroup.insert(cgroup);
+        let cgroup = self.create_cgroup();
         let launch = Launch::builder()
             .binary(&self.config.firecracker)
             .socket(self.config.work_dir.join("firecracker.sock"))
@@ -139,13 +138,19 @@ impl Sandbox {
             .console(self.config.work_dir.join("console.log"))
             .rootfs(rootfs)
             .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
+            .cgroup(cgroup)
             .build()?;
         let vm = FirecrackerProcess::spawn(&launch).await?;
-        let vm = self.resources.vm.insert(vm);
-        vm.pid()
-            .ok_or_else(|| "firecracker exited before joining its cgroup".to_owned())
-            .and_then(|pid| cgroup.add(pid).map_err(|e| format!("add firecracker to cgroup: {e}")))
-            .map(|()| vm.client())
+        Ok(self.resources.vm.insert(vm).client())
+    }
+
+    fn create_cgroup(&mut self) -> Option<PathBuf> {
+        Cgroup::create(&self.config.id)
+            .inspect_err(
+                |e| tracing::warn!(sandbox = %self.config.id, error = %e, "could not create the sandbox cgroup"),
+            )
+            .ok()
+            .map(|cgroup| self.resources.cgroup.insert(cgroup).path().to_owned())
     }
 
     async fn boot(&self, client: &FirecrackerClient) -> Result<(), String> {
@@ -176,7 +181,9 @@ impl Sandbox {
             initialised = envd::init(address, &self.config.envd, deadline) => initialised,
             exited = vm.exited() => return Err(exited),
         };
-        initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))
+        let attempts = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
+        self.phases.note("envd_attempts", attempts);
+        Ok(())
     }
 
     fn console_tail(&self) -> String {

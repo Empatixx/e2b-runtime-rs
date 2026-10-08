@@ -25,7 +25,7 @@ mod serve {
         let config = NodeConfig::from_env()?;
         let node = Arc::new(Node::new(&config)?);
         node.sweep().await;
-        node.start();
+        node.start_background();
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
         tracing::info!(%address, node = %config.node_id, "orchestrator listening");
         let served = tonic::transport::Server::builder()

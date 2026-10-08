@@ -1,15 +1,19 @@
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::Sandbox;
 use super::config::SandboxBuilder;
 use crate::block::build_file::BuildFile;
+use crate::exposure::nbd::{Exposure, expose};
+use crate::firecracker::client::FirecrackerClient;
 use crate::memory::handshake::UffdListener;
 use crate::memory::server::MemoryServer;
 use crate::system::all_ok;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const NO_DEVICE: &str = "/dev/null";
 
 impl SandboxBuilder {
     pub async fn resume(self, snapfile: &Path) -> Result<Sandbox, String> {
@@ -28,46 +32,67 @@ impl Sandbox {
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
         let socket = self.config.work_dir.join("uffd.sock");
         let listener = UffdListener::bind(&socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
-        let rootfs = self.attach_disk_and_slot().await?;
-        self.phases.mark("slot+rootfs");
-        let client = self.spawn_firecracker(rootfs).await?;
-        self.phases.mark("firecracker");
-        let log = self.config.work_dir.join("firecracker.log");
-        std::fs::File::create(&log).map_err(|e| format!("create {}: {e}", log.display()))?;
-        client.set_logger(&log).await?;
+        let client = self.launch_with_rootfs().await?;
+        self.phases.mark("rootfs+firecracker");
         let (loaded, served) = tokio::join!(client.load_snapshot(snapfile, &socket), serve_memory(listener, memfile));
         let started = served.map(|server| {
             self.resources.memory = Some(server);
         });
+        all_ok([started, loaded]).map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
         self.phases.mark("load_snapshot");
-        let resumed = async {
-            all_ok([started, loaded])?;
-            client.resume().await
-        }
-        .await;
-        resumed.map_err(|e| format!("{e}; {}", self.resume_diagnostics(&log)))?;
+        self.phases.note("faults", self.faults_served());
+        client.set_rate_limits().await?;
+        client
+            .resume()
+            .await
+            .map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
         self.phases.mark("resume_vm");
         client.set_mmds(&self.mmds_metadata()).await?;
         self.phases.mark("mmds");
         self.init_envd().await?;
         self.phases.mark("envd_init");
+        self.phases.note("faults", self.faults_served());
         Ok(())
     }
 
-    fn resume_diagnostics(&self, log: &Path) -> String {
-        let firecracker_log = std::fs::read_to_string(log).unwrap_or_default();
-        let start = firecracker_log.len().saturating_sub(4000);
+    async fn launch_with_rootfs(&mut self) -> Result<FirecrackerClient, String> {
+        let link = self.config.work_dir.join("rootfs.link");
+        point_link(&link, Path::new(NO_DEVICE)).map_err(|e| format!("link {}: {e}", link.display()))?;
+        let (disk, client) = tokio::join!(expose(self.config.rootfs.clone()), self.spawn_in_slot(link.clone()));
+        let device = self.keep_disk(disk)?;
+        let client = client?;
+        point_link(&link, &device).map_err(|e| format!("link {} to {}: {e}", link.display(), device.display()))?;
+        Ok(client)
+    }
+
+    async fn spawn_in_slot(&mut self, rootfs: PathBuf) -> Result<FirecrackerClient, String> {
+        self.own_slot().await?;
+        self.spawn_firecracker(rootfs).await
+    }
+
+    fn keep_disk(&mut self, disk: io::Result<Exposure>) -> Result<PathBuf, String> {
+        disk.map(|exposure| self.resources.disk.insert(exposure).path())
+            .map_err(|e| format!("expose rootfs: {e}"))
+    }
+
+    fn resume_diagnostics(&self) -> String {
         format!(
-            "faults served: {}; memory server running: {}; firecracker log: {}; console: {}",
+            "faults served: {}; memory server running: {}; console: {}",
             self.faults_served(),
             self.resources
                 .memory
                 .as_ref()
                 .is_some_and(|memory| !memory.is_finished()),
-            firecracker_log.get(start..).unwrap_or_default(),
             self.console_tail()
         )
     }
+}
+
+fn point_link(link: &Path, target: &Path) -> io::Result<()> {
+    let staged = link.with_extension("staged");
+    let _ = std::fs::remove_file(&staged);
+    std::os::unix::fs::symlink(target, &staged)?;
+    std::fs::rename(&staged, link)
 }
 
 async fn serve_memory(listener: UffdListener, memfile: Arc<BuildFile>) -> Result<MemoryServer, String> {

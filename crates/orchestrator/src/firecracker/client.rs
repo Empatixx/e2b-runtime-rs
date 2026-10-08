@@ -66,12 +66,14 @@ impl FirecrackerClient {
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
     }
 
-    pub async fn set_logger(&self, log: &Path) -> Result<(), String> {
-        self.put(
-            "/logger",
-            json!({ "log_path": log, "level": "Debug", "show_level": true, "show_log_origin": true }),
+    pub async fn set_rate_limits(&self) -> Result<(), String> {
+        self.patch(
+            "/network-interfaces/eth0",
+            json!({ "iface_id": "eth0", "tx_rate_limiter": {} }),
         )
-        .await
+        .await?;
+        self.patch("/drives/rootfs", json!({ "drive_id": "rootfs", "rate_limiter": {} }))
+            .await
     }
 
     pub async fn set_mmds(&self, metadata: &MmdsMetadata) -> Result<(), String> {
@@ -420,6 +422,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rate_limits_are_reset_on_the_interface_and_the_drive() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client.set_rate_limits().await.unwrap()
+        })
+        .await;
+
+        assert_eq!(
+            calls,
+            vec![
+                call(
+                    "PATCH",
+                    "/network-interfaces/eth0",
+                    json!({ "iface_id": "eth0", "tx_rate_limiter": {} })
+                ),
+                call(
+                    "PATCH",
+                    "/drives/rootfs",
+                    json!({ "drive_id": "rootfs", "rate_limiter": {} })
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn create_snapshot_sends_a_full_snapshot_without_a_memory_file() {
         let calls = calls_after(Faults::default(), async |client| {
             client.create_snapshot(Path::new("/run/sbx/snapfile")).await.unwrap();
@@ -518,22 +544,5 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.resident.iter().collect::<Vec<_>>(), vec![0, 2, 64]);
         assert_eq!(info.empty.iter().collect::<Vec<_>>(), vec![2]);
-    }
-
-    #[tokio::test]
-    async fn set_logger_points_firecracker_at_a_debug_log() {
-        let calls = calls_after(Faults::default(), async |client| {
-            client.set_logger(Path::new("/run/sbx/firecracker.log")).await.unwrap();
-        })
-        .await;
-
-        assert_eq!(
-            calls,
-            vec![call(
-                "PUT",
-                "/logger",
-                json!({ "log_path": "/run/sbx/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true })
-            )]
-        );
     }
 }

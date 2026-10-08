@@ -13,6 +13,7 @@ pub struct Launch {
     pub console: PathBuf,
     pub rootfs: PathBuf,
     pub kernel: PathBuf,
+    pub cgroup: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -23,6 +24,7 @@ pub struct LaunchBuilder {
     console: Option<PathBuf>,
     rootfs: Option<PathBuf>,
     kernel: Option<PathBuf>,
+    cgroup: Option<PathBuf>,
 }
 
 impl Launch {
@@ -80,6 +82,11 @@ impl LaunchBuilder {
         self
     }
 
+    pub fn cgroup(mut self, cgroup: Option<PathBuf>) -> Self {
+        self.cgroup = cgroup;
+        self
+    }
+
     pub fn build(self) -> Result<Launch, String> {
         Ok(Launch {
             binary: self.binary.ok_or("firecracker binary is required")?,
@@ -88,6 +95,7 @@ impl LaunchBuilder {
             console: self.console.ok_or("console path is required")?,
             rootfs: self.rootfs.ok_or("rootfs is required")?,
             kernel: self.kernel.ok_or("kernel is required")?,
+            cgroup: self.cgroup,
         })
     }
 }

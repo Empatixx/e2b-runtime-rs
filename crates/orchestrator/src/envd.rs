@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 pub const ENVD_PORT: u16 = 49983;
 const RETRY_DELAY: Duration = Duration::from_millis(5);
-const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(100);
+const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Default)]
 pub struct EnvdInit {
@@ -41,10 +41,12 @@ pub fn hash_access_token(token: &str) -> String {
     format!("{:x}", Sha512::digest(token.as_bytes()))
 }
 
-pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<(), String> {
+pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<u32, String> {
+    let mut attempts = 0;
     loop {
+        attempts += 1;
         match attempt(address, settings, deadline).await {
-            Ok(204) => return Ok(()),
+            Ok(204) => return Ok(attempts),
             Ok(status) => return Err(format!("unexpected status code: {status}")),
             Err(error) if Instant::now() + RETRY_DELAY >= deadline => {
                 return Err(format!("failed to init envd: {error}"));
@@ -230,7 +232,7 @@ mod tests {
         let settings = settings();
         let (initialised, _received) = tokio::join!(init(address, &settings, soon(Duration::from_secs(5))), late_envd);
 
-        initialised.unwrap();
+        assert!(initialised.unwrap() > 1, "the first attempts ran before envd listened");
     }
 
     #[tokio::test]

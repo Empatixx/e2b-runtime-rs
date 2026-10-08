@@ -35,6 +35,7 @@ pub struct Node {
     firecracker: PathBuf,
     kernel: PathBuf,
     work_dir: PathBuf,
+    envd_timeout: Duration,
 }
 
 pub struct Lifetime {
@@ -56,10 +57,11 @@ impl Node {
             firecracker: config.firecracker.clone(),
             kernel: config.kernel.clone(),
             work_dir: config.work_dir.clone(),
+            envd_timeout: config.envd_timeout,
         })
     }
 
-    pub fn start(&self) {
+    pub fn start_background(&self) {
         self.network.start();
         tokio::spawn(self.templates.clone().run_eviction());
     }
@@ -183,6 +185,7 @@ impl Node {
             .firecracker(&self.firecracker)
             .kernel(&self.kernel)
             .work_dir(work_dir)
+            .envd_timeout(self.envd_timeout)
             .envd(EnvdInit {
                 access_token: config.envd_access_token.clone(),
                 env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),

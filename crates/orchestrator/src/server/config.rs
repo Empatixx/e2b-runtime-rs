@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::network::slot::MAX_SLOT;
 use crate::storage::backend::Storage;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
+const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageConfig {
@@ -34,6 +36,7 @@ pub struct NodeConfig {
     pub template_cache_dir: PathBuf,
     pub slots: RangeInclusive<u32>,
     pub local_expiry: bool,
+    pub envd_timeout: Duration,
 }
 
 impl NodeConfig {
@@ -64,6 +67,10 @@ impl NodeConfig {
             cache_dir,
             slots: 1..=MAX_SLOT,
             local_expiry: var("E2B_LOCAL_EXPIRY").is_some_and(|value| value == "1" || value == "true"),
+            envd_timeout: var("ENVD_TIMEOUT_MS")
+                .map(|ms| ms.parse().map_err(|_| format!("ENVD_TIMEOUT_MS is not a number: {ms}")))
+                .transpose()?
+                .map_or(Duration::from_millis(DEFAULT_ENVD_TIMEOUT_MS), Duration::from_millis),
         })
     }
 
@@ -127,6 +134,7 @@ mod tests {
         assert_eq!(config.node_id, "local");
         assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
+        assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert_eq!(
             config.storage,
             StorageConfig::Local {

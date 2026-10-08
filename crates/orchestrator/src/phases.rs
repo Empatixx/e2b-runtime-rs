@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use tokio::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -12,7 +10,7 @@ pub struct PhaseTimer {
 #[derive(Debug, Clone)]
 struct Phase {
     name: &'static str,
-    took: Duration,
+    value: String,
 }
 
 impl PhaseTimer {
@@ -29,15 +27,22 @@ impl PhaseTimer {
         let now = Instant::now();
         self.phases.push(Phase {
             name,
-            took: now - self.last,
+            value: format!("{}ms", (now - self.last).as_millis()),
         });
         self.last = now;
+    }
+
+    pub fn note(&mut self, name: &'static str, value: impl std::fmt::Display) {
+        self.phases.push(Phase {
+            name,
+            value: value.to_string(),
+        });
     }
 
     pub fn render(&self) -> String {
         self.phases
             .iter()
-            .map(|phase| format!("{}={}ms", phase.name, phase.took.as_millis()))
+            .map(|phase| format!("{}={}", phase.name, phase.value))
             .chain(std::iter::once(format!(
                 "total={}ms",
                 (self.last - self.started).as_millis()
@@ -49,6 +54,8 @@ impl PhaseTimer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[tokio::test(start_paused = true)]
@@ -58,7 +65,8 @@ mod tests {
         timer.mark("slot");
         tokio::time::sleep(Duration::from_millis(30)).await;
         timer.mark("rootfs");
+        timer.note("faults", 7);
 
-        assert_eq!(timer.render(), "slot=12ms rootfs=30ms total=42ms");
+        assert_eq!(timer.render(), "slot=12ms rootfs=30ms faults=7 total=42ms");
     }
 }
