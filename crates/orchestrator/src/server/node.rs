@@ -28,7 +28,7 @@ use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
-use crate::envd::{EnvdInit, VolumeMount};
+use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::firecracker::version::supports_memfd;
 use crate::hoststats::StatsIdentity;
@@ -246,7 +246,7 @@ impl Node {
             .kernel(&self.kernel)
             .work_dir(self.work_dir.join(sandbox_id))
             .hyperloop_ip(&self.orchestrator_ip)
-            .envd(self.build_envd(None))
+            .envd(self.build_envd(EnvdDefaults::default()))
     }
 
     pub fn layer_dir(&self, build_id: Uuid) -> PathBuf {
@@ -716,7 +716,7 @@ fn sweep_cgroups(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template::metadata::Context;
+    use crate::template::metadata::{Context, Start};
 
     fn metadata(context_user: Option<&str>, start_user: &str) -> TemplateMetadata {
         TemplateMetadata {
@@ -724,7 +724,13 @@ mod tests {
                 user: context_user.map(str::to_owned),
                 ..Context::default()
             },
-            start: Some(serde_json::json!({ "context": { "user": start_user } })),
+            start: Some(Start {
+                context: Context {
+                    user: Some(start_user.to_owned()),
+                    ..Context::default()
+                },
+                ..Start::default()
+            }),
             ..TemplateMetadata::default()
         }
     }

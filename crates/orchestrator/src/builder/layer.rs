@@ -14,6 +14,7 @@ use super::phase::BuildError;
 use super::phases::BuildEnv;
 use super::sandbox_command::{CommandLog, ROOT, run_logged, run_quiet};
 use super::uploads::{LayerUpload, LayerUploads};
+use crate::envd::EnvdDefaults;
 use crate::envd::files::copy_file;
 use crate::envd::process::CommandContext;
 use crate::envd::version::is_at_least;
@@ -35,7 +36,8 @@ pub const RESERVED_DISK_SPACE_MB: i64 = 256;
 pub const ENVD_WAIT: Duration = Duration::from_secs(60);
 pub const MIN_ENVD_FOR_KVM_CLOCK: &str = "0.2.11";
 const SYNC_COMMAND: &str = "/usr/bin/busybox sync";
-const BUILD_ORIGIN: &str = "template_build_cache";
+pub const BUILD_CACHE_ORIGIN: &str = "template_build_cache";
+pub const BUILD_ORIGIN: &str = "template_build";
 const SANDBOX_ID_LEN: usize = 20;
 const TMP_ENVD_PATH: &str = "/tmp/envd_updated";
 const GUEST_ENVD_PATH: &str = "/usr/bin/envd";
@@ -116,6 +118,9 @@ pub struct LayerBuild<'a> {
     pub update_envd: bool,
     pub creator: SandboxCreator,
     pub shape: SandboxShape<'a>,
+    pub envd_defaults: EnvdDefaults,
+    pub reserved_blocks: bool,
+    pub build_origin: &'a str,
 }
 
 pub struct BuildSlot {
@@ -168,7 +173,8 @@ impl LayerExecutor<'_> {
             kernel_version: self.env.config.kernel_version.clone(),
             firecracker_version: self.env.config.firecracker_version.clone(),
         });
-        self.pause_and_upload(sandbox, build.hash, metadata).await
+        self.pause_and_upload(sandbox, build.hash, metadata, build.build_origin)
+            .await
     }
 
     async fn create_sandbox(&self, build: &LayerBuild<'_>, source: &LayerSource) -> Result<Sandbox, BuildError> {
@@ -181,7 +187,7 @@ impl LayerExecutor<'_> {
         };
         match build.creator {
             SandboxCreator::Resume => self.resume(&layer).await,
-            SandboxCreator::ColdBoot => self.cold_boot(&layer, &build.shape).await,
+            SandboxCreator::ColdBoot => self.cold_boot(&layer, build).await,
         }
     }
 
@@ -195,19 +201,21 @@ impl LayerExecutor<'_> {
             .map_err(resumed)
     }
 
-    async fn cold_boot(&self, layer: &LayerSandbox<'_>, shape: &SandboxShape<'_>) -> Result<Sandbox, BuildError> {
+    async fn cold_boot(&self, layer: &LayerSandbox<'_>, build: &LayerBuild<'_>) -> Result<Sandbox, BuildError> {
         let created = |e: String| BuildError::Internal(format!("create sandbox: {e}"));
-        let kvm_clock = is_at_least(shape.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
+        let kvm_clock = is_at_least(build.shape.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
             .map_err(|e| BuildError::Internal(format!("error comparing envd version: {e}")))?;
         let slot = self.lease_slot(layer.sandbox_id, "create sandbox").await?;
         let builder = self.env.node.cold_boot_layer(layer).map_err(created)?;
-        let mut sandbox = self
-            .boot_options(slot.attach(builder), shape)
+        let builder = self
+            .boot_options(slot.attach(builder), &build.shape)
             .kvm_clock(kvm_clock)
-            .pre_boot(reserved_blocks())
-            .cold_boot()
-            .await
-            .map_err(created)?;
+            .envd(self.env.node.build_envd(build.envd_defaults.clone()));
+        let builder = match build.reserved_blocks {
+            true => builder.pre_boot(reserved_blocks()),
+            false => builder,
+        };
+        let mut sandbox = builder.cold_boot().await.map_err(created)?;
         match sandbox.wait_for_envd().await {
             Ok(()) => Ok(sandbox),
             Err(e) => Err(fail(sandbox, BuildError::Internal(format!("wait for envd: {e}"))).await),
@@ -248,6 +256,7 @@ impl LayerExecutor<'_> {
         sandbox: Sandbox,
         hash: &str,
         metadata: TemplateMetadata,
+        build_origin: &str,
     ) -> Result<TemplateMetadata, BuildError> {
         let paused = |e: String| BuildError::Internal(format!("pause and upload: {e}"));
         let build_id =
@@ -257,7 +266,7 @@ impl LayerExecutor<'_> {
             .pause_into(&dir, build_id)
             .await
             .map_err(|e| paused(format!("error processing vm: {e}")))?;
-        self.upload(local, dir, &metadata, hash).map_err(paused)?;
+        self.upload(local, dir, &metadata, hash, build_origin).map_err(paused)?;
         Ok(metadata)
     }
 
@@ -267,6 +276,7 @@ impl LayerExecutor<'_> {
         dir: PathBuf,
         metadata: &TemplateMetadata,
         hash: &str,
+        build_origin: &str,
     ) -> Result<(), String> {
         let node = &self.env.node;
         let build_id = &metadata.template.build_id;
@@ -278,7 +288,7 @@ impl LayerExecutor<'_> {
         let object_metadata = ObjectMetadata::default()
             .with("team_id", self.team_id)
             .with("template_id", self.template_id)
-            .with("build_origin", BUILD_ORIGIN);
+            .with("build_origin", build_origin);
         self.uploads.start(
             node.spawn_upload(local, object_metadata),
             LayerUpload {

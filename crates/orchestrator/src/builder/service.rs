@@ -161,18 +161,11 @@ fn cancelled_as_user_error(
 
 fn outcome_line(built: &Result<TemplateBuildMetadata, BuildError>, took: Duration) -> String {
     match built {
-        Ok(_) => format!("Build finished, took {}", go_duration_seconds(took)),
+        Ok(_) => format!(
+            "Build finished, took {}",
+            crate::go_time::duration(Duration::from_secs(took.as_secs()))
+        ),
         Err(e) => format!("Build failed: {}", e.reason().message),
-    }
-}
-
-fn go_duration_seconds(took: Duration) -> String {
-    let seconds = took.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    match (hours, minutes) {
-        (0, 0) => format!("{seconds}s"),
-        (0, _) => format!("{minutes}m{seconds}s"),
-        _ => format!("{hours}h{minutes}m{seconds}s"),
     }
 }
 
@@ -523,13 +516,6 @@ mod tests {
             done.log_entries.last().unwrap().message,
             "Build failed: build was cancelled"
         );
-    }
-
-    #[test]
-    fn durations_print_like_go() {
-        assert_eq!(go_duration_seconds(Duration::from_millis(900)), "0s");
-        assert_eq!(go_duration_seconds(Duration::from_secs(65)), "1m5s");
-        assert_eq!(go_duration_seconds(Duration::from_secs(3600)), "1h0m0s");
     }
 
     #[tokio::test]

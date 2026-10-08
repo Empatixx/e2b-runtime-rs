@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use crate::envd::version::is_at_least;
 use crate::proto::template_config::Source;
-use crate::proto::{TemplateBuildMetadata, TemplateConfig, TemplateCreateRequest};
+use crate::proto::{SchedulingMetadata, TemplateBuildMetadata, TemplateConfig, TemplateCreateRequest};
+use crate::server::scheduling::from_headers;
 use crate::storage::paths::BuildPaths;
 
 const MB: u64 = 1 << 20;
@@ -115,7 +116,8 @@ impl TemplateBuilder for PhasePipeline {
                 .await
                 .map_err(|e| BuildError::Internal(format!("error waiting for layers upload: {e}")))?;
             let rootfs_size = rootfs_size(&env, &last).await?;
-            Ok(result_metadata(&env, rootfs_size, envd_version))
+            let scheduling = scheduling_metadata(&env, &last).await;
+            Ok(result_metadata(&env, rootfs_size, envd_version, scheduling))
         }
         .boxed()
     }
@@ -146,23 +148,42 @@ fn base_request(config: &TemplateConfig, envd_version: &str) -> Result<BaseReque
 }
 
 async fn rootfs_size(env: &BuildEnv, last: &LayerResult) -> Result<u64, BuildError> {
+    let size = |e: String| BuildError::Internal(format!("error getting rootfs size: {e}"));
     let build_id = Uuid::parse_str(&last.metadata.template.build_id)
-        .map_err(|e| BuildError::Internal(format!("error getting rootfs size: {e}")))?;
-    env.node
+        .map_err(|e| size(format!("error opening rootfs header object: {e}")))?;
+    let header = env
+        .node
         .storage
         .load_header(&BuildPaths::new(build_id).rootfs_header())
         .await
-        .map(|header| header.metadata.size)
-        .map_err(|e| BuildError::Internal(format!("error getting rootfs size: {e}")))
+        .map_err(|e| size(format!("error deserializing rootfs header: {e}")))?;
+    tracing::info!(size = header.metadata.size, "rootfs size");
+    Ok(header.metadata.size)
 }
 
-fn result_metadata(env: &BuildEnv, rootfs_size: u64, envd_version: String) -> TemplateBuildMetadata {
+async fn scheduling_metadata(env: &BuildEnv, last: &LayerResult) -> Option<SchedulingMetadata> {
+    let build_id = Uuid::parse_str(&last.metadata.template.build_id).ok()?;
+    let build = env.node.templates.get(build_id).build().await.ok()?;
+    Some(from_headers(
+        build.rootfs.metadata.build_id,
+        Some(&build.memfile),
+        &build.rootfs,
+        0,
+    ))
+}
+
+fn result_metadata(
+    env: &BuildEnv,
+    rootfs_size: u64,
+    envd_version: String,
+    scheduling_metadata: Option<SchedulingMetadata>,
+) -> TemplateBuildMetadata {
     TemplateBuildMetadata {
         rootfs_size_key: (rootfs_size / MB) as i32,
         envd_version_key: envd_version,
         kernel_version: env.config.kernel_version.clone(),
         firecracker_version: env.config.firecracker_version.clone(),
-        scheduling_metadata: None,
+        scheduling_metadata,
     }
 }
 

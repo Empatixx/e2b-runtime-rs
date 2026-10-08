@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::{BasePhase, BaseSource};
 use crate::builder::ext4::{BLOCK_SIZE, Ext4};
 use crate::builder::layer::{
-    IO_ENGINE, LayerExecutor, MIN_ENVD_FOR_KVM_CLOCK, RESERVED_DISK_SPACE_MB, SandboxShape, new_sandbox_id,
-    sync_changes_to_disk,
+    BUILD_CACHE_ORIGIN, IO_ENGINE, LayerExecutor, MIN_ENVD_FOR_KVM_CLOCK, RESERVED_DISK_SPACE_MB, SandboxShape,
+    new_sandbox_id, sync_changes_to_disk,
 };
 use crate::builder::logs::ScopedLog;
 use crate::builder::oci::pull::{ImageConfig, parse_envs};
@@ -292,7 +292,9 @@ impl BaseBuild<'_> {
             let _ = sandbox.stop().await;
             return Err(BuildError::Internal(format!("error running sync command: {e}")));
         }
-        executor.pause_and_upload(sandbox, hash, metadata).await
+        executor
+            .pause_and_upload(sandbox, hash, metadata, BUILD_CACHE_ORIGIN)
+            .await
     }
 }
 

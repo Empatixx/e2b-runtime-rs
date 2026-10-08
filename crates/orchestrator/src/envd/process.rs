@@ -6,8 +6,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, BytesMut};
 use futures::StreamExt;
+use reqwest::Response;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::oneshot;
 
 const START_PATH: &str = "/process.Process/Start";
 const CONNECT_JSON: &str = "application/connect+json";
@@ -87,8 +89,24 @@ pub async fn run_command(
     envd: SocketAddr,
     command: &str,
     context: &CommandContext,
-    mut on_output: impl FnMut(&str, &str),
+    on_output: impl FnMut(&str, &str),
 ) -> Result<(), String> {
+    stream_output(start_process(envd, command, context).await?, on_output).await
+}
+
+pub async fn run_command_confirmed(
+    envd: SocketAddr,
+    command: &str,
+    context: &CommandContext,
+    started: oneshot::Sender<()>,
+    on_output: impl FnMut(&str, &str),
+) -> Result<(), String> {
+    let response = start_process(envd, command, context).await;
+    drop(started);
+    stream_output(response?, on_output).await
+}
+
+async fn start_process(envd: SocketAddr, command: &str, context: &CommandContext) -> Result<Response, String> {
     let response = reqwest::Client::builder()
         .timeout(COMMAND_HARD_TIMEOUT)
         .build()
@@ -101,15 +119,18 @@ pub async fn run_command(
         .send()
         .await
         .map_err(|e| format!("error starting process: unavailable: {e}"))?;
-    if response.status() != reqwest::StatusCode::OK {
-        let status = response.status();
-        return Err(format!(
+    match response.status() {
+        reqwest::StatusCode::OK => Ok(response),
+        status => Err(format!(
             "command failed: {}: HTTP status {} {}",
             http_to_code(status.as_u16()),
             status.as_u16(),
             status.canonical_reason().unwrap_or_default()
-        ));
+        )),
     }
+}
+
+async fn stream_output(response: Response, mut on_output: impl FnMut(&str, &str)) -> Result<(), String> {
     let mut stream = response.bytes_stream();
     let mut buffer = BytesMut::new();
     while let Some(chunk) = stream.next().await {
@@ -253,6 +274,36 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await });
         (address, receiver)
+    }
+
+    #[tokio::test]
+    async fn the_confirmed_run_signals_once_the_process_started() {
+        let (address, _) = fake_envd(vec![
+            frame(0, json!({"event": {"start": {"pid": 7}}})),
+            frame(
+                0,
+                json!({"event": {"end": {"exitCode": 3, "exited": true, "status": "exit status 3"}}}),
+            ),
+            frame(END_STREAM, json!({})),
+        ])
+        .await;
+        let (started, confirmed) = oneshot::channel();
+
+        let ran = run_command_confirmed(address, "exit 3", &CommandContext::default(), started, |_, _| {}).await;
+
+        assert_eq!(ran, Err("exit status 3".to_owned()));
+        assert!(confirmed.await.is_err());
+        let (unreachable, confirmed) = oneshot::channel();
+        let failed = run_command_confirmed(
+            "127.0.0.1:1".parse().unwrap(),
+            "x",
+            &CommandContext::default(),
+            unreachable,
+            |_, _| {},
+        )
+        .await;
+        assert!(failed.unwrap_err().starts_with("error starting process: unavailable: "));
+        assert!(confirmed.await.is_err());
     }
 
     #[tokio::test]

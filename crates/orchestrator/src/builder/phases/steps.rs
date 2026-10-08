@@ -10,10 +10,13 @@ use super::BuildEnv;
 use crate::builder::commands::{self, CommandRun};
 use crate::builder::hash::{step_hash, user_hash};
 use crate::builder::index::{CacheMiss, LayerIndex};
-use crate::builder::layer::{LayerBuild, LayerExecutor, SandboxCreator, SandboxShape, sync_changes_to_disk};
+use crate::builder::layer::{
+    BUILD_CACHE_ORIGIN, LayerBuild, LayerExecutor, SandboxCreator, SandboxShape, sync_changes_to_disk,
+};
 use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta, internal_context};
 use crate::builder::uploads::LayerUploads;
+use crate::envd::EnvdDefaults;
 use crate::proto::{LogLevel, TemplateStep};
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
 
@@ -153,6 +156,9 @@ impl StepPhase {
                 memory_mb: self.build.memory_mb,
                 envd_version: &self.build.envd_version,
             },
+            envd_defaults: EnvdDefaults::default(),
+            reserved_blocks: source.cached,
+            build_origin: BUILD_CACHE_ORIGIN,
         };
         let metadata = self
             .executor(log)

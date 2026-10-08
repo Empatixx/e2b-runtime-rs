@@ -23,6 +23,12 @@ const RETRY_DELAY: Duration = Duration::from_millis(5);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Default)]
+pub struct EnvdDefaults {
+    pub user: Option<String>,
+    pub workdir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnvdInit {
     pub access_token: Option<String>,
     pub default_user: Option<String>,

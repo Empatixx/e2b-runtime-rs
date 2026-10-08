@@ -14,7 +14,7 @@ pub struct TemplateMetadata {
     #[serde(default)]
     pub context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<Value>,
+    pub start: Option<Start>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +44,16 @@ pub struct TemplateVersions {
     pub build_id: String,
     pub kernel_version: String,
     pub firecracker_version: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Start {
+    #[serde(default)]
+    pub start_command: String,
+    #[serde(default)]
+    pub ready_command: String,
+    #[serde(default)]
+    pub context: Context,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,7 +271,10 @@ mod tests {
                 user: Some("user".to_owned()),
                 ..Context::default()
             },
-            start: Some(serde_json::json!({ "start_command": "x" })),
+            start: Some(Start {
+                start_command: "x".to_owned(),
+                ..Start::default()
+            }),
             from_image: Some("debian".to_owned()),
             prefetch: Some(Prefetch { memory: None }),
             filesystem_only: true,
@@ -286,5 +299,26 @@ mod tests {
             (next.prefetch, next.filesystem_only, next.fs_quiesced),
             (None, false, false)
         );
+    }
+
+    #[test]
+    fn start_is_written_with_every_key_like_go() {
+        let started = TemplateMetadata {
+            version: CURRENT_VERSION,
+            start: Some(Start {
+                start_command: "npm start".to_owned(),
+                ready_command: String::new(),
+                context: Context {
+                    user: Some("user".to_owned()),
+                    ..Context::default()
+                },
+            }),
+            ..TemplateMetadata::default()
+        };
+
+        let json = String::from_utf8(started.to_json()).unwrap();
+
+        assert!(json.contains(r#""start":{"start_command":"npm start","ready_command":"","context":{"user":"user"}}"#));
+        assert_eq!(TemplateMetadata::from_json(json.as_bytes()).unwrap(), started);
     }
 }
