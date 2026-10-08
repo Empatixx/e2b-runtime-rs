@@ -193,7 +193,7 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
     write_file(&cold, NOTE, NOTE_TEXT).await;
     run_in_guest(&cold, "sync").await;
     let build_id = Uuid::new_v4();
-    let build = cold.snapshot(&templates.storage, build_id).await.unwrap();
+    let build = cold.snapshot(&templates.storage, build_id).await.unwrap().build;
     cold.stop().await.unwrap();
     let leftovers: Vec<PathBuf> = ["snapfile", "memfile.diff", "rootfs.diff"]
         .iter()
@@ -271,4 +271,73 @@ async fn resume_without_a_snapfile_fails_cleanly() {
 
     assert!(error.contains("snapfile"), "{error}");
     assert!(!namespace_exists(&slot));
+}
+
+impl Templates {
+    async fn resume(&self, host: &Host, id: &str, slot: u32, build: &Build) -> Sandbox {
+        self.sandbox(host, id, fresh_slot(slot).await)
+            .rootfs(self.overlay(build.rootfs.clone(), id))
+            .memfile(self.memfile(build.memfile.clone()))
+            .resume(build, &self.storage)
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    let templates = templates(&host).await;
+
+    let first = templates
+        .sandbox(&host, "sbx-gen0", fresh_slot(4033).await)
+        .rootfs(templates.overlay(templates.template.clone(), "gen0"))
+        .cold_boot()
+        .await
+        .unwrap();
+    write_file(&first, "/home/user/a.txt", "disk a").await;
+    write_file(&first, "/dev/shm/a", "memory a").await;
+    run_in_guest(
+        &first,
+        "nohup sleep 600 >/dev/null 2>&1 & echo $! > /dev/shm/sleep.pid; sync",
+    )
+    .await;
+    let paused = first.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
+
+    let second = templates.resume(&host, "sbx-gen1", 4034, &paused.build).await;
+    write_file(&second, "/home/user/b.txt", "disk b").await;
+    write_file(&second, "/dev/shm/b", "memory b").await;
+    run_in_guest(&second, "sync").await;
+    let paused_again = second.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
+    println!(
+        "pause 2: memfile {} of {} bytes, rootfs {} bytes",
+        paused_again.memfile_bytes, paused_again.memory_bytes, paused_again.rootfs_bytes
+    );
+
+    let third = templates.resume(&host, "sbx-gen2", 4035, &paused_again.build).await;
+    run_in_guest(
+        &third,
+        "kill -0 $(cat /dev/shm/sleep.pid) && echo alive > /dev/shm/alive",
+    )
+    .await;
+    let files = [
+        read_file(&third, "/home/user/a.txt").await,
+        read_file(&third, "/home/user/b.txt").await,
+        read_file(&third, "/dev/shm/a").await,
+        read_file(&third, "/dev/shm/b").await,
+        read_file(&third, "/dev/shm/alive").await,
+    ];
+    third.stop().await.unwrap();
+
+    let expected = ["disk a", "disk b", "memory a", "memory b", "alive\n"].map(|text| (200, text.to_owned()));
+    assert_eq!(files, expected);
+    assert!(
+        paused_again.memfile_bytes < paused_again.memory_bytes / 2,
+        "second pause exported {} of {} memory bytes",
+        paused_again.memfile_bytes,
+        paused_again.memory_bytes
+    );
 }
