@@ -85,7 +85,7 @@ E2B_STORAGE_DIR=/srv/e2b/builds GRPC_PORT=5008 \
 sudo -E cargo run --release -p orchestrator
 ```
 
-It serves upstream's `SandboxService` (`/SandboxService/Create`, `Update`, `List`, `Delete`, `Pause`). Create resumes a build from storage (`E2B_STORAGE_DIR`, or `E2B_S3_BUCKET` / `E2B_S3_ENDPOINT` / `E2B_S3_KEY` / `E2B_S3_SECRET`). Sandboxes are removed at `end_time`. `crates/orchestrator/tests/grpc_contract.rs` shows the whole lifecycle.
+It serves upstream's `SandboxService` (`/SandboxService/Create`, `Update`, `List`, `Delete`, `Pause`). Create resumes a build from storage (`E2B_STORAGE_DIR`, or `E2B_S3_BUCKET` / `E2B_S3_ENDPOINT` / `E2B_S3_KEY` / `E2B_S3_SECRET`). Expiry belongs to the API, as upstream; set `E2B_LOCAL_EXPIRY=1` to remove sandboxes at `end_time` without one. `NODE_ID` names the node (default `local`), `E2B_WORK_DIR` and `E2B_CACHE_DIR` hold per-sandbox files and fetched chunks. SIGTERM deletes every sandbox. At startup the binary sweeps leftovers of a previous run (`ns-*` namespaces, `/sys/fs/cgroup/e2b/*`, the work dir), so it expects a dedicated node. `crates/orchestrator/tests/grpc_contract.rs` shows the whole lifecycle.
 
 ### SDK against a microVM (Linux, KVM)
 
