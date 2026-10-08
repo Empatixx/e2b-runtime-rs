@@ -159,6 +159,15 @@ impl MemoryServer {
     }
 }
 
+impl Prefaulter {
+    fn copy(&self, address: u64, data: &[u8], protect: bool) -> Result<CopyOutcome, String> {
+        self.uffd
+            .get_ref()
+            .copy(address, data, protect)
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Installer for Prefaulter {
     fn page_size(&self) -> u64 {
         self.regions.page_size()
@@ -185,12 +194,14 @@ impl Installer for Prefaulter {
             return Ok(Prefaulted::Skipped);
         }
         let protect = self.state.write_protect.load(Ordering::Relaxed);
-        match self
-            .uffd
-            .get_ref()
-            .copy(address, data, protect)
-            .map_err(|e| e.to_string())?
-        {
+        let outcome = match self.copy(address, data, protect)? {
+            CopyOutcome::NoWriteProtect => {
+                self.state.write_protect.store(false, Ordering::Relaxed);
+                self.copy(address, data, false)?
+            }
+            outcome => outcome,
+        };
+        match outcome {
             CopyOutcome::Copied => {
                 self.state.touched(page, Access::Prefetch);
                 Ok(Prefaulted::Installed)
