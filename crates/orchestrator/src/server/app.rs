@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use tonic::service::Routes;
@@ -16,6 +16,8 @@ use crate::builder::service::TemplateServer;
 use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
 use crate::proto::template_service_server::TemplateServiceServer;
+
+const CONSUMER_STATUS_CHECK_GRACE: Duration = Duration::from_secs(15);
 
 pub const COMMIT: &str = match option_env!("E2B_COMMIT") {
     Some(commit) => commit,
@@ -55,10 +57,21 @@ impl App {
         tokio::spawn(self.builds.clone().run_eviction());
     }
 
-    pub async fn wait_for_builds(&self) {
-        if let Some(templates) = &self.templates {
-            templates.wait_for_builds().await;
+    pub async fn wait_for_templates(&self, force_stop: bool, local: bool) -> Result<(), String> {
+        let Some(templates) = &self.templates else {
+            return Ok(());
+        };
+        if force_stop {
+            return Err("waiting for template builds: context canceled".to_owned());
         }
+        tracing::info!("Waiting for all build jobs to finish");
+        templates.wait_for_builds().await;
+        if !local {
+            tracing::info!("Waiting for consumers to check build status");
+            tokio::time::sleep(CONSUMER_STATUS_CHECK_GRACE).await;
+        }
+        tracing::info!("Template build queue cleaned");
+        Ok(())
     }
 
     pub fn router(&self) -> Router {

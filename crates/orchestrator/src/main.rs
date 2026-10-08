@@ -20,7 +20,9 @@ mod serve {
     use orchestrator::server::app::App;
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::node::Node;
-    use orchestrator::server::shutdown::{Drained, drain};
+    use orchestrator::server::shutdown::drain;
+
+    const CONSUMER_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
     use tokio::signal::unix::{Signal, SignalKind, signal};
 
     pub async fn run() -> Result<(), String> {
@@ -87,17 +89,22 @@ mod serve {
         .await?;
         let mut signals = Signals::new()?;
         signals.next().await;
-        tracing::info!("shutting down: draining sandboxes");
+        tracing::info!("Shutdown signal received");
         node.status.shut_down();
-        let drained = tokio::select! {
-            () = tokio::time::sleep(config.drain_sleep) => drain(|| node.registry.is_empty(), signals.next()).await,
-            () = signals.next() => Drained::Forced,
-        };
-        if drained == Drained::Forced {
-            tracing::info!("forced shutdown: stopping every sandbox");
-            node.shutdown().await;
+        if !config.local {
+            tokio::time::sleep(CONSUMER_GRACE).await;
         }
-        app.wait_for_builds().await;
+        if let Err(e) = app.wait_for_templates(config.force_stop, config.local).await {
+            tracing::error!(error = %e, "error while waiting for template manager to drain");
+        }
+        if !config.force_stop {
+            tracing::info!(
+                sandbox_count = node.registry.running().len(),
+                "Starting sandbox drain phase"
+            );
+            drain(|| node.registry.is_empty(), std::future::pending()).await;
+        }
+        node.shutdown().await;
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
         node.close().await;

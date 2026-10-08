@@ -14,7 +14,6 @@ const DEFAULT_NODE_ID: &str = "local";
 const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_SANDBOXES: i64 = 200;
 const DEFAULT_MAX_STARTING: usize = 3;
-const DEFAULT_DRAIN_SLEEP_MS: u64 = 15_000;
 const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
 const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
 const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
@@ -49,7 +48,8 @@ pub struct NodeConfig {
     pub labels: Vec<String>,
     pub max_sandboxes: i64,
     pub max_starting: usize,
-    pub drain_sleep: Duration,
+    pub local: bool,
+    pub force_stop: bool,
     pub build_cache_max_usage: f64,
     pub prefetch_from_trace: bool,
     pub use_memfd: bool,
@@ -110,9 +110,8 @@ impl NodeConfig {
                 .unwrap_or_default(),
             max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
             max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
-            drain_sleep: Duration::from_millis(
-                number(vars, "SHUTDOWN_DRAIN_SLEEP_MS")?.unwrap_or(DEFAULT_DRAIN_SLEEP_MS),
-            ),
+            local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
+            force_stop: go_bool(var("FORCE_STOP").as_deref(), "FORCE_STOP")?,
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
             prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
@@ -146,6 +145,17 @@ impl NodeConfig {
                 .region(region)
                 .build(),
         }
+    }
+}
+
+fn go_bool(value: Option<&str>, name: &str) -> Result<bool, String> {
+    match value {
+        None | Some("") => Ok(false),
+        Some("1" | "t" | "T" | "TRUE" | "true" | "True") => Ok(true),
+        Some("0" | "f" | "F" | "FALSE" | "false" | "False") => Ok(false),
+        Some(other) => Err(format!(
+            "env: parse error on field \"ForceStop\" of type \"bool\": strconv.ParseBool: parsing {other:?}: invalid syntax ({name})"
+        )),
     }
 }
 
@@ -200,7 +210,7 @@ mod tests {
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
-        assert_eq!(config.drain_sleep, Duration::from_secs(15));
+        assert!(!config.local && !config.force_stop);
         assert!(config.prefetch_from_trace);
         assert!(config.use_memfd);
         assert_eq!(
@@ -231,6 +241,28 @@ mod tests {
         assert_eq!(
             NodeConfig::from_vars(&vars(&[("GRPC_PORT", "x")])).unwrap_err(),
             "GRPC_PORT is not a port: x"
+        );
+    }
+
+    #[test]
+    fn environment_and_force_stop_follow_upstream() {
+        let config = NodeConfig::from_vars(&vars(&[
+            ("E2B_FIRECRACKER", "/f"),
+            ("E2B_KERNEL", "/k"),
+            ("E2B_STORAGE_DIR", "/s"),
+            ("ENVIRONMENT", "local"),
+            ("FORCE_STOP", "T"),
+        ]))
+        .unwrap();
+        assert!(config.local && config.force_stop);
+        assert!(
+            NodeConfig::from_vars(&vars(&[
+                ("E2B_FIRECRACKER", "/f"),
+                ("E2B_KERNEL", "/k"),
+                ("E2B_STORAGE_DIR", "/s"),
+                ("FORCE_STOP", "yes")
+            ]))
+            .is_err()
         );
     }
 }
