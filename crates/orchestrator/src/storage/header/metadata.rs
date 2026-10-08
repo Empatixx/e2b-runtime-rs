@@ -56,6 +56,10 @@ impl Metadata {
     pub fn format_version(&self) -> u64 {
         self.version & 0xFFFF
     }
+
+    pub fn supported_version(&self) -> bool {
+        (1..=3).contains(&self.format_version())
+    }
 }
 
 pub fn u64_at(bytes: &[u8], start: usize) -> u64 {

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::backend::Storage;
+use crate::storage::backend::{ObjectMetadata, PutError, Storage};
 use crate::template::metadata::TemplateMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +18,12 @@ struct IndexTemplate {
 const MINIMAL_CACHED_VERSION: u64 = 2;
 
 const NOT_EXIST: &str = "object does not exist";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveOutcome {
+    Saved,
+    RateLimited(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheMiss {
@@ -52,7 +58,7 @@ impl LayerIndex {
         }
     }
 
-    pub async fn save(&self, hash: &str, build_id: &str) -> Result<(), String> {
+    pub async fn save(&self, hash: &str, build_id: &str) -> Result<SaveOutcome, String> {
         let entry = IndexEntry {
             template: IndexTemplate {
                 build_id: build_id.to_owned(),
@@ -60,9 +66,15 @@ impl LayerIndex {
         };
         let json = serde_json::to_vec(&entry).map_err(|e| format!("error marshalling layer metadata: {e}"))?;
         self.index_storage
-            .put(&self.object(hash), Bytes::from(json))
+            .put_object(&self.object(hash), Bytes::from(json), &ObjectMetadata::default())
             .await
-            .map_err(|e| format!("error writing layer metadata to object: {e}"))
+            .map(|()| SaveOutcome::Saved)
+            .or_else(|e| match e {
+                PutError::RateLimited => Ok(SaveOutcome::RateLimited(format!(
+                    "error writing layer metadata to object: {e}"
+                ))),
+                PutError::Failed(_) => Err(format!("error writing layer metadata to object: {e}")),
+            })
     }
 
     pub async fn cached(&self, hash: &str) -> Result<CachedLayer, CacheMiss> {
@@ -244,5 +256,19 @@ mod tests {
         assert_eq!(join_path(&["scope", "files", "../x.tar"]), "scope/x.tar");
         assert_eq!(join_path(&["", "files", "h.tar"]), "files/h.tar");
         assert_eq!(join_path(&["a", "..", ".."]), "..");
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_save_is_reported_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = Storage::local(dir.path()).unwrap();
+        let index = LayerIndex::new(crate::storage::testing::rate_limited_gcs().await, templates, "scope");
+
+        assert_eq!(
+            index.save("h", "b").await,
+            Ok(SaveOutcome::RateLimited(
+                "error writing layer metadata to object: object access rate limited".to_owned()
+            ))
+        );
     }
 }

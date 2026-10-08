@@ -15,7 +15,11 @@ chmod +x "$WORK/firecracker"
 
 "$WORK/firecracker" --api-sock "$SOCKET" > "$WORK/console.log" 2>&1 &
 FC_PID=$!
-until [ -S "$SOCKET" ]; do sleep 0.05; done
+for _ in $(seq 1 200); do
+  [ -S "$SOCKET" ] && break
+  sleep 0.05
+done
+[ -S "$SOCKET" ] || { echo "firecracker API socket did not appear"; exit 1; }
 
 api() {
   curl -fsS --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H 'content-type: application/json' -d "$2"
@@ -28,7 +32,7 @@ for _ in $(seq 1 100); do
   grep -q "Linux version" "$WORK/console.log" && break
   sleep 0.1
 done
-grep -m1 "Linux version" "$WORK/console.log"
+grep -m1 "Linux version" "$WORK/console.log" || { echo "guest kernel did not boot"; exit 1; }
 kill "$FC_PID" 2>/dev/null || true
 
 if sudo modprobe ublk_drv && [ -e /dev/ublk-control ]; then echo "ublk: available"; else echo "ublk: NOT available"; fi

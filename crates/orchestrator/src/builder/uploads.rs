@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use super::builds::BuildInfo;
-use super::index::LayerIndex;
+use super::index::{LayerIndex, SaveOutcome};
 use crate::proto::LogLevel;
 
 pub struct LayerUpload {
@@ -58,17 +58,24 @@ async fn land(
     info: &BuildInfo,
 ) -> Result<(), String> {
     upload.await.map_err(|e| format!("error uploading snapshot: {e}"))?;
-    layer
+    let saved = layer
         .index
         .save(&layer.hash, &layer.build_id)
         .await
         .map_err(|e| format!("error saving UUID to hash mapping: {e}"))?;
+    warn_when_rate_limited(&saved, layer);
     info.log.push_with(
         LogLevel::Debug,
         format!("Saved: {}", layer.build_id),
         layer.fields.clone(),
     );
     Ok(())
+}
+
+fn warn_when_rate_limited(saved: &SaveOutcome, layer: &LayerUpload) {
+    if let SaveOutcome::RateLimited(error) = saved {
+        tracing::warn!(layer_build_id = %layer.build_id, layer_hash = %layer.hash, %error, "rate limited writing layer metadata to object, skipping");
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +122,31 @@ mod tests {
             .collect();
         assert_eq!(lines, vec!["Saved: build-a"]);
         assert_eq!(uploads.wait().await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_index_write_is_skipped_and_the_layer_still_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = Storage::local(dir.path()).unwrap();
+        let rate_limited = crate::storage::testing::rate_limited_gcs().await;
+        let info = crate::builder::builds::BuildCache::default().register("b").unwrap();
+        let uploads = LayerUploads::new(info.clone());
+        let layer = LayerUpload {
+            index: Arc::new(LayerIndex::new(rate_limited, templates, "scope")),
+            hash: "h".to_owned(),
+            build_id: "build-h".to_owned(),
+            fields: BTreeMap::new(),
+        };
+
+        uploads.start(async { Ok(()) }, layer);
+
+        assert_eq!(uploads.wait().await, Ok(()));
+        let lines: Vec<String> = info
+            .log
+            .query(&Default::default())
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect();
+        assert_eq!(lines, vec!["Saved: build-h"]);
     }
 }

@@ -48,12 +48,19 @@ impl Header {
             .collect()
     }
 
+    pub fn serialize(&self) -> Result<Vec<u8>, String> {
+        match self.metadata.supported_version() {
+            true => Ok(self.encode()),
+            false => Err(format!("unsupported header version {}", self.metadata.version)),
+        }
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let (metadata, entries) = bytes
             .split_first_chunk::<METADATA_SIZE>()
             .ok_or_else(|| format!("header too short: {} bytes", bytes.len()))?;
         let metadata = Metadata::decode(metadata);
-        if !(1..=3).contains(&metadata.format_version()) {
+        if !metadata.supported_version() {
             return Err(format!("unsupported header version {}", metadata.version));
         }
         let (entries, partial) = entries.as_chunks::<MAPPING_SIZE>();
@@ -67,7 +74,7 @@ impl Header {
     pub fn locate(&self, offset: u64) -> Result<Location, String> {
         let size = self.metadata.size;
         if offset >= size {
-            return Err(format!("offset {offset} is out of bounds (size {size})"));
+            return Err(format!("offset {offset} is out of bounds (size: {size})"));
         }
         let index = self.mappings.partition_point(|mapping| mapping.offset <= offset);
         let mapping = index
@@ -203,6 +210,19 @@ mod tests {
         assert_eq!(zero_block.unwrap_err(), "block size cannot be zero");
     }
 
+    #[test]
+    fn serialize_refuses_versions_outside_one_to_three() {
+        let metadata = Metadata {
+            version: 4,
+            ..Metadata::template(id(1), 4096, 4096)
+        };
+        let header = Header::new(metadata, Vec::new()).unwrap();
+
+        assert_eq!(header.serialize().unwrap_err(), "unsupported header version 4");
+        let supported = Header::new(Metadata::template(id(1), 4096, 4096), Vec::new()).unwrap();
+        assert_eq!(supported.serialize().unwrap(), supported.encode());
+    }
+
     use roaring::RoaringBitmap;
 
     fn mapping(offset: u64, length: u64, build: u8, storage_offset: u64) -> BuildMapping {
@@ -312,7 +332,7 @@ mod tests {
         );
         assert_eq!(
             header.locate(32768).unwrap_err(),
-            "offset 32768 is out of bounds (size 32768)"
+            "offset 32768 is out of bounds (size: 32768)"
         );
     }
 
