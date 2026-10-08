@@ -16,6 +16,10 @@ use super::mmds::MmdsMetadata;
 use crate::network::slot::{GUEST_MAC, TAP_NAME};
 use roaring::RoaringBitmap;
 
+const ENTROPY_BYTES_SIZE: u64 = 1024;
+const ENTROPY_REFILL_TIME: u64 = 100;
+const ENTROPY_ONE_TIME_BURST: u64 = 0;
+
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct FirecrackerClient {
@@ -38,11 +42,6 @@ impl FirecrackerClient {
 
     pub async fn boot(&self, config: &VmConfig, metadata: Option<&MmdsMetadata>) -> Result<(), String> {
         self.put(
-            "/machine-config",
-            json!({ "vcpu_count": config.vcpus, "mem_size_mib": config.memory_mib }),
-        )
-        .await?;
-        self.put(
             "/boot-source",
             json!({ "kernel_image_path": config.kernel, "boot_args": config.boot_args }),
         )
@@ -53,12 +52,14 @@ impl FirecrackerClient {
             json!({ "iface_id": "eth0", "host_dev_name": TAP_NAME, "guest_mac": GUEST_MAC }),
         )
         .await?;
+        self.put(
+            "/mmds/config",
+            json!({ "version": "V2", "network_interfaces": ["eth0"] }),
+        )
+        .await?;
+        self.put("/machine-config", machine_config(config)).await?;
+        self.put("/entropy", entropy_device()).await?;
         if let Some(metadata) = metadata {
-            self.put(
-                "/mmds/config",
-                json!({ "version": "V2", "network_interfaces": ["eth0"] }),
-            )
-            .await?;
             self.set_mmds(metadata).await?;
         }
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
@@ -178,6 +179,27 @@ impl FirecrackerClient {
             .then_some(body.clone())
             .ok_or_else(|| format!("{call}: {status}: {}", String::from_utf8_lossy(&body)))
     }
+}
+
+fn machine_config(config: &VmConfig) -> serde_json::Value {
+    json!({
+        "vcpu_count": config.vcpus,
+        "mem_size_mib": config.memory_mib,
+        "smt": std::env::consts::ARCH != "aarch64",
+        "track_dirty_pages": false
+    })
+}
+
+fn entropy_device() -> serde_json::Value {
+    json!({
+        "rate_limiter": {
+            "bandwidth": {
+                "one_time_burst": ENTROPY_ONE_TIME_BURST,
+                "size": ENTROPY_BYTES_SIZE,
+                "refill_time": ENTROPY_REFILL_TIME
+            }
+        }
+    })
 }
 
 fn root_drive(config: &VmConfig) -> serde_json::Value {
@@ -309,35 +331,43 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "/machine-config",
                 "/boot-source",
                 "/drives/rootfs",
                 "/network-interfaces/eth0",
                 "/mmds/config",
+                "/machine-config",
+                "/entropy",
                 "/mmds",
                 "/actions"
             ]
         );
         assert!(calls.iter().all(|call| call.method == "PUT"));
-        assert_eq!(calls[0].body, json!({ "vcpu_count": 1, "mem_size_mib": 512 }));
         assert_eq!(
-            calls[2].body,
+            calls[1].body,
             json!({ "drive_id": "rootfs", "path_on_host": "/dev/nbd3", "is_root_device": true, "is_read_only": false })
         );
         assert_eq!(
-            calls[3].body,
+            calls[2].body,
             json!({ "iface_id": "eth0", "host_dev_name": "tap0", "guest_mac": "02:FC:00:00:00:05" })
         );
         assert_eq!(
-            calls[4].body,
+            calls[3].body,
             json!({ "version": "V2", "network_interfaces": ["eth0"] })
         );
-        assert_eq!(calls[5].body, metadata().to_json());
-        assert_eq!(calls[6].body, json!({ "action_type": "InstanceStart" }));
+        assert_eq!(
+            calls[4].body,
+            json!({ "vcpu_count": 1, "mem_size_mib": 512, "smt": std::env::consts::ARCH != "aarch64", "track_dirty_pages": false })
+        );
+        assert_eq!(
+            calls[5].body,
+            json!({ "rate_limiter": { "bandwidth": { "one_time_burst": 0, "size": 1024, "refill_time": 100 } } })
+        );
+        assert_eq!(calls[6].body, metadata().to_json());
+        assert_eq!(calls[7].body, json!({ "action_type": "InstanceStart" }));
     }
 
     #[tokio::test]
-    async fn a_build_boot_skips_mmds_and_sets_the_io_engine() {
+    async fn a_build_boot_skips_only_the_mmds_data_and_sets_the_io_engine() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("fc.sock");
         let calls = fake_firecracker(socket.clone(), Faults::default()).await;
@@ -355,14 +385,16 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "/machine-config",
                 "/boot-source",
                 "/drives/rootfs",
                 "/network-interfaces/eth0",
+                "/mmds/config",
+                "/machine-config",
+                "/entropy",
                 "/actions"
             ]
         );
-        assert_eq!(calls[2].body["io_engine"], json!("Sync"));
+        assert_eq!(calls[1].body["io_engine"], json!("Sync"));
     }
 
     #[tokio::test]

@@ -122,11 +122,9 @@ impl Sandbox {
         let client = self.resources.vm.as_ref().ok_or("firecracker is not running")?.client();
         client.pause().await.map_err(|e| format!("failed to pause VM: {e}"))?;
         let snapfile = self.config.work_dir.join("shutdown.snapfile");
-        client
-            .create_snapshot(&snapfile)
-            .await
-            .map_err(|e| format!("error creating snapshot: {e}"))?;
+        let snapshot = client.create_snapshot(&snapfile).await;
         let _ = std::fs::remove_file(&snapfile);
+        snapshot.map_err(|e| format!("error creating snapshot: {e}"))?;
         let rootfs = self.config.rootfs.clone();
         std::mem::take(&mut self.resources)
             .release()

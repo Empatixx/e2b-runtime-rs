@@ -49,7 +49,7 @@ impl ConsoleTap {
         stdout: impl AsyncRead + Unpin + Send + 'static,
         stderr: impl AsyncRead + Unpin + Send + 'static,
         console: File,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let console = Arc::new(Mutex::new(console));
         let tap = self.clone();
         let out = tokio::spawn(copy_lines(
@@ -62,7 +62,7 @@ impl ConsoleTap {
         tokio::spawn(async move {
             let _ = tokio::join!(out, err);
             tap.close();
-        });
+        })
     }
 }
 
@@ -127,7 +127,7 @@ mod tests {
         let tap = ConsoleTap::open();
         let mut lines = tap.subscribe();
 
-        tap.pump(&b"one\r\ntwo\n"[..], &b"err\n"[..], console);
+        let _drained = tap.pump(&b"one\r\ntwo\n"[..], &b"err\n"[..], console);
 
         let mut received = Vec::new();
         while let Some(line) = lines.recv().await {

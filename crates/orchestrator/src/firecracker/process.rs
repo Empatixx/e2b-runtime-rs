@@ -9,6 +9,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 use super::client::FirecrackerClient;
 use super::console::ConsoleTap;
@@ -17,12 +18,14 @@ use super::launch::Launch;
 const READY_POLLS: u32 = 500;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CONSOLE_TAIL: usize = 2000;
+const CONSOLE_DRAIN: Duration = Duration::from_secs(1);
 
 pub struct FirecrackerProcess {
     child: Child,
     socket: PathBuf,
     console: PathBuf,
     console_tap: ConsoleTap,
+    drained: Option<JoinHandle<()>>,
 }
 
 impl FirecrackerProcess {
@@ -48,14 +51,16 @@ impl FirecrackerProcess {
             .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
         drop(cgroup_procs);
         let console_tap = ConsoleTap::open();
-        if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) {
-            console_tap.pump(stdout, stderr, console_file);
-        }
+        let drained = match (child.stdout.take(), child.stderr.take()) {
+            (Some(stdout), Some(stderr)) => Some(console_tap.pump(stdout, stderr, console_file)),
+            _ => None,
+        };
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
             console: console.clone(),
             console_tap,
+            drained,
         };
         process.wait_until_ready().await?;
         Ok(process)
@@ -67,7 +72,7 @@ impl FirecrackerProcess {
             .wait()
             .await
             .map_or_else(|e| format!("wait failed: {e}"), |status| status.to_string());
-        format!("firecracker exited: {status}: {}", self.console_tail())
+        format!("firecracker exited: {status}: {}", self.drained_tail().await)
     }
 
     pub fn console_lines(&self) -> UnboundedReceiver<String> {
@@ -96,7 +101,7 @@ impl FirecrackerProcess {
                 .try_wait()
                 .map_err(|e| format!("wait for firecracker: {e}"))?
             {
-                return Err(format!("firecracker exited: {status}: {}", self.console_tail()));
+                return Err(format!("firecracker exited: {status}: {}", self.drained_tail().await));
             }
             if UnixStream::connect(&self.socket).await.is_ok() {
                 return Ok(());
@@ -108,6 +113,13 @@ impl FirecrackerProcess {
             self.socket.display(),
             self.console_tail()
         ))
+    }
+
+    async fn drained_tail(&mut self) -> String {
+        if let Some(drained) = self.drained.take() {
+            let _ = tokio::time::timeout(CONSOLE_DRAIN, drained).await;
+        }
+        self.console_tail()
     }
 
     pub fn console_tail(&self) -> String {
