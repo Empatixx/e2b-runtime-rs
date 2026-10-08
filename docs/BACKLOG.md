@@ -103,4 +103,10 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `metadata.json` is not written with a build | M8 |
 | Pause has no envd freeze / fsfreeze before snapshot; the test runs `sync` in the guest itself | M8 |
 | If write-protect is unavailable the resumed pause falls back to resident−empty (correct but large); surface it as a metric | M8 |
+| The write-protect flag starts trusted before any WP copy succeeded; use Unknown/On/Off | M8 |
+| Pending REMOVE events and in-flight faults are not settled before the removed set is read at pause | M8 |
+| `memfile_pages` silently drops dirty bits beyond the region page list; error instead | any |
+| `Sandbox::snapshot` is public but leaves the VM paused; make it crate-private or resume after | M8 |
+| The server's 1 ms retry sleep is rebuilt on every completion; keep one timer across iterations | M8 |
+| No KVM test with multiple memory regions (guests above the MMIO gap) | M8 |
 

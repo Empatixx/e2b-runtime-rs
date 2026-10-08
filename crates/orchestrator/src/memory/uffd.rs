@@ -8,6 +8,7 @@ const EVENTS_PER_READ: usize = 64;
 const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
 const UFFD_EVENT_REMOVE: u8 = 0x15;
 const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1;
+const UFFD_PAGEFAULT_FLAG_WP: u64 = 1 << 1;
 const UFFDIO_COPY_MODE_WP: u64 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +113,10 @@ fn parse_events(bytes: &[u8]) -> io::Result<Vec<Event>> {
 fn parse_event(message: &[u8; UFFD_MSG_SIZE]) -> io::Result<Event> {
     let word = |index: usize| u64::from_ne_bytes(message[8 + index * 8..16 + index * 8].try_into().unwrap_or_default());
     match message[0] {
+        UFFD_EVENT_PAGEFAULT if word(0) & UFFD_PAGEFAULT_FLAG_WP != 0 => Err(io::Error::other(format!(
+            "write-protect fault at {:#x}: firecracker registered memory without WP_ASYNC",
+            word(1)
+        ))),
         UFFD_EVENT_PAGEFAULT => Ok(Event::PageFault {
             address: word(1),
             write: word(0) & UFFD_PAGEFAULT_FLAG_WRITE != 0,
@@ -358,6 +363,19 @@ mod tests {
         assert_eq!(
             uffd.copy(pages.address(), &source, true).unwrap(),
             CopyOutcome::NoWriteProtect
+        );
+    }
+
+    #[test]
+    fn synchronous_write_protect_faults_are_errors() {
+        let mut message = [0u8; UFFD_MSG_SIZE];
+        message[0] = UFFD_EVENT_PAGEFAULT;
+        message[8..16].copy_from_slice(&(UFFD_PAGEFAULT_FLAG_WP | UFFD_PAGEFAULT_FLAG_WRITE).to_ne_bytes());
+        message[16..24].copy_from_slice(&0x7000u64.to_ne_bytes());
+
+        assert_eq!(
+            parse_events(&message).unwrap_err().to_string(),
+            "write-protect fault at 0x7000: firecracker registered memory without WP_ASYNC"
         );
     }
 

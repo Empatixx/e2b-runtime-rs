@@ -58,10 +58,17 @@ impl SnapshotFiles {
 
 impl Sandbox {
     pub async fn pause(self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
+        let id = self.config.id.clone();
         let snapshot = self.snapshot(storage, build_id).await;
-        let stopped = self.stop().await;
-        let snapshot = snapshot?;
-        stopped.map(|()| snapshot)
+        match (snapshot, self.stop().await) {
+            (Ok(snapshot), Ok(())) => Ok(snapshot),
+            (Ok(snapshot), Err(teardown)) => {
+                tracing::error!(sandbox = %id, error = %teardown, "paused sandbox did not tear down cleanly");
+                Ok(snapshot)
+            }
+            (Err(e), Ok(())) => Err(e),
+            (Err(e), Err(teardown)) => Err(format!("{e}; teardown: {teardown}")),
+        }
     }
 
     pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {
@@ -106,6 +113,14 @@ impl Sandbox {
     }
 
     async fn memory_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
+        if self
+            .resources
+            .memory
+            .as_ref()
+            .is_some_and(|memory| memory.is_finished())
+        {
+            return Err("the memory server has stopped; the guest memory is not consistent".to_owned());
+        }
         let regions = client.memory_mappings().await?;
         let tracked = self
             .resources

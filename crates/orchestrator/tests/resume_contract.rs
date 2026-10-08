@@ -308,6 +308,8 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     let paused = first.pause(&templates.storage, Uuid::new_v4()).await.unwrap();
 
     let second = templates.resume(&host, "sbx-gen1", 4034, &paused.build).await;
+    assert_eq!(read_file(&second, "/dev/shm/a").await, (200, "memory a".to_owned()));
+    write_file(&second, "/dev/shm/a", "memory a2").await;
     write_file(&second, "/home/user/b.txt", "disk b").await;
     write_file(&second, "/dev/shm/b", "memory b").await;
     run_in_guest(&second, "sync").await;
@@ -341,8 +343,21 @@ async fn pause_and_resume_twice_keeps_files_memory_and_processes() {
     ];
     third.stop().await.unwrap();
 
-    let expected = ["disk a", "disk b", "memory a", "memory b", "alive\n"].map(|text| (200, text.to_owned()));
+    let disk_only = templates
+        .sandbox(&host, "sbx-gen2-disk", fresh_slot(4037).await)
+        .rootfs(templates.overlay(paused_again.build.rootfs.clone(), "sbx-gen2-disk"))
+        .cold_boot()
+        .await
+        .unwrap();
+    let disk_files = [
+        read_file(&disk_only, "/home/user/a.txt").await,
+        read_file(&disk_only, "/home/user/b.txt").await,
+    ];
+    disk_only.stop().await.unwrap();
+
+    let expected = ["disk a", "disk b", "memory a2", "memory b", "alive\n"].map(|text| (200, text.to_owned()));
     assert_eq!(files, expected);
+    assert_eq!(disk_files, ["disk a", "disk b"].map(|text| (200, text.to_owned())));
     assert!(!paused.tracked_writes, "a cold-booted sandbox has no write tracking");
     assert!(
         paused_again.tracked_writes,
