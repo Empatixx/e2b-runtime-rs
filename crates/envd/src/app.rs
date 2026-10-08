@@ -37,6 +37,7 @@ pub struct AppState {
     pub init_lock: tokio::sync::Mutex<()>,
     pub cpu: CpuUsage,
     pub freezer: Arc<WorkloadFreezer>,
+    pub fs_freeze_lock: tokio::sync::Mutex<()>,
     pub oom_kills: Option<Arc<OomWatcher>>,
 }
 
@@ -49,6 +50,7 @@ impl AppState {
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
             freezer,
+            fs_freeze_lock: tokio::sync::Mutex::new(()),
             config,
             defaults: RwLock::default(),
             env_vars: EnvVars::default(),

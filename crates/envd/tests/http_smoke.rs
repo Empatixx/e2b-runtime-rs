@@ -14,7 +14,7 @@ async fn health_returns_204_no_store() {
 async fn phase2_routes_return_501() {
     let (addr, _) = spawn_server_with_state().await;
     let c = reqwest::Client::new();
-    for p in ["/fsfreeze", "/fsthaw", "/collapse"] {
+    for p in ["/collapse"] {
         let res = c.post(format!("http://{addr}{p}")).send().await.unwrap();
         assert_eq!(res.status(), 501, "{p}");
     }
