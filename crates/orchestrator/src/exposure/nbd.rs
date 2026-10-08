@@ -59,6 +59,10 @@ mod linux {
             self.device.path()
         }
 
+        pub async fn flush(&self) -> Result<(), String> {
+            self.device.flush().await
+        }
+
         pub async fn ended(&self) {
             let mut serving = self.serving.clone();
             while serving.changed().await.is_ok() {}

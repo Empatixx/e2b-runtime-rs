@@ -163,6 +163,22 @@ impl Ext4 {
         }
     }
 
+    pub async fn replay_journal(&self) -> Result<String, String> {
+        match GoCommand::new(&self.tools.e2fsck)
+            .args([
+                "-p".as_ref(),
+                "-E".as_ref(),
+                "journal_only".as_ref(),
+                self.file.as_os_str(),
+            ])
+            .combined_output()
+            .await
+        {
+            Ok(output) => Ok(String::from_utf8_lossy(&output).trim().to_owned()),
+            Err(failure) => journal_failure(failure, E2FSCK_ACCEPTED_WITH_FIX),
+        }
+    }
+
     pub async fn remove_file(&self, path: &str) -> Result<(), String> {
         GoCommand::new(&self.tools.debugfs)
             .args(["-w".as_ref(), "-R".as_ref(), format!("rm \"{path}\"").as_ref(), self.file.as_os_str()])
@@ -233,6 +249,14 @@ fn integrity_failure(failure: CommandFailure, accepted: i32) -> Result<String, S
     }
 }
 
+fn journal_failure(failure: CommandFailure, accepted: i32) -> Result<String, String> {
+    let output = String::from_utf8_lossy(&failure.output).into_owned();
+    match failure.exit_code {
+        Some(code) if code & !accepted == 0 => Ok(output.trim().to_owned()),
+        _ => Err(format!("error replaying ext4 journal: {}\n{output}", failure.message)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -292,6 +316,39 @@ mod tests {
         assert_eq!(killed.unwrap_err(), "error running e2fsck: signal: killed\n");
         assert_eq!(failed.unwrap_err(), "error running e2fsck [exit 4]\nbroken\n");
         assert!(missing.unwrap_err().starts_with("error running e2fsck: fork/exec "));
+    }
+
+    #[tokio::test]
+    async fn journal_replay_accepts_corrected_and_reboot_exit_codes_only() {
+        let cases = [
+            ("exit 0", true),
+            ("exit 1", true),
+            ("exit 2", true),
+            ("exit 3", true),
+            ("exit 4", false),
+            ("exit 8", false),
+            ("kill -9 $$", false),
+        ];
+
+        for (script, ok) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let outcome = fake(dir.path(), script).replay_journal().await;
+            assert_eq!(outcome.is_ok(), ok, "{script}: {outcome:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_replay_failures_carry_the_exit_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let failed = fake(dir.path(), "echo broken; exit 4").replay_journal().await;
+        let replayed = fake(dir.path(), "echo recovering; exit 1").replay_journal().await;
+
+        assert_eq!(
+            failed.unwrap_err(),
+            "error replaying ext4 journal: exit status 4\nbroken\n"
+        );
+        assert_eq!(replayed.unwrap(), "recovering");
     }
 
     #[tokio::test]

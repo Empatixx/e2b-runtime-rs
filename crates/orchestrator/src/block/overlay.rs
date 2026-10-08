@@ -14,7 +14,12 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(base: Arc<BuildFile>, cache_path: &Path) -> io::Result<Self> {
-        let cache = BlockCache::create(cache_path, base.size(), base.block_size())?;
+        let size = base.size();
+        Self::with_size(base, cache_path, size)
+    }
+
+    pub fn with_size(base: Arc<BuildFile>, cache_path: &Path, size: u64) -> io::Result<Self> {
+        let cache = BlockCache::create(cache_path, size, base.block_size())?;
         Ok(Self { base, cache })
     }
 
@@ -142,6 +147,27 @@ mod tests {
         let resumed = BuildFile::new(header, Artifact::Rootfs, store);
         let after_resume = read_all(async |bytes| resumed.read_at(0, bytes).await).await;
         assert_eq!(after_resume, before_pause);
+    }
+
+    #[tokio::test]
+    async fn a_grown_overlay_reads_its_zeroed_tail_and_exports_it_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, template) = template(dir.path()).await;
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let base = BuildFile::new(template, Artifact::Rootfs, store);
+        let overlay = Overlay::with_size(Arc::new(base), &dir.path().join("overlay"), SIZE + 8192).unwrap();
+
+        overlay.write_zeroes_at(SIZE, 8192).unwrap();
+        overlay.write_at(SIZE + 4096, &[9; 4096]).unwrap();
+
+        let mut tail = vec![5; 8192];
+        overlay.read_at(SIZE, &mut tail).await.unwrap();
+        assert_eq!(overlay.size(), SIZE + 8192);
+        assert_eq!(tail, [vec![0; 4096], vec![9; 4096]].concat());
+        let mut diff_file = tempfile::tempfile().unwrap();
+        let diff = overlay.export_diff(&mut diff_file).unwrap();
+        assert_eq!(diff.dirty.iter().collect::<Vec<_>>(), vec![5]);
+        assert_eq!(diff.empty.iter().collect::<Vec<_>>(), vec![4]);
     }
 
     #[tokio::test]
