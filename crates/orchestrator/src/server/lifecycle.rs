@@ -46,49 +46,80 @@ enum Ending {
     },
 }
 
+struct Running {
+    sandbox: Sandbox,
+    slot: Slot,
+    info: Arc<Mutex<SandboxInfo>>,
+    commands: mpsc::Receiver<Command>,
+    node: Arc<Node>,
+}
+
 pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -> SandboxHandle {
     let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
     let handle = SandboxHandle {
         info: Arc::new(Mutex::new(info)),
         commands,
     };
-    tokio::spawn(run(sandbox, slot, handle.info.clone(), receiver, node));
+    let running = Running {
+        sandbox,
+        slot,
+        info: handle.info.clone(),
+        commands: receiver,
+        node,
+    };
+    tokio::spawn(running.run());
     handle
 }
 
-async fn run(
-    mut sandbox: Sandbox,
-    slot: Slot,
-    info: Arc<Mutex<SandboxInfo>>,
-    mut commands: mpsc::Receiver<Command>,
-    node: Arc<Node>,
-) {
-    let id = sandbox.id().to_owned();
-    let ending = loop {
-        let deadline = deadline_of(info.lock().end);
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(Command::Extend) => continue,
-                Some(Command::Pause { build_id, reply }) => break Ending::Pause { build_id, reply },
-                Some(Command::Delete) | None => break Ending::Stop { reason: "deleted".to_owned() },
-            },
-            () = tokio::time::sleep_until(deadline) => break Ending::Stop { reason: "expired".to_owned() },
-            reason = sandbox.died() => break Ending::Stop { reason },
+impl Running {
+    async fn run(mut self) {
+        let id = self.sandbox.id().to_owned();
+        let ending = self.wait_for_ending().await;
+        self.node.registry.stop(&id);
+        let paused = match ending {
+            Ending::Pause { build_id, reply } => Some((self.sandbox.pause(&self.node.storage, build_id).await, reply)),
+            Ending::Stop { reason } => {
+                tracing::info!(sandbox = %id, %reason, "stopping sandbox");
+                if let Err(e) = self.sandbox.stop().await {
+                    tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
+                }
+                None
+            }
+        };
+        let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
+        self.node.slots.release(self.slot);
+        self.node.registry.finish(&id);
+        if let Some((snapshot, reply)) = paused {
+            let _ = reply.send(snapshot);
         }
-    };
-    node.registry.remove(&id);
-    match ending {
-        Ending::Pause { build_id, reply } => drop(reply.send(sandbox.pause(&node.storage, build_id).await)),
-        Ending::Stop { reason } => {
-            tracing::info!(sandbox = %id, %reason, "stopping sandbox");
-            if let Err(e) = sandbox.stop().await {
-                tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
+    }
+
+    async fn wait_for_ending(&mut self) -> Ending {
+        loop {
+            let deadline = self.deadline();
+            tokio::select! {
+                command = self.commands.recv() => match command {
+                    Some(Command::Extend) => continue,
+                    Some(Command::Pause { build_id, reply }) => return Ending::Pause { build_id, reply },
+                    Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
+                },
+                () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },
+                reason = self.sandbox.died() => return Ending::Stop { reason },
             }
         }
     }
-    node.slots.release(slot);
+
+    fn deadline(&self) -> Option<Instant> {
+        let end = self.info.lock().end;
+        self.node
+            .local_expiry
+            .then(|| Instant::now() + end.duration_since(SystemTime::now()).unwrap_or_default())
+    }
 }
 
-fn deadline_of(end: SystemTime) -> Instant {
-    Instant::now() + end.duration_since(SystemTime::now()).unwrap_or_default()
+async fn expiry(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }

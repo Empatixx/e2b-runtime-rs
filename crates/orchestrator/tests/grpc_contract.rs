@@ -57,7 +57,7 @@ struct Host {
 }
 
 struct Cluster {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     client: SandboxServiceClient<Channel>,
     template_build: Uuid,
 }
@@ -115,7 +115,7 @@ async fn template_build(host: &Host, dir: &Path, storage: &Storage, slot: u32) -
     build_id
 }
 
-async fn cluster(host: &Host, pool: Pool) -> Cluster {
+async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
     let dir = tempfile::tempdir().unwrap();
     let store_root = dir.path().join("store");
     let storage = Storage::local(&store_root).unwrap();
@@ -136,6 +136,7 @@ async fn cluster(host: &Host, pool: Pool) -> Cluster {
         work_dir: dir.path().join("sandboxes"),
         cache_dir: dir.path().join("cache"),
         slots: pool.indices(),
+        local_expiry,
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -149,7 +150,7 @@ async fn cluster(host: &Host, pool: Pool) -> Cluster {
         .await
         .unwrap();
     Cluster {
-        _dir: dir,
+        dir,
         client,
         template_build,
     }
@@ -207,6 +208,26 @@ async fn note(base: &str) -> String {
         .unwrap()
 }
 
+fn template_size(host: &Host) -> u64 {
+    std::fs::metadata(&host.rootfs).unwrap().len()
+}
+
+fn nbd_connected_with_size(bytes: u64) -> bool {
+    std::fs::read_dir("/sys/block")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("nbd"))
+        .filter(|entry| entry.path().join("pid").exists())
+        .any(|entry| {
+            std::fs::read_to_string(entry.path().join("size")).is_ok_and(|sectors| {
+                sectors
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|sectors| sectors * 512 == bytes)
+            })
+        })
+}
+
 fn pool_namespaces_left(pool: Pool) -> Vec<String> {
     let listed = Command::new("ip").args(["netns", "list"]).output().unwrap();
     String::from_utf8_lossy(&listed.stdout)
@@ -239,7 +260,7 @@ async fn sandbox_lifecycle_over_grpc() {
         return;
     };
     let pool = LIFECYCLE_POOL;
-    let mut cluster = cluster(&host, pool).await;
+    let mut cluster = cluster(&host, pool, false).await;
     let build = cluster.template_build;
 
     let created = cluster
@@ -300,7 +321,7 @@ async fn sandbox_lifecycle_over_grpc() {
 
     cluster
         .client
-        .create(create_request("grpc-sbx-2", paused_build, Duration::from_secs(600)))
+        .create(create_request("grpc-sbx", paused_build, Duration::from_secs(600)))
         .await
         .unwrap();
     let resumed_slot = pool
@@ -312,7 +333,7 @@ async fn sandbox_lifecycle_over_grpc() {
     cluster
         .client
         .delete(SandboxDeleteRequest {
-            sandbox_id: "grpc-sbx-2".to_owned(),
+            sandbox_id: "grpc-sbx".to_owned(),
             kill_reason: None,
         })
         .await
@@ -320,15 +341,35 @@ async fn sandbox_lifecycle_over_grpc() {
     let again = cluster
         .client
         .delete(SandboxDeleteRequest {
-            sandbox_id: "grpc-sbx-2".to_owned(),
+            sandbox_id: "grpc-sbx".to_owned(),
             kill_reason: None,
         })
         .await
         .unwrap_err();
     assert_eq!(
         (again.code(), again.message()),
-        (Code::NotFound, "sandbox 'grpc-sbx-2' not found")
+        (Code::NotFound, "sandbox 'grpc-sbx' not found")
     );
+
+    let mut racer = cluster.client.clone();
+    let mut other = cluster.client.clone();
+    let (first, second) = tokio::join!(
+        racer.create(create_request("grpc-race", build, Duration::from_secs(600))),
+        other.create(create_request("grpc-race", build, Duration::from_secs(600)))
+    );
+    let codes = [first.err().map(|e| e.code()), second.err().map(|e| e.code())];
+    assert!(
+        codes == [None, Some(Code::AlreadyExists)] || codes == [Some(Code::AlreadyExists), None],
+        "{codes:?}"
+    );
+    cluster
+        .client
+        .delete(SandboxDeleteRequest {
+            sandbox_id: "grpc-race".to_owned(),
+            kill_reason: None,
+        })
+        .await
+        .unwrap();
 
     let missing = cluster
         .client
@@ -355,7 +396,7 @@ async fn an_expired_sandbox_is_removed() {
         eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
         return;
     };
-    let cluster = cluster(&host, EXPIRY_POOL).await;
+    let cluster = cluster(&host, EXPIRY_POOL, true).await;
     let mut client = cluster.client.clone();
 
     client
@@ -376,12 +417,10 @@ async fn an_expired_sandbox_is_removed() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(emptied, "the expired sandbox is still listed");
+    let released =
+        || !Path::new("/sys/fs/cgroup/e2b/grpc-expiring").exists() && pool_namespaces_left(EXPIRY_POOL).is_empty();
     assert!(
-        eventually(Duration::from_secs(20), || !Path::new(
-            "/sys/fs/cgroup/e2b/grpc-expiring"
-        )
-        .exists())
-        .await,
-        "the expired sandbox left its cgroup"
+        eventually(Duration::from_secs(20), released).await,
+        "the expired sandbox left its cgroup or slot"
     );
 }

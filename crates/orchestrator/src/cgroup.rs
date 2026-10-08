@@ -11,7 +11,9 @@ pub struct Cgroup {
 impl Cgroup {
     pub fn create(name: &str) -> io::Result<Self> {
         std::fs::create_dir_all(ROOT)?;
-        std::fs::write(Path::new(ROOT).join("cgroup.subtree_control"), CONTROLLERS)?;
+        if let Err(e) = std::fs::write(Path::new(ROOT).join("cgroup.subtree_control"), CONTROLLERS) {
+            tracing::warn!(error = %e, "could not enable cpu and memory controllers for sandboxes");
+        }
         let path = Path::new(ROOT).join(name);
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })

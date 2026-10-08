@@ -32,6 +32,7 @@ pub struct NodeConfig {
     pub work_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub slots: RangeInclusive<u32>,
+    pub local_expiry: bool,
 }
 
 impl NodeConfig {
@@ -59,6 +60,7 @@ impl NodeConfig {
                 .unwrap_or_else(|| "/var/lib/e2b/cache".to_owned())
                 .into(),
             slots: 1..=MAX_SLOT,
+            local_expiry: var("E2B_LOCAL_EXPIRY").is_some_and(|value| value == "1" || value == "true"),
         })
     }
 
@@ -120,6 +122,7 @@ mod tests {
 
         assert_eq!(config.grpc_port, 5008);
         assert_eq!(config.node_id, "local");
+        assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
         assert_eq!(
             config.storage,
             StorageConfig::Local {

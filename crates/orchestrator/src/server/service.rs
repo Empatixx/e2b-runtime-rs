@@ -33,21 +33,13 @@ impl SandboxService for SandboxServer {
             start: request.start_time.map_or_else(SystemTime::now, system_time),
             end: request.end_time.map_or_else(SystemTime::now, system_time),
         };
-        let id = config.sandbox_id.clone();
-        self.node.registry.reserve(&id).map_err(Status::already_exists)?;
-        match self.node.start(config, lifetime).await {
-            Ok(handle) => {
-                self.node.registry.activate(&id, handle);
-                Ok(Response::new(SandboxCreateResponse {
-                    client_id: self.node.node_id.clone(),
-                    ..SandboxCreateResponse::default()
-                }))
-            }
-            Err(status) => {
-                self.node.registry.remove(&id);
-                Err(status)
-            }
-        }
+        tokio::spawn(self.node.clone().create(config, lifetime))
+            .await
+            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
+        Ok(Response::new(SandboxCreateResponse {
+            client_id: self.node.node_id.clone(),
+            ..SandboxCreateResponse::default()
+        }))
     }
 
     async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
@@ -76,7 +68,7 @@ impl SandboxService for SandboxServer {
         let handle = self
             .node
             .registry
-            .remove(&id)
+            .stop(&id)
             .ok_or_else(|| Status::not_found(format!("sandbox '{id}' not found")))?;
         let _ = handle.commands.send(Command::Delete).await;
         Ok(Response::new(()))
@@ -85,20 +77,19 @@ impl SandboxService for SandboxServer {
     async fn pause(&self, request: Request<SandboxPauseRequest>) -> Result<Response<SandboxPauseResponse>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
+        self.running(&id, "sandbox not found")?;
         let build_id = Uuid::parse_str(&request.build_id)
             .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", request.build_id)))?;
         let handle = self
             .node
             .registry
-            .remove(&id)
+            .stop(&id)
             .ok_or_else(|| Status::not_found("sandbox not found"))?;
-        let (reply, snapshot) = tokio::sync::oneshot::channel();
-        let snapshotted = match handle.commands.send(Command::Pause { build_id, reply }).await {
-            Ok(()) => snapshot.await.unwrap_or_else(|_| Err("the sandbox stopped".to_owned())),
-            Err(_) => Err("the sandbox stopped".to_owned()),
-        };
+        let snapshotted = tokio::spawn(pause(handle, build_id))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
-            .map(|_| Response::new(SandboxPauseResponse::default()))
+            .map(|()| Response::new(SandboxPauseResponse::default()))
             .map_err(|e| Status::internal(format!("error snapshotting sandbox '{id}': {e}")))
     }
 
@@ -132,6 +123,19 @@ impl SandboxServer {
             ..RunningSandbox::default()
         }
     }
+}
+
+async fn pause(handle: SandboxHandle, build_id: Uuid) -> Result<(), String> {
+    let (reply, snapshot) = tokio::sync::oneshot::channel();
+    handle
+        .commands
+        .send(Command::Pause { build_id, reply })
+        .await
+        .map_err(|_| "the sandbox stopped".to_owned())?;
+    snapshot
+        .await
+        .map_err(|_| "the sandbox stopped".to_owned())?
+        .map(|_| ())
 }
 
 fn system_time(timestamp: prost_types::Timestamp) -> SystemTime {

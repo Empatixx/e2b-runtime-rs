@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tonic::Status;
 use uuid::Uuid;
 
 use super::config::NodeConfig;
-use super::lifecycle::{self, SandboxHandle, SandboxInfo};
+use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
 use super::slots::SlotPool;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
@@ -20,11 +20,15 @@ use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::storage::paths::BuildPaths;
 
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
+const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
+
 pub struct Node {
     pub node_id: String,
     pub storage: Storage,
     pub registry: Registry<SandboxHandle>,
     pub slots: SlotPool,
+    pub local_expiry: bool,
     store: Arc<DiffStore>,
     firecracker: PathBuf,
     kernel: PathBuf,
@@ -45,13 +49,69 @@ impl Node {
             storage,
             registry: Registry::new(),
             slots: SlotPool::new(config.slots.clone()),
+            local_expiry: config.local_expiry,
             firecracker: config.firecracker.clone(),
             kernel: config.kernel.clone(),
             work_dir: config.work_dir.clone(),
         })
     }
 
-    pub async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
+    pub fn work_dir_of(&self, id: &str) -> PathBuf {
+        self.work_dir.join(id)
+    }
+
+    pub async fn create(self: Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<(), Status> {
+        let id = config.sandbox_id.clone();
+        self.registry.reserve(&id).map_err(Status::already_exists)?;
+        match self.start(config, lifetime).await {
+            Ok(handle) => {
+                self.registry.activate(&id, handle);
+                Ok(())
+            }
+            Err(status) => {
+                self.registry.abandon(&id);
+                Err(status)
+            }
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        self.registry
+            .running()
+            .iter()
+            .filter_map(|handle| {
+                self.registry
+                    .stop(&handle.info.lock().config.sandbox_id)
+                    .map(|_| handle)
+            })
+            .for_each(|handle| drop(handle.commands.try_send(Command::Delete)));
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        while !self.registry.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    pub async fn sweep(&self) {
+        let namespaces = crate::system::output("ip", &["netns", "list"])
+            .await
+            .unwrap_or_default();
+        let slots: Vec<Slot> = namespaces
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter_map(|name| name.strip_prefix("ns-"))
+            .filter_map(|index| index.parse().ok())
+            .filter_map(|index| Slot::new(index).ok())
+            .collect();
+        for slot in slots {
+            if let Err(e) = slot.destroy().await {
+                tracing::warn!(slot = slot.index, error = %e, "could not remove a leftover slot");
+            }
+        }
+        sweep_cgroups(Path::new(CGROUP_ROOT));
+        let _ = std::fs::remove_dir_all(&self.work_dir);
+    }
+
+    async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
         let build = self.build_of(&config).await?;
         let slot = self.slots.acquire().map_err(Status::resource_exhausted)?;
         match self.resume(&config, &build, slot).await {
@@ -67,6 +127,7 @@ impl Node {
             )),
             Err(e) => {
                 self.slots.release(slot);
+                let _ = std::fs::remove_dir_all(self.work_dir_of(&config.sandbox_id));
                 Err(Status::internal(format!("failed to create sandbox: {e}")))
             }
         }
@@ -75,16 +136,15 @@ impl Node {
     async fn build_of(&self, config: &SandboxConfig) -> Result<Build, Status> {
         let build_id = Uuid::parse_str(&config.build_id)
             .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))?;
-        let present = self
-            .storage
-            .exists(&BuildPaths::new(build_id).memfile_header())
-            .await
-            .map_err(Status::internal)?;
-        if !present {
-            return Err(Status::failed_precondition(format!(
-                "sandbox files for '{}' not found",
-                config.sandbox_id
-            )));
+        let paths = BuildPaths::new(build_id);
+        let required = [paths.memfile_header(), paths.rootfs_header(), paths.snapfile()];
+        for object in &required {
+            if !self.storage.exists(object).await.map_err(Status::internal)? {
+                return Err(Status::failed_precondition(format!(
+                    "sandbox files for '{}' not found",
+                    config.sandbox_id
+                )));
+            }
         }
         Build::load(&self.storage, build_id)
             .await
@@ -92,7 +152,7 @@ impl Node {
     }
 
     async fn resume(&self, config: &SandboxConfig, build: &Build, slot: Slot) -> Result<Sandbox, String> {
-        let work_dir = self.work_dir.join(&config.sandbox_id);
+        let work_dir = self.work_dir_of(&config.sandbox_id);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let rootfs = Arc::new(BuildFile::new(
             build.rootfs.clone(),
@@ -123,4 +183,17 @@ impl Node {
             .resume(build, &self.storage)
             .await
     }
+}
+
+fn sweep_cgroups(root: &Path) {
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .for_each(|cgroup| {
+            let _ = std::fs::write(cgroup.join("cgroup.kill"), "1");
+            let _ = std::fs::remove_dir(&cgroup);
+        });
 }
