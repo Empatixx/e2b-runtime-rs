@@ -1,8 +1,31 @@
 # Parity audit: envd-rs vs upstream Go envd (2026-10-08)
 
-An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179`. The `.proto` files and `reference/envd.yaml` are byte-identical to that commit, so no RPC or field is missing at the proto level. `crates/envd/reference/UPSTREAM_COMMIT` still names `92197909…` and should be bumped.
+An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179`. Every gap it found is now ported; this file keeps the upstream facts the port follows.
 
-File RPCs, `/files`, URL signing and the process lifecycle are ported closely. The pause/resume control plane, cgroups, `/metrics`, port forwarding and live upgrade are mostly missing.
+## Status
+
+| Area | State | Where |
+|---|---|---|
+| `/metrics` with `oom_kills` (gopsutil formulas, `/dev/kmsg` watcher) | done | `host/metrics.rs`, `host/oom.rs` |
+| cgroup2 manager (`ptys`, `socats`, `user`), processes join before exec | done | `cgroups.rs` |
+| `/freeze`, `/unfreeze`, thaw watchdog, freeze audit | done | `cgroups/freeze.rs`, `cgroups/hierarchy.rs`, `controllers/freeze.rs` |
+| `/fsfreeze`, `/fsthaw` | done | `host/fsfreeze.rs` |
+| `/collapse` | done | `host/collapse.rs` |
+| `/upgrade` and live handover | done | `upgrade/`, `controllers/process/adopt.rs` |
+| `/init`: strict token, case-insensitive keys, `X-Envd-Memory`, `X-Envd-Handover`, MMDS self-heal, CA bundle, NFS mounts, hyperloop, AtomicMax timestamps | done | `controllers/init.rs`, `host/` |
+| Startup: `.E2B_SANDBOX`, MMDS poll from boot, `-commit`, 640 s idle timeout | done | `main.rs`, `host/mmds.rs` |
+| CORS like rs/cors | done | `middleware/cors.rs` |
+| Port forwarder (socat) | done | `port/` |
+| Log exporter to the MMDS collector | done | `logs/` |
+| connect-python legacy conversion | done | `middleware/legacy_sdk.rs`, `controllers/filesystem/legacy.rs` |
+| `/envs` Go encoder, DeadlineExceeded start errors | done | |
+| Version | `0.9.0` as upstream | |
+
+Not ported on purpose:
+- gopsutil's zoneinfo estimate of `Available` for kernels older than 3.14 (Firecracker guests always have `MemAvailable`).
+- The envd log lines are zerolog-shaped JSON with the upstream `logger` names; per-request operation ids are not reproduced.
+
+## Upstream facts
 
 - **G** = `e2b-runtime-origin-main-review/packages/envd`
 - **R** = `crates/envd/src`

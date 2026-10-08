@@ -66,7 +66,10 @@ impl<S: Subscriber> Layer<S> for JsonLines {
             message: None,
         };
         event.record(&mut fields);
-        let line = format!("{}\n", render(event.metadata().level(), fields));
+        let line = format!(
+            "{}\n",
+            render(event.metadata().level(), logger_name(event.metadata().target()), fields)
+        );
         if let Some(exporter) = &self.exporter {
             exporter.write(line.as_bytes());
         }
@@ -76,9 +79,19 @@ impl<S: Subscriber> Layer<S> for JsonLines {
     }
 }
 
-fn render(level: &Level, fields: Fields) -> String {
+fn logger_name(target: &str) -> &'static str {
+    match target {
+        target if target.starts_with("envd::controllers::process") => "process",
+        target if target.starts_with("envd::controllers::filesystem") => "filesystem",
+        target if target.starts_with("envd::port") => "port-forwarder",
+        _ => "envd",
+    }
+}
+
+fn render(level: &Level, logger: &str, fields: Fields) -> String {
     let mut object = Map::new();
     object.insert("level".to_owned(), Value::from(level_name(level)));
+    object.insert("logger".to_owned(), Value::from(logger));
     object.insert("timestamp".to_owned(), Value::from(timestamp()));
     object.extend(fields.fields);
     if let Some(message) = fields.message {
@@ -115,5 +128,8 @@ mod tests {
         assert_eq!(level_name(&Level::WARN), "warn");
         assert_eq!(level_name(&Level::ERROR), "error");
         assert!(timestamp().ends_with('Z'));
+        assert_eq!(logger_name("envd::controllers::process::spawn"), "process");
+        assert_eq!(logger_name("envd::port::forward"), "port-forwarder");
+        assert_eq!(logger_name("envd::controllers::init"), "envd");
     }
 }
