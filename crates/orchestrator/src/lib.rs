@@ -13,6 +13,7 @@ pub mod sandbox;
 pub mod server;
 pub mod storage;
 pub mod system;
+pub mod template;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

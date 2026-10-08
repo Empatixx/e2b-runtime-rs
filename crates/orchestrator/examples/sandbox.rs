@@ -24,6 +24,7 @@ mod linux {
     use orchestrator::sandbox::config::SandboxBuilder;
     use orchestrator::storage::backend::Storage;
     use orchestrator::storage::header::{Header, Metadata};
+    use orchestrator::template::cache::TemplateCache;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::signal::unix::{SignalKind, signal};
     use uuid::Uuid;
@@ -41,6 +42,7 @@ mod linux {
         dir: tempfile::TempDir,
         storage: Storage,
         store: Arc<DiffStore>,
+        cache: TemplateCache,
         header: Header,
     }
 
@@ -99,7 +101,7 @@ mod linux {
                 Artifact::Memfile,
                 template.store.clone(),
             )))
-            .resume(&build, &template.storage)
+            .resume(&template.snapfile(build.build_id).await?)
             .await?;
         println!("resumed in {} ms", started.elapsed().as_millis());
         Ok(sandbox)
@@ -116,12 +118,18 @@ mod linux {
                 .len();
             let header = Header::new(Metadata::template(template_id, 4096, size), Vec::new())?;
             let store = Arc::new(DiffStore::new(storage.clone(), dir.path().join("cache")));
+            let cache = TemplateCache::new(storage.clone(), dir.path().join("templates"));
             Ok(Self {
                 dir,
                 storage,
                 store,
+                cache,
                 header,
             })
+        }
+
+        async fn snapfile(&self, build_id: Uuid) -> Result<PathBuf, String> {
+            self.cache.get(build_id).snapfile().await.map_err(|e| e.to_string())
         }
 
         fn overlay(&self, header: Header, name: &str) -> Result<Arc<Overlay>, String> {

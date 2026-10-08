@@ -14,6 +14,7 @@ use orchestrator::sandbox::config::SandboxBuilder;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::build::Build;
 use orchestrator::storage::header::{Header, Metadata};
+use orchestrator::template::cache::TemplateCache;
 use uuid::Uuid;
 
 const ACCESS_TOKEN: &str = "resume-token";
@@ -30,6 +31,7 @@ struct Templates {
     _dir: tempfile::TempDir,
     storage: Storage,
     store: Arc<DiffStore>,
+    cache: TemplateCache,
     template: Header,
     work: PathBuf,
 }
@@ -64,10 +66,12 @@ async fn templates(host: &Host) -> Templates {
     let template = Header::new(Metadata::template(template_id, 4096, size), Vec::new()).unwrap();
     let store = Arc::new(DiffStore::new(storage.clone(), dir.path().join("cache")));
     let work = dir.path().join("work");
+    let cache = TemplateCache::new(storage.clone(), dir.path().join("templates"));
     Templates {
         _dir: dir,
         storage,
         store,
+        cache,
         template,
         work,
     }
@@ -205,14 +209,16 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
         "snapshot files left in the work dir: {leftovers:?}"
     );
 
-    let loaded = Build::load(&templates.storage, build_id).await.unwrap();
+    let template = templates.cache.get(build_id);
+    let loaded = template.build().await.unwrap();
     assert_eq!(loaded, build);
+    let snapfile = template.snapfile().await.unwrap();
     let started = Instant::now();
     let resumed = templates
         .sandbox(&host, "sbx-resumed", resumed_slot)
         .rootfs(templates.overlay(loaded.rootfs.clone(), "resumed"))
         .memfile(templates.memfile(loaded.memfile.clone()))
-        .resume(&loaded, &templates.storage)
+        .resume(&snapfile)
         .await
         .unwrap();
     let took = started.elapsed();
@@ -253,24 +259,18 @@ async fn resume_without_a_snapfile_fails_cleanly() {
     };
     let templates = templates(&host).await;
     let slot = fresh_slot(4032).await;
-    let build_id = Uuid::new_v4();
     let memfile = Header::new(Metadata::template(Uuid::nil(), 4096, 1 << 20), Vec::new()).unwrap();
-    let build = Build {
-        build_id,
-        memfile: memfile.clone(),
-        rootfs: templates.template.clone(),
-    };
 
     let error = templates
         .sandbox(&host, "sbx-no-snapfile", slot)
         .rootfs(templates.overlay(templates.template.clone(), "no-snapfile"))
         .memfile(templates.memfile(memfile))
-        .resume(&build, &templates.storage)
+        .resume(&templates.work.join("missing.snapfile"))
         .await
         .err()
         .unwrap();
 
-    assert!(error.contains("snapfile"), "{error}");
+    assert!(error.contains("snapshot"), "{error}");
     assert!(!namespace_exists(&slot));
 }
 
@@ -279,7 +279,7 @@ impl Templates {
         self.sandbox(host, id, fresh_slot(slot).await)
             .rootfs(self.overlay(build.rootfs.clone(), id))
             .memfile(self.memfile(build.memfile.clone()))
-            .resume(build, &self.storage)
+            .resume(&self.cache.get(build.build_id).snapfile().await.unwrap())
             .await
             .unwrap()
     }

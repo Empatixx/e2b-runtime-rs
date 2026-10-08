@@ -135,6 +135,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
         storage: StorageConfig::Local { root: store_root },
         work_dir: dir.path().join("sandboxes"),
         cache_dir: dir.path().join("cache"),
+        template_cache_dir: dir.path().join("templates"),
         slots: pool.indices(),
         local_expiry,
     };

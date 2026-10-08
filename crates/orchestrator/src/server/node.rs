@@ -18,7 +18,8 @@ use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
-use crate::storage::paths::BuildPaths;
+use crate::template::cache::TemplateCache;
+use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
@@ -29,6 +30,7 @@ pub struct Node {
     pub registry: Registry<SandboxHandle>,
     pub slots: SlotPool,
     pub local_expiry: bool,
+    pub templates: Arc<TemplateCache>,
     store: Arc<DiffStore>,
     firecracker: PathBuf,
     kernel: PathBuf,
@@ -46,6 +48,7 @@ impl Node {
         Ok(Self {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
+            templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
             registry: Registry::new(),
             slots: SlotPool::new(config.slots.clone()),
@@ -112,9 +115,11 @@ impl Node {
     }
 
     async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
-        let build = self.build_of(&config).await?;
+        let template = self.template_of(&config)?;
+        let (build, snapfile) =
+            tokio::try_join!(template.build(), template.snapfile()).map_err(|e| template_status(&config, e))?;
         let slot = self.slots.acquire().map_err(Status::resource_exhausted)?;
-        match self.resume(&config, &build, slot).await {
+        match self.resume(&config, &build, &snapfile, slot).await {
             Ok(sandbox) => Ok(lifecycle::spawn(
                 sandbox,
                 slot,
@@ -133,25 +138,19 @@ impl Node {
         }
     }
 
-    async fn build_of(&self, config: &SandboxConfig) -> Result<Build, Status> {
-        let build_id = Uuid::parse_str(&config.build_id)
-            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))?;
-        let paths = BuildPaths::new(build_id);
-        let required = [paths.memfile_header(), paths.rootfs_header(), paths.snapfile()];
-        for object in &required {
-            if !self.storage.exists(object).await.map_err(Status::internal)? {
-                return Err(Status::failed_precondition(format!(
-                    "sandbox files for '{}' not found",
-                    config.sandbox_id
-                )));
-            }
-        }
-        Build::load(&self.storage, build_id)
-            .await
-            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))
+    fn template_of(&self, config: &SandboxConfig) -> Result<Arc<Template>, Status> {
+        Uuid::parse_str(&config.build_id)
+            .map(|build_id| self.templates.get(build_id))
+            .map_err(|e| Status::invalid_argument(format!("invalid build id '{}': {e}", config.build_id)))
     }
 
-    async fn resume(&self, config: &SandboxConfig, build: &Build, slot: Slot) -> Result<Sandbox, String> {
+    async fn resume(
+        &self,
+        config: &SandboxConfig,
+        build: &Build,
+        snapfile: &Path,
+        slot: Slot,
+    ) -> Result<Sandbox, String> {
         let work_dir = self.work_dir_of(&config.sandbox_id);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let rootfs = Arc::new(BuildFile::new(
@@ -180,8 +179,17 @@ impl Node {
                 env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),
                 ..EnvdInit::default()
             })
-            .resume(build, &self.storage)
+            .resume(snapfile)
             .await
+    }
+}
+
+fn template_status(config: &SandboxConfig, error: TemplateError) -> Status {
+    match error {
+        TemplateError::NotFound(_) => {
+            Status::failed_precondition(format!("sandbox files for '{}' not found", config.sandbox_id))
+        }
+        TemplateError::Failed(e) => Status::internal(format!("failed to create sandbox: {e}")),
     }
 }
 

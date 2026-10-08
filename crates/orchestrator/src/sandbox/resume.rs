@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,16 +7,14 @@ use super::config::SandboxBuilder;
 use crate::block::build_file::BuildFile;
 use crate::memory::handshake::UffdListener;
 use crate::memory::server::MemoryServer;
-use crate::storage::backend::Storage;
-use crate::storage::build::Build;
 use crate::system::all_ok;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl SandboxBuilder {
-    pub async fn resume(self, build: &Build, storage: &Storage) -> Result<Sandbox, String> {
+    pub async fn resume(self, snapfile: &Path) -> Result<Sandbox, String> {
         let mut sandbox = Sandbox::new(self.build()?);
-        match sandbox.start_resumed(build, storage).await {
+        match sandbox.start_resumed(snapfile).await {
             Ok(()) => Ok(sandbox),
             Err(e) => Err(sandbox.fail(e).await),
         }
@@ -24,10 +22,10 @@ impl SandboxBuilder {
 }
 
 impl Sandbox {
-    async fn start_resumed(&mut self, build: &Build, storage: &Storage) -> Result<(), String> {
+    async fn start_resumed(&mut self, snapfile: &Path) -> Result<(), String> {
         let memfile = self.config.memfile.clone().ok_or("memfile is required to resume")?;
-        let snapfile = self.download_snapfile(build, storage).await?;
-        self.phases.mark("template");
+        std::fs::create_dir_all(&self.config.work_dir)
+            .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
         let socket = self.config.work_dir.join("uffd.sock");
         let listener = UffdListener::bind(&socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
         let rootfs = self.attach_disk_and_slot().await?;
@@ -37,10 +35,7 @@ impl Sandbox {
         let log = self.config.work_dir.join("firecracker.log");
         std::fs::File::create(&log).map_err(|e| format!("create {}: {e}", log.display()))?;
         client.set_logger(&log).await?;
-        let (loaded, served) = tokio::join!(
-            client.load_snapshot(&snapfile, &socket),
-            serve_memory(listener, memfile)
-        );
+        let (loaded, served) = tokio::join!(client.load_snapshot(snapfile, &socket), serve_memory(listener, memfile));
         let started = served.map(|server| {
             self.resources.memory = Some(server);
         });
@@ -59,7 +54,7 @@ impl Sandbox {
         Ok(())
     }
 
-    fn resume_diagnostics(&self, log: &std::path::Path) -> String {
+    fn resume_diagnostics(&self, log: &Path) -> String {
         let firecracker_log = std::fs::read_to_string(log).unwrap_or_default();
         let start = firecracker_log.len().saturating_sub(4000);
         format!(
@@ -72,19 +67,6 @@ impl Sandbox {
             firecracker_log.get(start..).unwrap_or_default(),
             self.console_tail()
         )
-    }
-
-    async fn download_snapfile(&self, build: &Build, storage: &Storage) -> Result<PathBuf, String> {
-        let dir = &self.config.work_dir;
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| format!("create work dir {}: {e}", dir.display()))?;
-        let bytes = storage.get(&build.paths().snapfile()).await?;
-        let path = dir.join("snapfile");
-        tokio::fs::write(&path, bytes)
-            .await
-            .map_err(|e| format!("write {}: {e}", path.display()))
-            .map(|()| path)
     }
 }
 

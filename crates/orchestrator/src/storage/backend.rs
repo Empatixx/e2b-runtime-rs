@@ -67,6 +67,14 @@ impl Storage {
         object.bytes().await.map_err(|e| format!("read {path}: {e}"))
     }
 
+    pub async fn find(&self, path: &str) -> Result<Option<Bytes>, String> {
+        match self.store.get(&ObjectPath::from(path)).await {
+            Ok(object) => object.bytes().await.map(Some).map_err(|e| format!("read {path}: {e}")),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(format!("get {path}: {e}")),
+        }
+    }
+
     pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
         let bytes = self
             .store
