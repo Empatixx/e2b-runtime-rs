@@ -47,7 +47,7 @@ impl BuildInfo {
             .await
             .ok()
             .and_then(|result| result.clone())
-            .unwrap_or_else(|| BuildResult {
+            .unwrap_or(BuildResult {
                 status: TemplateBuildState::Failed,
                 reason: None,
                 metadata: None,
