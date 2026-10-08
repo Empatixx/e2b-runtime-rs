@@ -93,11 +93,26 @@ async fn finish(mut in_flight: JoinSet<Result<(), String>>) -> Result<(), String
 }
 
 async fn next_request(reader: &mut OwnedReadHalf) -> Result<Option<Request>, String> {
-    let mut header = [0; REQUEST_SIZE];
-    match reader.read_exact(&mut header).await {
-        Ok(_) => Request::decode(&header).map(Some),
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+    match read_header(reader).await {
+        Ok(Some(header)) => Request::decode(&header).map(Some),
+        Ok(None) => Ok(None),
         Err(e) => Err(format!("read nbd request: {e}")),
+    }
+}
+
+async fn read_header(reader: &mut OwnedReadHalf) -> io::Result<Option<[u8; REQUEST_SIZE]>> {
+    let mut header = [0; REQUEST_SIZE];
+    let mut filled = 0;
+    while filled < REQUEST_SIZE {
+        match reader.read(&mut header[filled..]).await? {
+            0 => break,
+            count => filled += count,
+        }
+    }
+    match filled {
+        0 => Ok(None),
+        REQUEST_SIZE => Ok(Some(header)),
+        _ => Err(io::ErrorKind::UnexpectedEof.into()),
     }
 }
 
@@ -122,23 +137,29 @@ async fn answer<D: BlockDevice>(
     request: Request,
     payload: Vec<u8>,
 ) -> Result<(), String> {
-    let result = perform(&*device, &request, payload).await;
+    let result = perform(device, &request, payload).await;
     let response = Response::from_result(result, &request);
     send(&replies, request.handle, response).await
 }
 
-async fn perform<D: BlockDevice>(device: &D, request: &Request, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+async fn perform<D: BlockDevice>(device: Arc<D>, request: &Request, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+    let (offset, length) = (request.offset, u64::from(request.length));
     match request.command {
         Command::Read => {
             let mut data = vec![0; request.length as usize];
-            device.read_at(request.offset, &mut data).await.map(|()| data)
+            device.read_at(offset, &mut data).await.map(|()| data)
         }
-        Command::Write => device.write_at(request.offset, &payload).map(|()| Vec::new()),
-        Command::Trim | Command::WriteZeroes => device
-            .write_zeroes_at(request.offset, u64::from(request.length))
-            .map(|()| Vec::new()),
+        Command::Write => blocking(move || device.write_at(offset, &payload)).await,
+        Command::Trim | Command::WriteZeroes => blocking(move || device.write_zeroes_at(offset, length)).await,
         Command::Flush | Command::Disconnect => Ok(Vec::new()),
     }
+}
+
+async fn blocking(work: impl FnOnce() -> Result<(), String> + Send + 'static) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("nbd blocking task: {e}"))?
+        .map(|()| Vec::new())
 }
 
 async fn send(replies: &Replies, handle: [u8; 8], response: Response) -> Result<(), String> {
@@ -262,6 +283,21 @@ mod tests {
         assert_eq!(
             client.server.await.unwrap(),
             Err("bad nbd request magic 0x0".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_request_header_is_an_error() {
+        let mut client = start().await;
+        client
+            .socket
+            .write_all(&[0x25, 0x60, 0x95, 0x13, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        client.socket.shutdown().await.unwrap();
+        assert_eq!(
+            client.server.await.unwrap(),
+            Err("read nbd request: unexpected end of file".to_owned())
         );
     }
 

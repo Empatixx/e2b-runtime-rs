@@ -24,6 +24,34 @@ fn run(program: &str, args: &[&str]) {
     assert!(status.success(), "{program} {args:?} failed: {status}");
 }
 
+struct Mount {
+    target: String,
+    mounted: bool,
+}
+
+impl Mount {
+    fn new(device: &str, target: &str) -> Self {
+        run("mount", &[device, target]);
+        Self {
+            target: target.to_owned(),
+            mounted: true,
+        }
+    }
+
+    fn unmount(mut self) {
+        run("umount", &[&self.target]);
+        self.mounted = false;
+    }
+}
+
+impl Drop for Mount {
+    fn drop(&mut self) {
+        if self.mounted {
+            let _ = Command::new("umount").args(["-l", &self.target]).status();
+        }
+    }
+}
+
 async fn overlay_over(header: Header, store: Arc<DiffStore>, path: &Path) -> Arc<Overlay> {
     let base = Arc::new(BuildFile::new(header, Artifact::Rootfs, store));
     Arc::new(Overlay::new(base, path).unwrap())
@@ -57,9 +85,9 @@ async fn ext4_on_nbd_survives_pause_and_resume() {
     let device = exposure.path();
     let device = device.to_str().unwrap();
     run("mkfs.ext4", &["-q", "-F", device]);
-    run("mount", &[device, mount]);
+    let mounted = Mount::new(device, mount);
     std::fs::write(Path::new(mount).join("hello.txt"), "from the first sandbox").unwrap();
-    run("umount", &[mount]);
+    mounted.unmount();
     exposure.close().await.unwrap();
 
     let mut diff_file = tempfile::tempfile().unwrap();
@@ -81,9 +109,9 @@ async fn ext4_on_nbd_survives_pause_and_resume() {
     let resumed = overlay_over(snapshot, store, &dir.path().join("overlay-2")).await;
     let exposure = expose(resumed).await.unwrap();
     let device = exposure.path();
-    run("mount", &[device.to_str().unwrap(), mount]);
+    let mounted = Mount::new(device.to_str().unwrap(), mount);
     let content = std::fs::read_to_string(Path::new(mount).join("hello.txt")).unwrap();
-    run("umount", &[mount]);
+    mounted.unmount();
     exposure.close().await.unwrap();
 
     assert_eq!(content, "from the first sandbox");
