@@ -4,7 +4,10 @@ use std::process::Command;
 
 use orchestrator::firecracker::launch::Launch;
 use orchestrator::firecracker::process::FirecrackerProcess;
-use orchestrator::network::slot::Slot;
+use std::time::Duration;
+
+use orchestrator::network::pool::{NetworkPool, RETURN_DELAY};
+use orchestrator::network::slot::{HostSlots, Slot, host_slot_storage};
 
 fn root() -> bool {
     nix::unistd::geteuid().is_root()
@@ -36,11 +39,10 @@ async fn slot_is_created_once_and_destroyed_cleanly() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&tap_mac.stdout).trim(), "02:fc:00:00:00:06");
 
-    let again = slot.create().await.unwrap_err();
-    assert!(again.contains("ip netns add ns-4001"), "{again}");
+    slot.create().await.unwrap();
     assert!(
         succeeds("ip", &["link", "show", "veth-4001"]),
-        "a failed create must not tear down the live slot"
+        "creating over a stale namespace rebuilds the slot"
     );
 
     slot.destroy().await.unwrap();
@@ -213,4 +215,33 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
     let error = result.err().expect("a firecracker that exits must not look ready");
     assert!(error.starts_with("firecracker exited"), "{error}");
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_recycles_a_returned_slot() {
+    if !root() {
+        eprintln!("skipping: needs root");
+        return;
+    }
+    for index in 4020..=4021 {
+        let _ = Slot::new(index).unwrap().destroy().await;
+    }
+    let pool = NetworkPool::new(HostSlots, host_slot_storage(4020..=4021));
+    pool.start();
+
+    let slot = pool.get().await.unwrap();
+    pool.return_slot(slot);
+    tokio::time::sleep(RETURN_DELAY + Duration::from_millis(500)).await;
+    let recycled = pool.get().await.unwrap();
+    let host_veth = slot.host_veth_ip().to_string();
+    let reachable = succeeds(
+        "ip",
+        &["netns", "exec", &slot.namespace(), "ping", "-c1", "-W1", &host_veth],
+    );
+    pool.close().await;
+
+    assert_eq!(recycled, slot);
+    assert!(reachable, "the recycled slot lost its veth");
+    assert!(!succeeds("ip", &["netns", "exec", "ns-4020", "true"]));
+    assert!(!succeeds("ip", &["netns", "exec", "ns-4021", "true"]));
 }

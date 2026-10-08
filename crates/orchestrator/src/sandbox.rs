@@ -112,12 +112,19 @@ impl Sandbox {
     }
 
     async fn attach_disk_and_slot(&mut self) -> Result<PathBuf, String> {
-        let slot = *self.resources.slot.insert(self.config.slot);
-        let (disk, created) = tokio::join!(expose(self.config.rootfs.clone()), slot.create());
+        let (disk, created) = tokio::join!(expose(self.config.rootfs.clone()), self.own_slot());
         let exposed = disk
             .map(|exposure| self.resources.disk.insert(exposure).path())
             .map_err(|e| format!("expose rootfs: {e}"));
         created.and(exposed)
+    }
+
+    async fn own_slot(&mut self) -> Result<(), String> {
+        if self.config.slot_ready {
+            return Ok(());
+        }
+        let slot = *self.resources.slot.insert(self.config.slot);
+        slot.create().await
     }
 
     async fn spawn_firecracker(&mut self, rootfs: PathBuf) -> Result<FirecrackerClient, String> {

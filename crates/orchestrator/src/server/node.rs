@@ -9,11 +9,11 @@ use uuid::Uuid;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
-use super::slots::SlotPool;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
-use crate::network::slot::Slot;
+use crate::network::pool::NetworkPool;
+use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
 use crate::storage::backend::Storage;
@@ -28,7 +28,7 @@ pub struct Node {
     pub node_id: String,
     pub storage: Storage,
     pub registry: Registry<SandboxHandle>,
-    pub slots: SlotPool,
+    pub network: Arc<NetworkPool<HostSlots>>,
     pub local_expiry: bool,
     pub templates: Arc<TemplateCache>,
     store: Arc<DiffStore>,
@@ -51,12 +51,21 @@ impl Node {
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
             registry: Registry::new(),
-            slots: SlotPool::new(config.slots.clone()),
+            network: NetworkPool::new(HostSlots, host_slot_storage(config.slots.clone())),
             local_expiry: config.local_expiry,
             firecracker: config.firecracker.clone(),
             kernel: config.kernel.clone(),
             work_dir: config.work_dir.clone(),
         })
+    }
+
+    pub fn start(&self) {
+        self.network.start();
+        tokio::spawn(self.templates.clone().run_eviction());
+    }
+
+    pub async fn close(&self) {
+        self.network.close().await;
     }
 
     pub fn work_dir_of(&self, id: &str) -> PathBuf {
@@ -118,7 +127,7 @@ impl Node {
         let template = self.template_of(&config)?;
         let (build, snapfile) =
             tokio::try_join!(template.build(), template.snapfile()).map_err(|e| template_status(&config, e))?;
-        let slot = self.slots.acquire().map_err(Status::resource_exhausted)?;
+        let slot = self.network.get().await.map_err(Status::resource_exhausted)?;
         match self.resume(&config, &build, &snapfile, slot).await {
             Ok(sandbox) => Ok(lifecycle::spawn(
                 sandbox,
@@ -131,7 +140,7 @@ impl Node {
                 self.clone(),
             )),
             Err(e) => {
-                self.slots.release(slot);
+                self.network.return_slot(slot);
                 let _ = std::fs::remove_dir_all(self.work_dir_of(&config.sandbox_id));
                 Err(Status::internal(format!("failed to create sandbox: {e}")))
             }
@@ -170,7 +179,7 @@ impl Node {
             .template_id(&config.template_id)
             .rootfs(Arc::new(overlay))
             .memfile(memfile)
-            .slot(slot)
+            .pooled_slot(slot)
             .firecracker(&self.firecracker)
             .kernel(&self.kernel)
             .work_dir(work_dir)

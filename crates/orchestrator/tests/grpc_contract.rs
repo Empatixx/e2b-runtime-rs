@@ -57,6 +57,7 @@ struct Host {
 }
 
 struct Cluster {
+    node: Arc<Node>,
     dir: tempfile::TempDir,
     client: SandboxServiceClient<Channel>,
     template_build: Uuid,
@@ -140,17 +141,19 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
         local_expiry,
     };
     let node = Arc::new(Node::new(&config).unwrap());
+    node.start();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(
         tonic::transport::Server::builder()
-            .add_service(SandboxServiceServer::new(SandboxServer::new(node)))
+            .add_service(SandboxServiceServer::new(SandboxServer::new(node.clone())))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
     );
     let client = SandboxServiceClient::connect(format!("http://{address}"))
         .await
         .unwrap();
     Cluster {
+        node,
         dir,
         client,
         template_build,
@@ -181,6 +184,23 @@ fn envd(slot: u32) -> String {
         "http://{}",
         SocketAddr::from((Slot::new(slot).unwrap().host_ip(), ENVD_PORT))
     )
+}
+
+async fn running_envd(pool: Pool) -> String {
+    let client = reqwest::Client::new();
+    for index in pool.indices() {
+        let base = envd(index);
+        let answered = client
+            .get(format!("{base}/health"))
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await
+            .is_ok_and(|response| response.status() == 204);
+        if answered {
+            return base;
+        }
+    }
+    panic!("no envd answers in slots {:?}", pool.indices())
 }
 
 async fn put_note(base: &str, text: &str) {
@@ -271,7 +291,7 @@ async fn sandbox_lifecycle_over_grpc() {
         .unwrap()
         .into_inner();
     assert_eq!(created.client_id, "grpc-node");
-    let base = envd(pool.first);
+    let base = running_envd(pool).await;
     put_note(&base, "before pause").await;
 
     let listed = cluster.client.list(()).await.unwrap().into_inner().sandboxes;
@@ -325,11 +345,7 @@ async fn sandbox_lifecycle_over_grpc() {
         .create(create_request("grpc-sbx", paused_build, Duration::from_secs(600)))
         .await
         .unwrap();
-    let resumed_slot = pool
-        .indices()
-        .find(|index| Path::new(&format!("/run/netns/ns-{index}")).exists())
-        .unwrap();
-    assert_eq!(note(&envd(resumed_slot)).await, "before pause");
+    assert_eq!(note(&running_envd(pool).await).await, "before pause");
 
     cluster
         .client
@@ -382,6 +398,7 @@ async fn sandbox_lifecycle_over_grpc() {
         (Code::FailedPrecondition, "sandbox files for 'grpc-missing' not found")
     );
 
+    cluster.node.close().await;
     assert!(
         eventually(Duration::from_secs(20), || pool_namespaces_left(pool).is_empty()
             && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx").exists()
@@ -421,10 +438,17 @@ async fn an_expired_sandbox_is_removed() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(emptied, "the expired sandbox is still listed");
-    let released =
-        || !Path::new("/sys/fs/cgroup/e2b/grpc-expiring").exists() && pool_namespaces_left(EXPIRY_POOL).is_empty();
     assert!(
-        eventually(Duration::from_secs(20), released).await,
-        "the expired sandbox left its cgroup or slot"
+        eventually(Duration::from_secs(20), || !Path::new(
+            "/sys/fs/cgroup/e2b/grpc-expiring"
+        )
+        .exists())
+        .await,
+        "the expired sandbox left its cgroup"
+    );
+    cluster.node.close().await;
+    assert!(
+        eventually(Duration::from_secs(20), || pool_namespaces_left(EXPIRY_POOL).is_empty()).await,
+        "closing the pool left a slot"
     );
 }

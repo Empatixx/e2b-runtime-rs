@@ -4,6 +4,10 @@ use std::net::Ipv4Addr;
 use futures::StreamExt;
 
 #[cfg(target_os = "linux")]
+use super::pool::SlotFactory;
+#[cfg(target_os = "linux")]
+use super::storage::SlotStorage;
+#[cfg(target_os = "linux")]
 use crate::system::{all_ok, output, run};
 
 pub const MAX_SLOT: u32 = 16383;
@@ -67,6 +71,9 @@ const BLOCKED_GUEST_DESTINATIONS: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "1
 #[cfg(target_os = "linux")]
 impl Slot {
     pub async fn create(&self) -> Result<(), String> {
+        if self.namespace_exists() {
+            self.destroy().await?;
+        }
         run("ip", &["netns", "add", &self.namespace()]).await?;
         if let Err(e) = self.configure().await {
             let _ = self.destroy().await;
@@ -82,11 +89,15 @@ impl Slot {
                 run("ip", &["link", "delete", &self.host_veth()]).await,
                 &["Cannot find device"],
             ),
-            ignore_missing(
-                run("ip", &["netns", "delete", &self.namespace()]).await,
-                &["No such file or directory"],
-            ),
-        ])
+        ])?;
+        ignore_missing(
+            run("ip", &["netns", "delete", &self.namespace()]).await,
+            &["No such file or directory"],
+        )
+    }
+
+    pub fn namespace_exists(&self) -> bool {
+        namespace_path(self.index).exists()
     }
 
     async fn delete_host_rules(&self) -> Result<(), String> {
@@ -260,6 +271,31 @@ impl Slot {
         let command: Vec<&str> = ["iptables", "-w"].into_iter().chain(rule.iter().copied()).collect();
         self.inside(&command).await
     }
+}
+
+#[cfg(target_os = "linux")]
+pub struct HostSlots;
+
+#[cfg(target_os = "linux")]
+impl SlotFactory for HostSlots {
+    async fn create(&self, index: u32) -> Result<Slot, String> {
+        let slot = Slot::new(index)?;
+        slot.create().await.map(|()| slot)
+    }
+
+    async fn destroy(&self, slot: Slot) -> Result<(), String> {
+        slot.destroy().await
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn host_slot_storage(indices: std::ops::RangeInclusive<u32>) -> SlotStorage {
+    SlotStorage::new(indices, Box::new(|index| namespace_path(index).exists()))
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_path(index: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/var/run/netns/ns-{index}"))
 }
 
 #[cfg(target_os = "linux")]

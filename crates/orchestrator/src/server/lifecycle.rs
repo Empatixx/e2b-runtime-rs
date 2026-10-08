@@ -87,7 +87,7 @@ impl Running {
             }
         };
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&id));
-        self.node.slots.release(self.slot);
+        self.node.network.return_slot(self.slot);
         self.node.registry.finish(&id);
         if let Some((snapshot, reply)) = paused {
             let _ = reply.send(snapshot);

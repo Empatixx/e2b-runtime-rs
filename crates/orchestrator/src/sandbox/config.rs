@@ -17,6 +17,7 @@ pub struct SandboxConfig {
     pub template_id: String,
     pub rootfs: Arc<Overlay>,
     pub slot: Slot,
+    pub slot_ready: bool,
     pub firecracker: PathBuf,
     pub kernel: Option<PathBuf>,
     pub memfile: Option<Arc<BuildFile>>,
@@ -34,6 +35,7 @@ pub struct SandboxBuilder {
     template_id: Option<String>,
     rootfs: Option<Arc<Overlay>>,
     slot: Option<Slot>,
+    slot_ready: bool,
     firecracker: Option<PathBuf>,
     kernel: Option<PathBuf>,
     memfile: Option<Arc<BuildFile>>,
@@ -63,6 +65,12 @@ impl SandboxBuilder {
 
     pub fn slot(mut self, slot: Slot) -> Self {
         self.slot = Some(slot);
+        self
+    }
+
+    pub fn pooled_slot(mut self, slot: Slot) -> Self {
+        self.slot = Some(slot);
+        self.slot_ready = true;
         self
     }
 
@@ -117,6 +125,7 @@ impl SandboxBuilder {
             template_id: self.template_id.ok_or("template id is required")?,
             rootfs: self.rootfs.ok_or("rootfs is required")?,
             slot: self.slot.ok_or("slot is required")?,
+            slot_ready: self.slot_ready,
             firecracker: self.firecracker.ok_or("firecracker is required")?,
             kernel: self.kernel,
             memfile: self.memfile,
