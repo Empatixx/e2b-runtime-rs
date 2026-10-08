@@ -113,11 +113,15 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         .get()
         .zip(sandbox.cgroup_stats())
         .map(|(sink, reader)| HostStatsCollector::start(reader, stats_identity(&handle.info.lock()), sink.clone()));
+    let (access_token, oom_watermark) = {
+        let info = handle.info.lock();
+        (info.config.envd_access_token.clone(), info.oom_watermark.clone())
+    };
     let oom = OomMonitor::start(
         sandbox.envd_address(),
-        handle.info.lock().config.envd_access_token.clone(),
+        access_token,
         sandbox.id().to_owned(),
-        handle.info.lock().oom_watermark.clone(),
+        oom_watermark,
     );
     let running = Running {
         host_stats,
