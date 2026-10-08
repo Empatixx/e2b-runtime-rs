@@ -10,7 +10,7 @@ use tokio_util::task::TaskTracker;
 use tonic::{Request, Response, Status};
 
 use super::builds::{BuildCache, BuildInfo, BuildResult};
-use super::index::join_path;
+use super::index::layer_files_path;
 use super::logs::LogQuery;
 use super::phase::{BuildError, CANCELLED};
 use crate::proto::template_service_server::TemplateService;
@@ -79,16 +79,21 @@ impl<B: TemplateBuilder> TemplateServer<B> {
             info.log
                 .push(LogLevel::Info, format!("Building template {template_id}/{build_id}"));
             let build = AssertUnwindSafe(builder.build(request, info.clone())).catch_unwind();
-            let built = tokio::select! {
-                built = build => built.unwrap_or_else(|_| Err(BuildError::Internal(PANIC_MESSAGE.to_owned()))),
-                () = info.cancel.cancelled() => Err(BuildError::cancelled()),
+            let finished = tokio::select! {
+                built = build => built.map_err(|_| BuildError::Internal(PANIC_MESSAGE.to_owned())),
+                () = info.cancel.cancelled() => Ok(Err(BuildError::cancelled())),
             };
-            if let Err(e) = &built {
-                tracing::error!(build = %build_id, error = ?e, "template build failed");
-                if let Err(e) = storage.delete_prefix(&build_id).await {
-                    tracing::warn!(build = %build_id, error = %e, "could not remove the failed build's files");
+            match &finished {
+                Ok(Err(e)) => {
+                    tracing::error!(build = %build_id, error = ?e, "template build failed");
+                    if let Err(e) = storage.delete_prefix(&build_id).await {
+                        tracing::warn!(build = %build_id, error = %e, "could not remove the failed build's files");
+                    }
                 }
+                Err(_) => tracing::error!(build = %build_id, "recovered from panic in template build"),
+                Ok(Ok(_)) => {}
             }
+            let built = finished.and_then(|built| built);
             info.log.push(
                 match built {
                     Ok(_) => LogLevel::Info,
@@ -230,7 +235,7 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
     ) -> Result<Response<InitLayerFileUploadResponse>, Status> {
         let request = request.into_inner();
         let scope = request.cache_scope.clone().unwrap_or(request.template_id.clone());
-        let path = join_path(&[&scope, "files", &format!("{}.tar", request.hash)]);
+        let path = layer_files_path(&scope, &request.hash);
         self.build_storage
             .open_blob(&path)
             .map_err(|e| Status::unknown(format!("failed to open layer files cache: {e}")))?;
@@ -375,8 +380,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_panicking_build_fails_with_the_internal_reason() {
+    async fn a_panicking_build_fails_with_the_internal_reason_and_keeps_its_files() {
         let fixture = fixture();
+        fixture
+            .storage
+            .put("bp/rootfs.ext4", Bytes::from_static(b"x"))
+            .await
+            .unwrap();
         fixture.server.template_create(create("bp", "panic")).await.unwrap();
         fixture.server.wait_for_builds().await;
 
@@ -388,6 +398,7 @@ mod tests {
             done.log_entries.last().unwrap().message,
             format!("Build failed: {INTERNAL_ERROR_MESSAGE}")
         );
+        assert!(fixture.storage.exists("bp/rootfs.ext4").await.unwrap());
     }
 
     #[tokio::test]

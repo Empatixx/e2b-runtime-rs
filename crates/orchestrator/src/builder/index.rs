@@ -126,6 +126,10 @@ impl LayerIndex {
     }
 }
 
+pub fn layer_files_path(scope: &str, hash: &str) -> String {
+    join_path(&[scope, "files", &format!("{hash}.tar")])
+}
+
 pub fn join_path(parts: &[&str]) -> String {
     let joined = parts
         .iter()

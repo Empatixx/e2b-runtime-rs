@@ -1,4 +1,5 @@
 pub mod builds;
+pub mod commands;
 pub mod config;
 pub mod ext4;
 pub mod hash;

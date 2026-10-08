@@ -30,6 +30,7 @@ use providers::AzureEnv;
 
 const AZURE_BLOB_TYPE_HEADER: &str = "x-ms-blob-type";
 const AZURE_BLOCK_BLOB: &str = "BlockBlob";
+const OBJECT_NOT_EXIST: &str = "object does not exist";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectMetadata {
@@ -197,6 +198,56 @@ impl Storage {
             .boxed())
     }
 
+    pub async fn write_to(&self, path: &str, destination: &Path) -> Result<(), String> {
+        let mut chunks = self.blob_stream(path).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(destination)
+            .await
+            .map_err(|e| crate::go_os::path_error("open", destination, &e))?;
+        while let Some(chunk) = chunks.try_next().await? {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| crate::go_os::path_error("write", destination, &e))?;
+        }
+        Ok(())
+    }
+
+    async fn blob_stream(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
+        if let Signing::Local { root, .. } = &self.signing {
+            local_blob_handle(&root.join(path))?;
+        }
+        let object = self
+            .store
+            .get(&ObjectPath::from(path))
+            .await
+            .map_err(|e| self.reader_error(path, e))?;
+        let copy_error = self.copy_error(path);
+        Ok(object.into_stream().map_err(copy_error).boxed())
+    }
+
+    fn reader_error(&self, path: &str, error: object_store::Error) -> String {
+        let reason = match error {
+            object_store::Error::NotFound { .. } => OBJECT_NOT_EXIST.to_owned(),
+            error => error.to_string(),
+        };
+        match self.signing {
+            Signing::Gcs(_) => format!(
+                "failed to create reader for {}: {reason}",
+                crate::go_strconv::quote(path)
+            ),
+            _ => reason,
+        }
+    }
+
+    fn copy_error(&self, path: &str) -> impl Fn(object_store::Error) -> String + Send + 'static {
+        let gcs_path = matches!(self.signing, Signing::Gcs(_)).then(|| crate::go_strconv::quote(path));
+        move |error| match &gcs_path {
+            Some(quoted) => format!("failed to copy {quoted} to buffer: {error}"),
+            None => error.to_string(),
+        }
+    }
+
     pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
         let bytes = self
             .store
@@ -305,6 +356,15 @@ async fn sign(signer: &dyn Signer, path: &str, expires_in: Duration) -> Result<U
         .map_err(|e| e.to_string())
 }
 
+fn local_blob_handle(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(info) if info.is_dir() => Err(format!("path {} is a directory", path.display())),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OBJECT_NOT_EXIST.to_owned()),
+        Err(e) => Err(crate::go_os::path_error("stat", path, &e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -333,6 +393,30 @@ mod tests {
         storage.delete_prefix(prefix).await.unwrap();
         assert!(storage.get(&path).await.is_err());
         assert!(storage.get(&header_path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_to_copies_a_blob_and_reports_missing_ones_like_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        storage.put("s/files/h.tar", Bytes::from_static(b"tar")).await.unwrap();
+        let destination = dir.path().join("layer.tar");
+        std::fs::write(&destination, b"").unwrap();
+
+        storage.write_to("s/files/h.tar", &destination).await.unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"tar");
+        assert_eq!(
+            storage.write_to("s/files/missing.tar", &destination).await,
+            Err("object does not exist".to_owned())
+        );
+        assert_eq!(
+            storage.write_to("s/files", &destination).await,
+            Err(format!(
+                "path {} is a directory",
+                dir.path().join("store/s/files").display()
+            ))
+        );
     }
 
     #[tokio::test]

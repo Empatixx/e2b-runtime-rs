@@ -1,5 +1,6 @@
 mod build;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -86,7 +87,8 @@ impl BaseLayers<'_> {
             },
             context: Context {
                 user: Some(ROOT_USER.to_owned()),
-                ..Context::default()
+                workdir: None,
+                env_vars: Some(BTreeMap::new()),
             },
             from_image: Some(image.to_owned()),
             ..TemplateMetadata::default()

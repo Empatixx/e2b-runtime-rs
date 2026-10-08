@@ -52,12 +52,12 @@ pub struct Context {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "null_as_default",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
-    pub env_vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_nil_or_empty")]
+    pub env_vars: Option<BTreeMap<String, String>>,
+}
+
+fn is_nil_or_empty(env_vars: &Option<BTreeMap<String, String>>) -> bool {
+    env_vars.as_ref().is_none_or(BTreeMap::is_empty)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,7 +172,7 @@ mod tests {
             context: Context {
                 user: Some("user".to_owned()),
                 workdir: Some("/home/user".to_owned()),
-                env_vars: BTreeMap::from([("A".to_owned(), "b".to_owned())]),
+                env_vars: Some(BTreeMap::from([("A".to_owned(), "b".to_owned())])),
             },
             ..TemplateMetadata::default()
         }
@@ -249,7 +249,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(lenient.template, TemplateVersions::default());
-        assert!(lenient.context.env_vars.is_empty());
+        assert_eq!(lenient.context.env_vars, None);
         assert_eq!(lenient.memory_prefetch().map(|memory| memory.indices.len()), Some(0));
     }
 

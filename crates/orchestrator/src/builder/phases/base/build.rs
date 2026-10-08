@@ -88,7 +88,7 @@ impl BaseBuild<'_> {
             .construct_rootfs(&rootfs)
             .await
             .map_err(|e| internal_context("error building environment", e))?;
-        metadata.context.env_vars = parse_envs(config.config.env.as_deref().unwrap_or_default());
+        metadata.context.env_vars = Some(parse_envs(config.config.env.as_deref().unwrap_or_default()));
         self.log.push(LogLevel::Info, "Provisioning sandbox template");
         self.provision(&rootfs)
             .await

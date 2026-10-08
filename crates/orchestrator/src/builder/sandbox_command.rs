@@ -45,13 +45,6 @@ pub struct Chunk {
     pub stderr: String,
 }
 
-pub fn root(context: &CommandContext) -> CommandContext {
-    CommandContext {
-        user: ROOT.to_owned(),
-        ..context.clone()
-    }
-}
-
 pub const ROOT: &str = "root";
 
 fn log_stream(output: &CommandLog, name: &str, content: &str) {
