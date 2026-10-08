@@ -4,6 +4,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ const CONNECT_POLLS: u32 = 200;
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 static CLAIMED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+static NEXT_INDEX: AtomicU32 = AtomicU32::new(0);
 
 struct Claim {
     index: u32,
@@ -25,10 +27,11 @@ struct Claim {
 impl Claim {
     fn next_free() -> io::Result<Self> {
         let mut claimed = CLAIMED.lock();
-        let index = (0..)
-            .take_while(|index| device_path(*index).exists())
+        let devices = (0..).take_while(|index| device_path(*index).exists()).count() as u32;
+        let index = rotation(NEXT_INDEX.load(Ordering::Relaxed), devices)
             .find(|index| !claimed.contains(index) && is_idle(*index))
             .ok_or_else(|| io::Error::other("no free nbd device (load the nbd module with a larger nbds_max)"))?;
+        NEXT_INDEX.store(index + 1, Ordering::Relaxed);
         claimed.insert(index);
         Ok(Self { index })
     }
@@ -65,7 +68,7 @@ impl NbdDevice {
             worker,
             claim,
         };
-        match device.wait_until_connected().await {
+        match device.wait_until_connected(size).await {
             Ok(()) => Ok(device),
             Err(waited) => Err(device.abandon().await.err().unwrap_or(waited)),
         }
@@ -100,10 +103,10 @@ impl NbdDevice {
         served
     }
 
-    async fn wait_until_connected(&self) -> io::Result<()> {
+    async fn wait_until_connected(&self, size: u64) -> io::Result<()> {
         for _ in 0..CONNECT_POLLS {
             if pid_path(self.index()).exists() {
-                return Ok(());
+                return self.check_size(size);
             }
             if self.worker.is_finished() {
                 return Err(io::Error::other(format!(
@@ -114,6 +117,20 @@ impl NbdDevice {
             tokio::time::sleep(CONNECT_POLL_INTERVAL).await;
         }
         Err(io::Error::other(format!("nbd{} did not connect", self.index())))
+    }
+
+    fn check_size(&self, expected: u64) -> io::Result<()> {
+        let reported = std::fs::read_to_string(sys_path(self.index()).join("size"))
+            .ok()
+            .and_then(|sectors| sectors.trim().parse::<u64>().ok())
+            .map(|sectors| sectors * 512);
+        match reported {
+            Some(bytes) if bytes == expected => Ok(()),
+            other => Err(io::Error::other(format!(
+                "nbd{} reports {other:?} bytes instead of {expected} after connecting",
+                self.index()
+            ))),
+        }
     }
 
     async fn abandon(self) -> io::Result<()> {
@@ -144,6 +161,10 @@ fn spawn_worker(control: File) -> JoinHandle<io::Result<()>> {
     })
 }
 
+fn rotation(start: u32, devices: u32) -> impl Iterator<Item = u32> {
+    (0..devices).map(move |step| (start + step) % devices)
+}
+
 fn is_idle(index: u32) -> bool {
     !pid_path(index).exists()
         && std::fs::read_to_string(sys_path(index).join("size")).is_ok_and(|size| size.trim() == "0")
@@ -159,4 +180,15 @@ fn sys_path(index: u32) -> PathBuf {
 
 fn pid_path(index: u32) -> PathBuf {
     sys_path(index).join("pid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_starts_after_the_last_claim_and_wraps() {
+        assert_eq!(rotation(14, 16).take(4).collect::<Vec<_>>(), vec![14, 15, 0, 1]);
+        assert_eq!(rotation(0, 0).count(), 0);
+    }
 }
