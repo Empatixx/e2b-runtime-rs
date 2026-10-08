@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::Template;
 use crate::storage::backend::Storage;
+use crate::storage::build::Build;
 
 const TEMPLATE_EXPIRATION: Duration = Duration::from_secs(25 * 60 * 60);
 const UNPINNED_GRACE: Duration = Duration::from_secs(60);
@@ -43,6 +44,28 @@ impl TemplateCache {
         });
         entry.expires = expires;
         entry.template.clone()
+    }
+
+    pub fn instance_dir(&self, build_id: Uuid) -> PathBuf {
+        self.dir
+            .join(build_id.to_string())
+            .join("cache")
+            .join(Uuid::new_v4().to_string())
+    }
+
+    pub fn add_snapshot(&self, build: Build, snapfile: PathBuf, dir: PathBuf) -> Arc<Template> {
+        let build_id = build.build_id;
+        let template = Arc::new(Template::cached(self.storage.clone(), build, snapfile, dir));
+        let entry = Entry {
+            template: template.clone(),
+            expires: Instant::now() + TEMPLATE_EXPIRATION,
+        };
+        if let Some(replaced) = self.entries.lock().insert(build_id, entry)
+            && Arc::strong_count(&replaced.template) == 1
+        {
+            remove_dir(&replaced.template);
+        }
+        template
     }
 
     pub fn len(&self) -> usize {
@@ -80,12 +103,11 @@ impl TemplateCache {
     }
 
     fn fetched(&self, build_id: Uuid) -> Arc<Template> {
-        let dir = self
-            .dir
-            .join(build_id.to_string())
-            .join("cache")
-            .join(Uuid::new_v4().to_string());
-        let template = Arc::new(Template::new(self.storage.clone(), build_id, dir));
+        let template = Arc::new(Template::new(
+            self.storage.clone(),
+            build_id,
+            self.instance_dir(build_id),
+        ));
         let fetching = template.clone();
         tokio::spawn(async move { fetching.fetch().await });
         template
@@ -105,7 +127,6 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::storage::build::Build;
     use crate::storage::header::{Header, Metadata};
     use crate::storage::paths::BuildPaths;
     use crate::template::TemplateError;
@@ -209,5 +230,27 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         fixture.cache.evict_expired();
         assert!(fixture.cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_added_locally_is_served_without_storage() {
+        let fixture = fixture();
+        let build_id = Uuid::new_v4();
+        let build = Build {
+            build_id,
+            memfile: Header::new(Metadata::template(build_id, 4096, 8192), Vec::new()).unwrap(),
+            rootfs: Header::new(Metadata::template(build_id, 4096, 8192), Vec::new()).unwrap(),
+        };
+        let dir = fixture.cache.instance_dir(build_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("snapfile"), b"local").unwrap();
+
+        fixture
+            .cache
+            .add_snapshot(build.clone(), dir.join("snapfile"), dir.clone());
+        let template = fixture.cache.get(build_id);
+
+        assert_eq!(template.build().await.unwrap(), build);
+        assert_eq!(template.snapfile().await.unwrap(), dir.join("snapfile"));
     }
 }

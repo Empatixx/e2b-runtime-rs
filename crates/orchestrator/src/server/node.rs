@@ -10,7 +10,9 @@ use super::admission::Admission;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
+use super::retry::Failure;
 use super::status::NodeStatus;
+use super::uploads::Uploads;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
@@ -18,6 +20,7 @@ use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
+use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
 use crate::template::cache::TemplateCache;
@@ -36,6 +39,7 @@ pub struct Node {
     pub templates: Arc<TemplateCache>,
     pub labels: Vec<String>,
     pub status: Arc<NodeStatus>,
+    pub uploads: Arc<Uploads>,
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
@@ -58,6 +62,7 @@ impl Node {
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
             labels: config.labels.clone(),
             status: Arc::default(),
+            uploads: Arc::default(),
             admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
@@ -77,6 +82,44 @@ impl Node {
         tokio::spawn(self.templates.clone().run_eviction());
     }
 
+    pub async fn pause_locally(&self, sandbox: Sandbox, build_id: Uuid) -> Result<LocalSnapshot, String> {
+        let dir = self.templates.instance_dir(build_id);
+        let local = sandbox.pause_into(&dir, build_id).await?;
+        if let Err(e) = self.cache_snapshot(&local, dir) {
+            tracing::warn!(build = %build_id, error = %e, "the paused snapshot is not cached on this node");
+        }
+        Ok(local)
+    }
+
+    pub fn upload(&self, local: LocalSnapshot) {
+        let build = local.snapshot.build.clone();
+        let storage = self.storage.clone();
+        let attempt = move || {
+            let local = local.clone();
+            let storage = storage.clone();
+            async move {
+                if !local.files.exist() {
+                    return Err(Failure::Terminal("snapshot files are gone".to_owned()));
+                }
+                local.upload(&storage).await.map_err(Failure::Retryable)
+            }
+        };
+        self.uploads
+            .start(build.build_id, parents(&build), attempt, move |outcome| {
+                tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
+            });
+    }
+
+    fn cache_snapshot(&self, local: &LocalSnapshot, dir: PathBuf) -> Result<(), String> {
+        let build_id = local.snapshot.build.build_id;
+        self.store
+            .add_local(build_id, Artifact::Memfile, &local.files.memfile)?;
+        self.store.add_local(build_id, Artifact::Rootfs, &local.files.rootfs)?;
+        self.templates
+            .add_snapshot(local.snapshot.build.clone(), local.files.snapfile.clone(), dir);
+        Ok(())
+    }
+
     pub fn running_configs(&self) -> Vec<SandboxConfig> {
         self.registry
             .running()
@@ -86,6 +129,7 @@ impl Node {
     }
 
     pub async fn close(&self) {
+        self.uploads.wait_all().await;
         self.network.close().await;
     }
 
@@ -226,6 +270,19 @@ impl Node {
             .resume(snapfile)
             .await
     }
+}
+
+fn parents(build: &Build) -> Vec<Uuid> {
+    build
+        .memfile
+        .mappings
+        .iter()
+        .chain(&build.rootfs.mappings)
+        .map(|mapping| mapping.build_id)
+        .filter(|parent| !parent.is_nil() && *parent != build.build_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn template_status(config: &SandboxConfig, error: TemplateError) -> Status {

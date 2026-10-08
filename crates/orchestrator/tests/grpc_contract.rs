@@ -369,6 +369,7 @@ async fn sandbox_lifecycle_over_grpc() {
     assert_eq!(listed[0].end_time, Some(later.into()));
 
     let paused_build = Uuid::new_v4();
+    let pause_started = std::time::Instant::now();
     cluster
         .client
         .pause(SandboxPauseRequest {
@@ -379,13 +380,20 @@ async fn sandbox_lifecycle_over_grpc() {
         })
         .await
         .unwrap();
+    println!("grpc pause took {} ms", pause_started.elapsed().as_millis());
     assert!(cluster.client.list(()).await.unwrap().into_inner().sandboxes.is_empty());
+    assert!(
+        cluster.node.uploads.outcome(paused_build).is_some(),
+        "pause started no upload"
+    );
 
+    let resume_started = std::time::Instant::now();
     cluster
         .client
         .create(create_request("grpc-sbx", paused_build, Duration::from_secs(600)))
         .await
         .unwrap();
+    println!("same-node resume took {} ms", resume_started.elapsed().as_millis());
     assert_eq!(note(&running_envd(pool).await).await, "before pause");
 
     cluster
@@ -440,6 +448,17 @@ async fn sandbox_lifecycle_over_grpc() {
     );
 
     cluster.node.close().await;
+    let stored = Storage::local(&cluster.dir.path().join("store")).unwrap();
+    let paths = orchestrator::storage::paths::BuildPaths::new(paused_build);
+    for object in [
+        paths.snapfile(),
+        paths.memfile(),
+        paths.memfile_header(),
+        paths.rootfs(),
+        paths.rootfs_header(),
+    ] {
+        assert!(stored.exists(&object).await.unwrap(), "{object} was not uploaded");
+    }
     assert!(
         eventually(Duration::from_secs(20), || pool_namespaces_left(pool).is_empty()
             && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx").exists()

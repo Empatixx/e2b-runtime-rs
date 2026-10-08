@@ -56,6 +56,12 @@ impl SnapshotFiles {
         }
     }
 
+    pub fn exist(&self) -> bool {
+        [&self.snapfile, &self.memfile, &self.rootfs]
+            .into_iter()
+            .all(|path| path.exists())
+    }
+
     pub fn remove(&self) {
         [&self.snapfile, &self.memfile, &self.rootfs]
             .into_iter()
@@ -76,6 +82,15 @@ impl Sandbox {
             (Err(e), Ok(())) => Err(e),
             (Err(e), Err(teardown)) => Err(format!("{e}; teardown: {teardown}")),
         }
+    }
+
+    pub async fn pause_into(self, dir: &Path, build_id: Uuid) -> Result<LocalSnapshot, String> {
+        let id = self.config.id.clone();
+        let snapshot = self.snapshot_into(dir, build_id).await;
+        if let Err(teardown) = self.stop().await {
+            tracing::error!(sandbox = %id, error = %teardown, "paused sandbox did not tear down cleanly");
+        }
+        snapshot
     }
 
     pub async fn snapshot(&self, storage: &Storage, build_id: Uuid) -> Result<Snapshot, String> {

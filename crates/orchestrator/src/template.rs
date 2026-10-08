@@ -46,6 +46,16 @@ impl Template {
         }
     }
 
+    pub fn cached(storage: Storage, build: Build, snapfile: PathBuf, dir: PathBuf) -> Self {
+        Self {
+            build_id: build.build_id,
+            dir,
+            storage,
+            snapfile: OnceCell::new_with(Some(Ok(snapfile))),
+            build: OnceCell::new_with(Some(Ok(build))),
+        }
+    }
+
     pub fn build_id(&self) -> Uuid {
         self.build_id
     }
