@@ -24,18 +24,34 @@ pub enum DockerHubProxy {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ImageConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub architecture: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub os: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable")]
     pub config: ContainerConfig,
+}
+
+fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ContainerConfig {
     #[serde(rename = "Env", default)]
     pub env: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct AuthConfig {
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
 }
 
 pub struct PulledImage {
@@ -77,16 +93,12 @@ fn gcp_credentials() -> Result<BasicCredentials, String> {
             &std::env::var("GOOGLE_SERVICE_ACCOUNT_BASE64").unwrap_or_default(),
         ));
     };
-    let decoded = URL_SAFE
-        .decode(encoded)
-        .map_err(|e| format!("failed to decode auth config: {e}"))?;
-    #[derive(Deserialize)]
-    struct AuthConfig {
-        #[serde(default)]
-        username: String,
-        #[serde(default)]
-        password: String,
-    }
+    let decoded = URL_SAFE.decode(&encoded).map_err(|e| {
+        format!(
+            "failed to decode auth config: {}",
+            super::ecr::base64_error(&encoded, e)
+        )
+    })?;
     serde_json::from_slice::<AuthConfig>(&decoded)
         .map(|config| basic(&config.username, &config.password))
         .map_err(|e| format!("invalid JSON auth config: {e}"))
@@ -167,7 +179,7 @@ impl Puller {
         manifest: &ImageManifest,
     ) -> Result<ImageConfig, String> {
         let config = session
-            .blob_bytes(&manifest.config.digest)
+            .blob_bytes(&manifest.config)
             .await
             .map_err(|e| e.to_string())
             .and_then(|bytes| serde_json::from_slice::<ImageConfig>(&bytes).map_err(|e| e.to_string()))
@@ -334,20 +346,43 @@ mod tests {
         use axum::response::{IntoResponse, Response};
         use axum::routing::get;
 
-        pub const CONFIG_DIGEST: &str = "sha256:c0";
-        pub const LAYER_DIGEST: &str = "sha256:l0";
+        use crate::builder::oci::registry::digest_of;
+
         pub const INDEX_TAG: &str = "multi";
         const CREDENTIALS: &str = "Basic dGVzdHVzZXI6dGVzdHBhc3M=";
+        const LAYER: [u8; 1024] = [0; 1024];
+
+        #[derive(Clone)]
+        struct Image {
+            config: String,
+            manifest: String,
+        }
+
+        fn image(arch: &str) -> Image {
+            let config = format!(r#"{{"architecture":"{arch}","os":"linux","config":{{"Env":["A=1","B="]}}}}"#);
+            let manifest = format!(
+                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{}","size":1024}}]}}"#,
+                digest_of(config.as_bytes()),
+                config.len(),
+                digest_of(&LAYER)
+            );
+            Image { config, manifest }
+        }
 
         pub async fn serve(arch: &'static str) -> String {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
+            let served = image(arch);
+            let blobs = served.clone();
             let router = Router::new()
                 .route("/v2/", get(ping))
-                .route("/v2/test/image/manifests/{reference}", get(manifest))
+                .route(
+                    "/v2/test/image/manifests/{reference}",
+                    get(move |headers, path| manifest(headers, path, served.clone())),
+                )
                 .route(
                     "/v2/test/image/blobs/{digest}",
-                    get(move |headers, path| blob(headers, path, arch)),
+                    get(move |headers, path| blob(headers, path, blobs.clone())),
                 );
             tokio::spawn(async move { axum::serve(listener, router).await });
             address.to_string()
@@ -375,32 +410,39 @@ mod tests {
             }
         }
 
-        async fn manifest(headers: HeaderMap, Path(reference): Path<String>) -> Response {
+        async fn manifest(headers: HeaderMap, Path(reference): Path<String>, image: Image) -> Response {
             if !authorized(&headers) {
                 return unauthorized();
             }
-            let image = format!(
-                r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{CONFIG_DIGEST}","size":2}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"{LAYER_DIGEST}","size":1024}}]}}"#
+            let index = format!(
+                r#"{{"schemaVersion":2,"manifests":[{{"digest":"sha256:other","size":1,"platform":{{"os":"linux","architecture":"s390x"}}}},{{"digest":"{}","size":{}}}]}}"#,
+                digest_of(image.manifest.as_bytes()),
+                image.manifest.len()
             );
             match reference.as_str() {
-                "teapot" => (StatusCode::IM_A_TEAPOT, r#"{"errors":[{"code":"UNKNOWN","message":"teapot"}]}"#).into_response(),
-                INDEX_TAG => (
-                    [(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")],
-                    r#"{"schemaVersion":2,"manifests":[{"digest":"sha256:other","size":1,"platform":{"os":"linux","architecture":"s390x"}},{"digest":"sha256:child","size":1,"platform":{"os":"linux","architecture":"amd64"}},{"digest":"sha256:arm","size":1,"platform":{"os":"linux","architecture":"arm64"}}]}"#,
+                "teapot" => (
+                    StatusCode::IM_A_TEAPOT,
+                    r#"{"errors":[{"code":"UNKNOWN","message":"teapot"}]}"#,
                 )
                     .into_response(),
-                _ => ([(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")], image).into_response(),
+                INDEX_TAG => (
+                    [(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")],
+                    index,
+                )
+                    .into_response(),
+                _ => (
+                    [(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")],
+                    image.manifest,
+                )
+                    .into_response(),
             }
         }
 
-        async fn blob(headers: HeaderMap, Path(digest): Path<String>, arch: &'static str) -> Response {
-            match (authorized(&headers), digest.as_str()) {
+        async fn blob(headers: HeaderMap, Path(digest): Path<String>, image: Image) -> Response {
+            match (authorized(&headers), digest == digest_of(image.config.as_bytes())) {
                 (false, _) => unauthorized(),
-                (true, CONFIG_DIGEST) => {
-                    format!(r#"{{"architecture":"{arch}","os":"linux","config":{{"Env":["A=1","B="]}}}}"#)
-                        .into_response()
-                }
-                (true, _) => vec![0u8; 1024].into_response(),
+                (true, true) => image.config.into_response(),
+                (true, false) => LAYER.to_vec().into_response(),
             }
         }
     }
@@ -478,13 +520,22 @@ mod tests {
                 architecture: "riscv64".to_owned(),
             })
             .await;
+        let defaulted = index
+            .image(&Platform {
+                os: LINUX.to_owned(),
+                architecture: "amd64".to_owned(),
+            })
+            .await
+            .unwrap();
+        let layer = index.blob_bytes(&defaulted.layers[0]).await.unwrap();
 
         assert_eq!(
             mismatch.err().unwrap(),
             "image architecture \"arm64\" does not match expected \"amd64\""
         );
         assert!(
-            matches!(missing, Err(RegistryError::Other(text)) if text.starts_with("no child with platform linux/riscv64"))
+            matches!(missing, Err(RegistryError::Other(text)) if text.starts_with("no child with platform {Architecture:riscv64 OS:linux"))
         );
+        assert_eq!(layer.len(), 1024);
     }
 }

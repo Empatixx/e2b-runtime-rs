@@ -133,7 +133,8 @@ fn template_server(
     let env = BuildEnv {
         node: node.clone(),
         config: setup.builder.clone(),
-        puller: Puller::new(&setup.builder)?,
+        puller: Puller::new(&setup.builder)
+            .map_err(|e| format!("error getting docker remote repository provider: {e}"))?,
         build_storage: setup.build.storage.clone(),
         development: setup.development,
     };

@@ -175,7 +175,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Base hash `cmdline:` and `cpu-template:` keys are not added; upstream takes them from feature flags that default to empty | template build |
 | The Docker Hub `AZURE_ACR` remote repository (ACR token exchange with DefaultAzureCredential) is not ported; startup fails with a "not ported" error | template build |
 | ECR tokens use static env credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, `AWS_REGION`); upstream's default AWS config also reads profiles and instance roles | template build |
-| The registry client does not refresh a bearer token on a mid-pull 401 and has no `http` fallback for insecure registries, both of which go-containerregistry does | template build |
 | Our envd is a glibc binary, so it only runs in images with a new enough glibc (CI builds from `debian:trixie-slim`); upstream's envd is static. Build envd for `x86_64-unknown-linux-musl` for template builds | template build |
 | Kernel and Firecracker binaries come from `E2B_KERNEL`/`E2B_FIRECRACKER`, not from `HOST_KERNELS_DIR/<version>` and `FIRECRACKER_VERSIONS_DIR/<version>` as upstream; the recorded versions are only labels | template build |
 | The base layer is uploaded before the phase returns; upstream uploads in the background and waits for all uploads at the end of the build | template build |
+

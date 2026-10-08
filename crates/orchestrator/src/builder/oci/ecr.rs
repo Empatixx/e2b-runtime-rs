@@ -73,7 +73,9 @@ impl AwsCredentials {
 
     pub async fn ecr_basic_auth(&self) -> Result<BasicCredentials, TokenError> {
         let token = self.authorization_token().await?;
-        let decoded = STANDARD.decode(token).map_err(|e| TokenError::Decode(e.to_string()))?;
+        let decoded = STANDARD
+            .decode(&token)
+            .map_err(|e| TokenError::Decode(base64_error(&token, e)))?;
         let decoded = String::from_utf8_lossy(&decoded).into_owned();
         decoded
             .split_once(':')
@@ -85,15 +87,25 @@ impl AwsCredentials {
     }
 
     async fn authorization_token(&self) -> Result<String, TokenError> {
+        if self.region.is_empty() {
+            return Err(TokenError::Request(operation_error(
+                "failed to resolve service endpoint, an AWS region is required, but was not found",
+            )));
+        }
+        if self.access_key_id.is_empty() || self.secret_access_key.is_empty() {
+            return Err(TokenError::Request(operation_error(
+                "get identity: get credentials: failed to refresh cached credentials, static credentials are empty",
+            )));
+        }
         let signed = self.sign(Utc::now());
-        let response = signed
+        let request = signed
             .headers
             .iter()
             .fold(reqwest::Client::new().post(&signed.url), |request, (name, value)| {
                 request.header(name, value)
             })
-            .body(BODY)
-            .send()
+            .body(BODY);
+        let response = super::registry::send_with_retry(request)
             .await
             .map_err(|e| TokenError::Request(operation_error(&format!("https response error: {e}"))))?;
         let status = response.status();
@@ -166,6 +178,15 @@ fn signing_key(secret: &str, day: &str, region: &str, service: &str) -> Vec<u8> 
         .fold(hmac(format!("AWS4{secret}").as_bytes(), day.as_bytes()), |key, part| {
             hmac(&key, part.as_bytes())
         })
+}
+
+pub fn base64_error(input: &str, error: base64::DecodeError) -> String {
+    let offset = match error {
+        base64::DecodeError::InvalidByte(offset, _) | base64::DecodeError::InvalidLastSymbol(offset, _) => offset,
+        base64::DecodeError::InvalidLength(length) => length,
+        base64::DecodeError::InvalidPadding => input.len(),
+    };
+    format!("illegal base64 data at input byte {offset}")
 }
 
 fn api_failure(status: u16, request_id: &str, body: &[u8]) -> String {

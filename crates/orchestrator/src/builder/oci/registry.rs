@@ -1,17 +1,34 @@
-use std::collections::BTreeMap;
+mod challenge;
+mod retry;
+mod verify;
+
+pub use retry::send as send_with_retry;
+pub use verify::digest_of;
+
+use std::time::Duration;
 
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 
 use super::ecr::BasicCredentials;
-use super::reference::ImageReference;
+use super::reference::{Identifier, ImageReference};
+use challenge::{TokenRequest, all, bearer_token, pick, sendable};
+use parking_lot::{Mutex, RwLock};
+use verify::Verified;
 
-const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json";
+const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v1+json,application/vnd.docker.distribution.manifest.v1+prettyjws";
 const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
+const SCHEMA1: [&str; 2] = [
+    "application/vnd.docker.distribution.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v1+prettyjws",
+];
+const DEFAULT_OS: &str = "linux";
+const DEFAULT_ARCHITECTURE: &str = "amd64";
+const HTTP_FALLBACK_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
@@ -82,31 +99,32 @@ struct Diagnostic {
     message: String,
 }
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    access_token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Authorization {
     Anonymous,
     Basic(BasicCredentials),
     Bearer(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Challenge {
-    scheme: String,
-    params: BTreeMap<String, String>,
+struct Ping {
+    scheme: &'static str,
+    response: Response,
+}
+
+struct Bearer {
+    realm: String,
+    service: String,
+    scopes: Mutex<Vec<String>>,
+    credentials: Option<BasicCredentials>,
+    insecure: bool,
 }
 
 pub struct RegistrySession {
     client: Client,
     reference: ImageReference,
-    authorization: Authorization,
+    scheme: &'static str,
+    authorization: RwLock<Authorization>,
+    bearer: Option<Bearer>,
 }
 
 impl RegistrySession {
@@ -115,45 +133,53 @@ impl RegistrySession {
         credentials: Option<BasicCredentials>,
     ) -> Result<Self, RegistryError> {
         let client = Client::new();
-        let base = format!("{}://{}/v2/", reference.scheme(), reference.registry);
-        let ping = client.get(&base).send().await.map_err(request_failure)?;
-        let authorization = match ping.status() {
-            StatusCode::OK => Authorization::Anonymous,
-            StatusCode::UNAUTHORIZED => {
-                let challenge = challenge(&ping);
-                authorize(&client, reference, challenge, credentials).await?
+        let ping = ping(&client, reference).await?;
+        let insecure = ping.scheme == "http";
+        let credentials = credentials.filter(sendable);
+        let bearer = match ping.response.status() {
+            StatusCode::OK => None,
+            StatusCode::UNAUTHORIZED => bearer_of(reference, &ping.response, credentials.clone(), insecure)?,
+            _ => {
+                let url = format!("{}://{}/v2/", ping.scheme, reference.registry);
+                return Err(transport_error("GET", &url, ping.response).await);
             }
-            _ => return Err(transport_error("GET", &base, ping).await),
         };
-        Ok(Self {
+        let session = Self {
             client,
             reference: reference.clone(),
-            authorization,
-        })
+            scheme: ping.scheme,
+            authorization: RwLock::new(credentials.map_or(Authorization::Anonymous, Authorization::Basic)),
+            bearer,
+        };
+        session.refresh().await?;
+        Ok(session)
     }
 
     pub async fn image(&self, platform: &Platform) -> Result<ImageManifest, RegistryError> {
-        let top = self.manifest(self.reference.identifier()).await?;
+        let top = self
+            .manifest(self.reference.identifier(), self.requested_digest())
+            .await?;
         let manifest = match top.media_type.as_str() {
             OCI_INDEX | DOCKER_LIST => {
                 let child = top
                     .manifests
                     .iter()
-                    .find(|entry| {
-                        entry
-                            .platform
-                            .as_ref()
-                            .is_some_and(|candidate| matches(candidate, platform))
-                    })
+                    .find(|entry| matches(&entry.platform.clone().unwrap_or_else(default_platform), platform))
                     .ok_or_else(|| {
                         RegistryError::Other(format!(
-                            "no child with platform {}/{} in index {}",
-                            platform.os,
+                            "no child with platform {{Architecture:{} OS:{} OSVersion: OSFeatures:[] Variant: Features:[]}} in index {}",
                             platform.architecture,
+                            platform.os,
                             self.reference.name()
                         ))
                     })?;
-                self.manifest(&child.digest).await?
+                self.manifest(&child.digest, Some(&child.digest)).await?
+            }
+            schema1 if SCHEMA1.contains(&schema1) => {
+                return Err(RegistryError::Other(format!(
+                    "unsupported MediaType: {}",
+                    crate::go_strconv::quote(schema1)
+                )));
             }
             _ => top,
         };
@@ -166,43 +192,48 @@ impl RegistrySession {
         })
     }
 
-    pub async fn blob_bytes(&self, digest: &str) -> Result<Vec<u8>, RegistryError> {
-        let response = self.blob(digest).await?;
-        response
-            .bytes()
+    pub async fn blob_bytes(&self, descriptor: &Descriptor) -> Result<Vec<u8>, RegistryError> {
+        self.blob_stream(descriptor)
+            .await?
+            .try_fold(Vec::new(), |mut all, chunk| {
+                all.extend_from_slice(&chunk);
+                async move { Ok(all) }
+            })
             .await
-            .map(|bytes| bytes.to_vec())
-            .map_err(request_failure)
+            .map_err(|e| RegistryError::Other(e.to_string()))
     }
 
     pub async fn blob_stream(
         &self,
-        digest: &str,
+        descriptor: &Descriptor,
     ) -> Result<BoxStream<'static, std::io::Result<bytes::Bytes>>, RegistryError> {
-        let response = self.blob(digest).await?;
-        Ok(Box::pin(response.bytes_stream().map_err(std::io::Error::other)))
+        let url = self.url("blobs", &descriptor.digest);
+        let response = self.send(|| self.client.get(&url)).await?;
+        if response.status() != StatusCode::OK {
+            return Err(transport_error("GET", &url, response).await);
+        }
+        if let Some(length) = content_length(&response).filter(|length| *length != descriptor.size) {
+            return Err(RegistryError::Other(format!(
+                "GET {url}: Content-Length header {length} does not match expected size {}",
+                descriptor.size
+            )));
+        }
+        let body = Box::pin(response.bytes_stream().map_err(std::io::Error::other));
+        Ok(Box::pin(Verified::new(body, &descriptor.digest, descriptor.size)))
     }
 
-    async fn blob(&self, digest: &str) -> Result<Response, RegistryError> {
-        let url = self.url("blobs", digest);
-        let response = self
-            .authorized(self.client.get(&url))
-            .send()
-            .await
-            .map_err(request_failure)?;
-        match response.status().is_success() {
-            true => Ok(response),
-            false => Err(transport_error("GET", &url, response).await),
+    fn requested_digest(&self) -> Option<&str> {
+        match &self.reference.identifier {
+            Identifier::Digest(digest) => Some(digest),
+            Identifier::Tag(_) => None,
         }
     }
 
-    async fn manifest(&self, identifier: &str) -> Result<Manifest, RegistryError> {
+    async fn manifest(&self, identifier: &str, digest: Option<&str>) -> Result<Manifest, RegistryError> {
         let url = self.url("manifests", identifier);
         let response = self
-            .authorized(self.client.get(&url).header(ACCEPT, MANIFEST_ACCEPT))
-            .send()
-            .await
-            .map_err(request_failure)?;
+            .send(|| self.client.get(&url).header(ACCEPT, MANIFEST_ACCEPT))
+            .await?;
         if response.status() != StatusCode::OK {
             return Err(transport_error("GET", &url, response).await);
         }
@@ -213,28 +244,74 @@ impl RegistrySession {
             .unwrap_or_default()
             .to_owned();
         let body = response.bytes().await.map_err(request_failure)?;
+        if let Some(wanted) = digest.filter(|wanted| digest_of(&body) != *wanted) {
+            return Err(RegistryError::Other(format!(
+                "manifest digest: {} does not match requested digest: {} for {}",
+                crate::go_strconv::quote(&digest_of(&body)),
+                crate::go_strconv::quote(wanted),
+                crate::go_strconv::quote(&self.reference.name())
+            )));
+        }
         let manifest: Manifest =
             serde_json::from_slice(&body).map_err(|e| RegistryError::Other(format!("parsing manifest: {e}")))?;
-        Ok(match manifest.media_type.is_empty() {
-            true => Manifest {
-                media_type: content_type,
-                ..manifest
+        Ok(Manifest {
+            media_type: match content_type.is_empty() {
+                true => manifest.media_type.clone(),
+                false => content_type,
             },
-            false => manifest,
+            ..manifest
         })
     }
 
     fn url(&self, kind: &str, identifier: &str) -> String {
         format!(
             "{}://{}/v2/{}/{kind}/{identifier}",
-            self.reference.scheme(),
+            self.scheme,
             self.reference.registry,
             self.reference.repository_str()
         )
     }
 
+    async fn send(&self, request: impl Fn() -> RequestBuilder) -> Result<Response, RegistryError> {
+        let response = retry::send(self.authorized(request())).await.map_err(request_failure)?;
+        let challenges = all(response.headers());
+        if self.bearer.is_none() || challenges.is_empty() {
+            return Ok(response);
+        }
+        self.add_scopes(challenges.iter().filter_map(|challenge| challenge.params.get("scope")));
+        self.refresh().await?;
+        retry::send(self.authorized(request())).await.map_err(request_failure)
+    }
+
+    fn add_scopes<'a>(&self, wanted: impl Iterator<Item = &'a String>) {
+        if let Some(bearer) = &self.bearer {
+            let mut scopes = bearer.scopes.lock();
+            let mut added: Vec<String> = wanted.filter(|scope| !scopes.contains(scope)).cloned().collect();
+            added.append(&mut scopes);
+            *scopes = added;
+        }
+    }
+
+    async fn refresh(&self) -> Result<(), RegistryError> {
+        let Some(bearer) = &self.bearer else {
+            return Ok(());
+        };
+        let scopes = bearer.scopes.lock().clone();
+        let token = bearer_token(TokenRequest {
+            realm: &bearer.realm,
+            service: &bearer.service,
+            scopes: &scopes,
+            registry: &self.reference.registry,
+            insecure: bearer.insecure,
+            credentials: bearer.credentials.as_ref(),
+        })
+        .await?;
+        *self.authorization.write() = Authorization::Bearer(token);
+        Ok(())
+    }
+
     fn authorized(&self, request: RequestBuilder) -> RequestBuilder {
-        match &self.authorization {
+        match &*self.authorization.read() {
             Authorization::Anonymous => request,
             Authorization::Basic(basic) => request.basic_auth(&basic.username, Some(&basic.password)),
             Authorization::Bearer(token) => request.header(AUTHORIZATION, format!("Bearer {token}")),
@@ -242,84 +319,95 @@ impl RegistrySession {
     }
 }
 
-async fn authorize(
-    client: &Client,
-    reference: &ImageReference,
-    challenge: Option<Challenge>,
-    credentials: Option<BasicCredentials>,
-) -> Result<Authorization, RegistryError> {
-    match challenge {
-        Some(challenge) if challenge.scheme.eq_ignore_ascii_case("bearer") => {
-            bearer_token(client, reference, &challenge.params, credentials.as_ref())
-                .await
-                .map(Authorization::Bearer)
-        }
-        _ => Ok(credentials.map_or(Authorization::Anonymous, Authorization::Basic)),
+async fn ping(client: &Client, reference: &ImageReference) -> Result<Ping, RegistryError> {
+    let secure = ping_scheme(client, reference, "https");
+    if reference.scheme() == "https" {
+        return secure.await;
     }
-}
-
-async fn bearer_token(
-    client: &Client,
-    reference: &ImageReference,
-    params: &BTreeMap<String, String>,
-    credentials: Option<&BasicCredentials>,
-) -> Result<String, RegistryError> {
-    let realm = params
-        .get("realm")
-        .ok_or_else(|| RegistryError::Other("malformed www-authenticate, missing realm".to_owned()))?;
-    let scope = format!("repository:{}:pull", reference.repository_str());
-    let query: Vec<(&str, &str)> = [("scope", scope.as_str())]
-        .into_iter()
-        .chain(params.get("service").map(|service| ("service", service.as_str())))
-        .collect();
-    let request = client.get(realm).query(&query);
-    let request = match credentials {
-        Some(basic) => request.basic_auth(&basic.username, Some(&basic.password)),
-        None => request,
+    let insecure = async {
+        tokio::time::sleep(HTTP_FALLBACK_DELAY).await;
+        ping_scheme(client, reference, "http").await
     };
-    let response = request.send().await.map_err(request_failure)?;
-    if response.status() != StatusCode::OK {
-        return Err(transport_error("GET", realm, response).await);
+    tokio::pin!(secure, insecure);
+    let (first, other) = tokio::select! {
+        result = &mut secure => (result, Either::Insecure),
+        result = &mut insecure => (result, Either::Secure),
+    };
+    match (first, other) {
+        (Ok(ping), _) => Ok(ping),
+        (Err(first), Either::Insecure) => insecure.await.map_err(|second| combine(first, second)),
+        (Err(first), Either::Secure) => secure.await.map_err(|second| combine(second, first)),
     }
-    let token: TokenResponse = response
-        .json()
-        .await
-        .map_err(|e| RegistryError::Other(format!("decoding token response: {e}")))?;
-    Ok(match token.token.is_empty() {
-        true => token.access_token,
-        false => token.token,
-    })
 }
 
-fn challenge(response: &Response) -> Option<Challenge> {
-    let header = response.headers().get(WWW_AUTHENTICATE)?.to_str().ok()?;
-    let (scheme, rest) = header.split_once(' ').unwrap_or((header, ""));
-    Some(Challenge {
-        scheme: scheme.to_owned(),
-        params: parse_params(rest),
-    })
+enum Either {
+    Secure,
+    Insecure,
 }
 
-fn parse_params(text: &str) -> BTreeMap<String, String> {
-    let mut params = BTreeMap::new();
-    let mut rest = text.trim();
-    while let Some((key, after)) = rest.split_once('=') {
-        let key = key.trim().trim_start_matches(',').trim().to_ascii_lowercase();
-        let (value, remaining) = match after.strip_prefix('"') {
-            Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
-            None => after.split_once(',').unwrap_or((after, "")),
-        };
-        params.insert(key, value.to_owned());
-        rest = remaining.trim_start_matches([',', ' ']);
+fn combine(primary: RegistryError, fallback: RegistryError) -> RegistryError {
+    match primary {
+        RegistryError::Transport { .. } => primary,
+        _ => match fallback {
+            RegistryError::Transport { .. } => fallback,
+            _ => RegistryError::Other(format!("{primary}; {fallback}")),
+        },
     }
-    params
+}
+
+async fn ping_scheme(client: &Client, reference: &ImageReference, scheme: &'static str) -> Result<Ping, RegistryError> {
+    let url = format!("{scheme}://{}/v2/", reference.registry);
+    let response = retry::send(client.get(&url)).await.map_err(request_failure)?;
+    match response.status() {
+        StatusCode::OK | StatusCode::UNAUTHORIZED => Ok(Ping { scheme, response }),
+        _ => Err(transport_error("GET", &url, response).await),
+    }
+}
+
+fn bearer_of(
+    reference: &ImageReference,
+    ping: &Response,
+    credentials: Option<BasicCredentials>,
+    insecure: bool,
+) -> Result<Option<Bearer>, RegistryError> {
+    let Some(picked) = pick(ping.headers()).filter(|picked| picked.scheme.eq_ignore_ascii_case("bearer")) else {
+        return Ok(None);
+    };
+    let realm = picked.params.get("realm").ok_or_else(|| {
+        RegistryError::Other(format!(
+            "malformed www-authenticate, missing realm: {:?}",
+            picked.params
+        ))
+    })?;
+    Ok(Some(Bearer {
+        realm: realm.clone(),
+        service: picked.params.get("service").cloned().unwrap_or_default(),
+        scopes: Mutex::new(vec![format!("repository:{}:pull", reference.repository_str())]),
+        credentials,
+        insecure,
+    }))
+}
+
+fn default_platform() -> Platform {
+    Platform {
+        os: DEFAULT_OS.to_owned(),
+        architecture: DEFAULT_ARCHITECTURE.to_owned(),
+    }
 }
 
 fn matches(candidate: &Platform, wanted: &Platform) -> bool {
     candidate.os == wanted.os && candidate.architecture == wanted.architecture
 }
 
-async fn transport_error(method: &str, url: &str, response: Response) -> RegistryError {
+fn content_length(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
+pub(super) async fn transport_error(method: &str, url: &str, response: Response) -> RegistryError {
     let status = response.status();
     let body = response.bytes().await.unwrap_or_default();
     let diagnostics = serde_json::from_slice::<ErrorEnvelope>(&body)
@@ -349,20 +437,4 @@ async fn transport_error(method: &str, url: &str, response: Response) -> Registr
 
 fn request_failure(error: reqwest::Error) -> RegistryError {
     RegistryError::Other(error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn challenges_parse_quoted_params() {
-        let params = parse_params(
-            r#"realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull""#,
-        );
-
-        assert_eq!(params["realm"], "https://auth.docker.io/token");
-        assert_eq!(params["service"], "registry.docker.io");
-        assert_eq!(params["scope"], "repository:library/ubuntu:pull");
-    }
 }

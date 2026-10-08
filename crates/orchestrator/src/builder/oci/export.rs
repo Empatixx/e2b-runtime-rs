@@ -6,7 +6,7 @@ use flate2::read::GzDecoder;
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
 use super::pull::PulledImage;
-use super::registry::RegistrySession;
+use super::registry::{Descriptor, RegistrySession};
 use super::untar::untar;
 use crate::builder::logs::ScopedLog;
 use crate::go_humanize::bytes;
@@ -19,7 +19,7 @@ pub enum LayerSource {
     Bytes(Vec<u8>),
     Remote {
         session: Arc<RegistrySession>,
-        digest: String,
+        descriptor: Descriptor,
     },
 }
 
@@ -38,7 +38,7 @@ pub fn remote_layers(image: &PulledImage) -> Vec<ImageLayer> {
             size: layer.size,
             source: LayerSource::Remote {
                 session: image.session.clone(),
-                digest: layer.digest.clone(),
+                descriptor: layer.clone(),
             },
         })
         .collect()
@@ -95,8 +95,8 @@ async fn extract(index: usize, source: LayerSource, target: PathBuf) -> Result<(
 async fn open(source: LayerSource) -> io::Result<Box<dyn Read + Send>> {
     match source {
         LayerSource::Bytes(bytes) => Ok(Box::new(io::Cursor::new(bytes))),
-        LayerSource::Remote { session, digest } => session
-            .blob_stream(&digest)
+        LayerSource::Remote { session, descriptor } => session
+            .blob_stream(&descriptor)
             .await
             .map(|stream| Box::new(SyncIoBridge::new(StreamReader::new(stream))) as Box<dyn Read + Send>)
             .map_err(|e| io::Error::other(e.to_string())),
