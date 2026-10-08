@@ -2,6 +2,8 @@ use axum::Router;
 use axum::serve::{Listener, ListenerExt};
 use std::time::Duration;
 
+use envd::cgroups::ProcessType;
+use envd::port::forward::Forwarder;
 use envd::{app::AppState, config, host, router};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
@@ -41,6 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let poller = state.clone();
         tokio::spawn(async move { host::mmds::poll_for_opts(&poller.env_vars, None).await });
     }
+    let forwarder = Forwarder::new(state.freezer.manager().placement(ProcessType::Socat));
+    tokio::spawn(forwarder.run());
     serve(listener, router::build_router(state)).await
 }
 

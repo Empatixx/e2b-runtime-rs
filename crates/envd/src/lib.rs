@@ -6,6 +6,7 @@ pub mod controllers;
 pub mod envvars;
 pub mod host;
 pub mod middleware;
+pub mod port;
 pub mod proto;
 pub mod router;
 pub mod user;
