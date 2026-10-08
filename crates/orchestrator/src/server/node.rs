@@ -128,7 +128,7 @@ pub struct Lifetime {
 
 impl Node {
     pub fn new(config: &NodeConfig) -> Result<Self, String> {
-        let storage = config.open_storage()?;
+        let storage = config.open_template_storage()?;
         Ok(Self {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),

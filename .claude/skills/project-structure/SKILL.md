@@ -10,7 +10,11 @@ Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `f
 ```
 Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
-  src/storage/         object_store backends, build paths, header V3
+  src/storage/         object_store backends (backend.rs: Storage::open per provider, signed UploadUrl;
+                       backend/providers.rs: S3, GCS, Azure builders), spec.rs (StorageSpec, upstream storage URL
+                       parsing), local_upload.rs (HMAC UploadSigner), build paths, header V3
+  src/go_url.rs        Go net/url parse and String (go_url/escape.rs, go_url/query.rs url.Values)
+  src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
@@ -48,7 +52,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
                        resume.rs (snapshot load over uffd)
-  src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, network pool, template cache),
+  src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution),
+                       upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
                        node/checkpoint.rs (Checkpoint resume-fresh), lifecycle.rs (task per sandbox: commands, end_time
                        expiry, death watch), service.rs (SandboxService), registry.rs (Go map semantics: reserve,
                        lifecycle-aware stop, stop_reserved), services.rs (ORCHESTRATOR_SERVICES roles),

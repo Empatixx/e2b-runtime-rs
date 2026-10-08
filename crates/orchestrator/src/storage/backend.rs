@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
+mod providers;
+
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,8 +10,10 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use hyper::Method;
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::azure::MicrosoftAzure;
 use object_store::buffered::BufWriter;
+use object_store::gcp::GoogleCloudStorage;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
@@ -20,6 +24,12 @@ use object_store::{
 use tokio::io::AsyncWriteExt;
 
 use super::header::Header;
+use super::local_upload::UploadSigner;
+use super::spec::{Provider, StorageSpec};
+use providers::AzureEnv;
+
+const AZURE_BLOB_TYPE_HEADER: &str = "x-ms-blob-type";
+const AZURE_BLOCK_BLOB: &str = "BlockBlob";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectMetadata {
@@ -33,33 +43,72 @@ impl ObjectMetadata {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UploadUrl {
+    pub url: String,
+    pub headers: HashMap<String, String>,
+}
+
 #[derive(Clone)]
 pub struct Storage {
     store: Arc<dyn ObjectStore>,
-    signer: Option<Arc<dyn Signer>>,
+    signing: Signing,
 }
 
-#[derive(Default)]
-pub struct S3Builder {
-    bucket: String,
-    endpoint: Option<String>,
-    key: String,
-    secret: String,
-    region: String,
+#[derive(Clone)]
+enum Signing {
+    Local {
+        root: PathBuf,
+        upload: Option<UploadSigner>,
+    },
+    S3(Arc<AmazonS3>),
+    Gcs(Arc<GoogleCloudStorage>),
+    Azure(Arc<MicrosoftAzure>),
 }
 
 impl Storage {
     pub fn local(root: &Path) -> Result<Self, String> {
+        Self::local_with(root, None)
+    }
+
+    pub fn open(spec: &StorageSpec, upload: Option<UploadSigner>) -> Result<Self, String> {
+        match spec.provider {
+            Provider::Local => Self::local_with(Path::new(&spec.base_path), upload),
+            Provider::Aws => Self::s3(spec, AmazonS3Builder::from_env()),
+            Provider::Gcp => providers::gcs(spec, std::env::var("GOOGLE_SERVICE_ACCOUNT_BASE64").ok().as_deref())
+                .map(|store| Self::remote(Arc::new(store), Signing::Gcs)),
+            Provider::Azure => providers::azure(
+                spec,
+                AzureEnv {
+                    connection_string: std::env::var("AZURE_STORAGE_CONNECTION_STRING").ok().as_deref(),
+                    account_name: std::env::var("AZURE_STORAGE_ACCOUNT_NAME").ok().as_deref(),
+                },
+            )
+            .map(|store| Self::remote(Arc::new(store), Signing::Azure)),
+        }
+    }
+
+    pub fn s3(spec: &StorageSpec, builder: AmazonS3Builder) -> Result<Self, String> {
+        providers::s3(spec, builder).map(|store| Self::remote(Arc::new(store), Signing::S3))
+    }
+
+    fn remote<T: ObjectStore>(store: Arc<T>, signing: impl FnOnce(Arc<T>) -> Signing) -> Self {
+        Self {
+            store: store.clone(),
+            signing: signing(store),
+        }
+    }
+
+    fn local_with(root: &Path, upload: Option<UploadSigner>) -> Result<Self, String> {
         std::fs::create_dir_all(root).map_err(|e| format!("create storage dir {}: {e}", root.display()))?;
         let store = LocalFileSystem::new_with_prefix(root).map_err(|e| e.to_string())?;
         Ok(Self {
             store: Arc::new(store),
-            signer: None,
+            signing: Signing::Local {
+                root: root.to_path_buf(),
+                upload,
+            },
         })
-    }
-
-    pub fn s3() -> S3Builder {
-        S3Builder::default()
     }
 
     pub async fn put(&self, path: &str, data: Bytes) -> Result<(), String> {
@@ -95,8 +144,9 @@ impl Storage {
     }
 
     fn attributes(&self, metadata: &ObjectMetadata) -> Attributes {
-        match self.signer {
-            Some(_) => metadata
+        match self.signing {
+            Signing::Local { .. } => Attributes::default(),
+            _ => metadata
                 .entries
                 .iter()
                 .map(|(key, value)| {
@@ -106,7 +156,6 @@ impl Storage {
                     )
                 })
                 .collect(),
-            None => Attributes::default(),
         }
     }
 
@@ -194,16 +243,46 @@ impl Storage {
         Ok(())
     }
 
-    pub async fn upload_signed_url(&self, path: &str, expires_in: Duration) -> Result<String, String> {
-        let signer = self
-            .signer
-            .as_ref()
-            .ok_or("failed to presign PUT URL: local storage cannot sign URLs")?;
-        signer
-            .signed_url(Method::PUT, &ObjectPath::from(path), expires_in)
-            .await
-            .map(|url| url.to_string())
-            .map_err(|e| format!("failed to presign PUT URL: {e}"))
+    pub fn open_blob(&self, path: &str) -> Result<(), String> {
+        match &self.signing {
+            Signing::Local { root, .. } => {
+                let parent = crate::go_os::parent(&root.join(path));
+                std::fs::create_dir_all(&parent).map_err(|e| crate::go_os::path_error("mkdir", &parent, &e))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn upload_signed_url(&self, path: &str, expires_in: Duration) -> Result<UploadUrl, String> {
+        match &self.signing {
+            Signing::Local { upload: None, .. } => {
+                Err("file system storage does not support signed URLs (no local upload endpoint configured)".to_owned())
+            }
+            Signing::Local {
+                upload: Some(signer), ..
+            } => Ok(UploadUrl {
+                url: signer.signed_url(path, expires_in),
+                headers: HashMap::new(),
+            }),
+            Signing::S3(store) => sign(store.as_ref(), path, expires_in)
+                .await
+                .map_err(|e| format!("failed to presign PUT URL: {e}")),
+            Signing::Gcs(store) => sign(store.as_ref(), path, expires_in)
+                .await
+                .map_err(|e| format!("failed to create signed URL for GCS object ({path}): {e}")),
+            Signing::Azure(store) => sign(store.as_ref(), path, expires_in)
+                .await
+                .map(|url| UploadUrl {
+                    headers: HashMap::from([(AZURE_BLOB_TYPE_HEADER.to_owned(), AZURE_BLOCK_BLOB.to_owned())]),
+                    ..url
+                })
+                .map_err(|e| {
+                    format!(
+                        "failed to sign Azure upload SAS for {}: {e}",
+                        crate::go_strconv::quote(path)
+                    )
+                }),
+        }
     }
 
     pub async fn load_header(&self, path: &str) -> Result<Header, String> {
@@ -215,47 +294,15 @@ impl Storage {
     }
 }
 
-impl S3Builder {
-    pub fn bucket(mut self, bucket: &str) -> Self {
-        self.bucket = bucket.to_owned();
-        self
-    }
-
-    pub fn endpoint(mut self, endpoint: &str) -> Self {
-        self.endpoint = Some(endpoint.to_owned());
-        self
-    }
-
-    pub fn credentials(mut self, key: &str, secret: &str) -> Self {
-        self.key = key.to_owned();
-        self.secret = secret.to_owned();
-        self
-    }
-
-    pub fn region(mut self, region: &str) -> Self {
-        self.region = region.to_owned();
-        self
-    }
-
-    pub fn build(self) -> Result<Storage, String> {
-        let builder = AmazonS3Builder::new()
-            .with_bucket_name(&self.bucket)
-            .with_access_key_id(&self.key)
-            .with_secret_access_key(&self.secret)
-            .with_region(&self.region);
-        let builder = match &self.endpoint {
-            Some(endpoint) => builder
-                .with_endpoint(endpoint)
-                .with_allow_http(endpoint.starts_with("http://"))
-                .with_virtual_hosted_style_request(false),
-            None => builder,
-        };
-        let store = Arc::new(builder.build().map_err(|e| format!("s3 bucket {}: {e}", self.bucket))?);
-        Ok(Storage {
-            store: store.clone(),
-            signer: Some(store),
+async fn sign(signer: &dyn Signer, path: &str, expires_in: Duration) -> Result<UploadUrl, String> {
+    signer
+        .signed_url(Method::PUT, &ObjectPath::from(path), expires_in)
+        .await
+        .map(|url| UploadUrl {
+            url: url.to_string(),
+            headers: HashMap::new(),
         })
-    }
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -323,13 +370,18 @@ mod tests {
         let Ok(endpoint) = std::env::var("E2B_TEST_S3_ENDPOINT") else {
             return;
         };
-        let storage = Storage::s3()
-            .bucket("e2b-test")
-            .endpoint(&endpoint)
-            .credentials("minio", "minio123")
-            .region("us-east-1")
-            .build()
-            .unwrap();
+        let spec = StorageSpec {
+            provider: Provider::Aws,
+            bucket: "e2b-test".to_owned(),
+            endpoint,
+            use_path_style: true,
+            region: "us-east-1".to_owned(),
+            ..StorageSpec::local("")
+        };
+        let credentials = AmazonS3Builder::new()
+            .with_access_key_id("minio")
+            .with_secret_access_key("minio123");
+        let storage = Storage::s3(&spec, credentials).unwrap();
         exercise(&storage, &Uuid::new_v4().to_string()).await;
     }
 }

@@ -253,9 +253,11 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use object_store::aws::AmazonS3Builder;
     use tempfile::TempDir;
 
     use super::*;
+    use crate::storage::spec::{Provider, StorageSpec};
 
     const MIB: u64 = 1 << 20;
     const OBJECT: &str = "build/memfile";
@@ -385,13 +387,18 @@ mod tests {
                 held.push(stream);
             }
         });
-        let storage = Storage::s3()
-            .bucket("silent")
-            .endpoint(&endpoint)
-            .credentials("key", "secret")
-            .region("us-east-1")
-            .build()
-            .unwrap();
+        let spec = StorageSpec {
+            provider: Provider::Aws,
+            bucket: "silent".to_owned(),
+            endpoint,
+            use_path_style: true,
+            region: "us-east-1".to_owned(),
+            ..StorageSpec::local("")
+        };
+        let credentials = AmazonS3Builder::new()
+            .with_access_key_id("key")
+            .with_secret_access_key("secret");
+        let storage = Storage::s3(&spec, credentials).unwrap();
         let dir = tempfile::tempdir().unwrap();
 
         let error = Chunker::open_with_timeout(storage, OBJECT, &dir.path().join("cache"), Duration::from_millis(100))

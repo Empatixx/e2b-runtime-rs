@@ -169,4 +169,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | A failed `metadata.json` write also skips caching the diffs, and uploads then retry against a missing file | API |
 | `collect_prefetch` returns the mapping; writing `metadata.json`, invalidating the template and log-only failure belong to the template build | template build |
 | Prefault installs zero pages that upstream skips | API |
-
+| GCS takes credentials from object_store's env (`GOOGLE_SERVICE_ACCOUNT*`, `GOOGLE_APPLICATION_CREDENTIALS`); `GOOGLE_SERVICE_ACCOUNT_BASE64` signs uploads and also authenticates the client, upstream uses ADC for the client | template build |
+| Azure connection strings are split into `AccountName`/`AccountKey`/`BlobEndpoint`; SAS signing is object_store's, not upstream's user-delegation fallback with its error texts | template build |
+| `delete_prefix` with an empty prefix lists the whole bucket; upstream S3/Azure refuse with "refusing to delete objects with an empty prefix" | template build |

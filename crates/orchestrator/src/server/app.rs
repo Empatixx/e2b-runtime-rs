@@ -4,15 +4,17 @@ use std::time::{Duration, SystemTime};
 use axum::Router;
 use tonic::service::Routes;
 
+use super::config::BuildStorage;
 use super::health::with_health;
 use super::info::{InfoServer, new_service_id};
 use super::metrics::{HostMetrics, machine_info};
 use super::node::Node;
 use super::service::SandboxServer;
 use super::status::NodeStatus;
+use super::upload::UploadHandler;
 use crate::builder::builds::BuildCache;
 use crate::builder::pipeline::PhasePipeline;
-use crate::builder::service::TemplateServer;
+use crate::builder::service::{TemplateServer, TemplateStorages};
 use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
 use crate::proto::template_service_server::TemplateServiceServer;
@@ -29,24 +31,26 @@ pub struct App {
     pub status: Arc<NodeStatus>,
     pub metrics: Arc<HostMetrics>,
     pub templates: Option<Arc<TemplateServer<PhasePipeline>>>,
+    uploads: Option<UploadHandler>,
     builds: Arc<BuildCache>,
 }
 
 impl App {
-    pub fn new(node: Arc<Node>) -> Self {
+    pub fn new(node: Arc<Node>, build: Option<BuildStorage>) -> Self {
         let builds = Arc::new(BuildCache::default());
-        let templates = node.services.runs_template_manager().then(|| {
-            Arc::new(TemplateServer::new(
-                builds.clone(),
-                node.storage.clone(),
-                Arc::new(PhasePipeline),
-            ))
+        let templates = build.as_ref().map(|build| {
+            let storages = TemplateStorages {
+                template: node.storage.clone(),
+                build: build.storage.clone(),
+            };
+            Arc::new(TemplateServer::new(builds.clone(), storages, Arc::new(PhasePipeline)))
         });
         Self {
             status: node.status.clone(),
             node,
             metrics: Arc::default(),
             templates,
+            uploads: build.and_then(|build| build.uploads),
             builds,
         }
     }
@@ -83,7 +87,11 @@ impl App {
             Some(templates) => routes.add_service(TemplateServiceServer::from_arc(templates.clone())),
             None => routes,
         };
-        with_health(routes, self.status.clone(), COMMIT)
+        let router = with_health(routes, self.status.clone(), COMMIT);
+        match &self.uploads {
+            Some(uploads) => uploads.clone().route(router),
+            None => router,
+        }
     }
 
     fn info(&self) -> InfoServer {

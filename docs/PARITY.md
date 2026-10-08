@@ -34,6 +34,9 @@ Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of t
 | 13 | Missing `start_time` / `end_time` | Unix epoch |
 | 14 | Metadata versions on pause | from the sandbox config |
 | 15 | Upload object metadata, empty diffs | `team_id`, `template_id`, `build_origin`; empty diffs skip the body |
+| 16 | Storage configuration | `TEMPLATE_STORAGE_URL` / `BUILD_CACHE_STORAGE_URL` with upstream URL parsing and texts, legacy `STORAGE_PROVIDER` envs, separate build-cache storage, GCS/S3/Azure/local providers |
+| 17 | Layer file uploads | `InitLayerFileUpload` on the build cache with signed-URL headers (Azure `x-ms-blob-type`), local HMAC `PUT /upload` |
+| 18 | Shutdown | 15 s pause unless `ENVIRONMENT=local`, template builds drained with a 15 s consumer grace, `FORCE_STOP` |
 
 Also: cgroups are named `sbx-<id>-<random>` as upstream, so a same-id resume or checkpoint never shares the old sandbox's cgroup.
 

@@ -20,11 +20,12 @@ use orchestrator::proto::{
 };
 use orchestrator::sandbox::Sandbox;
 use orchestrator::server::app::App;
-use orchestrator::server::config::{NodeConfig, StorageConfig};
+use orchestrator::server::config::NodeConfig;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::header::{Header, Metadata};
+use orchestrator::storage::spec::StorageSpec;
 use tonic::Code;
 use tonic::transport::Channel;
 use uuid::Uuid;
@@ -138,7 +139,11 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         node_id: "grpc-node".to_owned(),
         firecracker: host.firecracker.clone(),
         kernel: host.kernel.clone(),
-        storage: StorageConfig::Local { root: store_root },
+        template_storage: StorageSpec::local(&store_root.display().to_string()),
+        build_cache_storage: Some(StorageSpec::local(
+            &dir.path().join("build-cache").display().to_string(),
+        )),
+        local_upload_base_url: String::new(),
         work_dir: dir.path().join("sandboxes"),
         cache_dir: dir.path().join("cache"),
         template_cache_dir: dir.path().join("templates"),
@@ -163,7 +168,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         clickhouse_additional: Vec::new(),
     };
     let node = Arc::new(Node::new(&config).unwrap());
-    let app = App::new(node.clone());
+    let app = App::new(node.clone(), config.open_build_storage().unwrap());
     app.start_background();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

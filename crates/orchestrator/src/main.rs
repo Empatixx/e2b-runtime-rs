@@ -50,7 +50,7 @@ mod serve {
         }
         node.events.install(event_sinks);
         node.sweep().await;
-        let app = App::new(node.clone());
+        let app = App::new(node.clone(), config.open_build_storage()?);
         app.start_background();
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
         let listener = tokio::net::TcpListener::bind(address)

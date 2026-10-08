@@ -3,11 +3,18 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod storage;
+
 use super::services::Services;
+use super::upload::UploadHandler;
 use crate::clickhouse::endpoint::Endpoint;
+use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
 use crate::routing::redis::RedisSettings;
 use crate::storage::backend::Storage;
+use crate::storage::local_upload::UploadSigner;
+use crate::storage::spec::{Provider, StorageSpec};
+use storage::StorageEnv;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
@@ -18,18 +25,10 @@ const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
 const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
 const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StorageConfig {
-    Local {
-        root: PathBuf,
-    },
-    S3 {
-        bucket: String,
-        endpoint: Option<String>,
-        key: String,
-        secret: String,
-        region: String,
-    },
+#[derive(Clone)]
+pub struct BuildStorage {
+    pub storage: Storage,
+    pub uploads: Option<UploadHandler>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +37,9 @@ pub struct NodeConfig {
     pub node_id: String,
     pub firecracker: PathBuf,
     pub kernel: PathBuf,
-    pub storage: StorageConfig,
+    pub template_storage: StorageSpec,
+    pub build_cache_storage: Option<StorageSpec>,
+    pub local_upload_base_url: String,
     pub work_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub template_cache_dir: PathBuf,
@@ -82,12 +83,25 @@ impl NodeConfig {
             var("CLICKHOUSE_CONNECTION_STRING").as_deref(),
             var("CLICKHOUSE_CONNECTION_STRINGS").as_deref(),
         );
+        let services = Services::parse(var("ORCHESTRATOR_SERVICES").as_deref());
+        let storage = StorageEnv::from_vars(vars);
+        let template_storage = storage
+            .clone()
+            .and_then(|storage| storage.template())
+            .map_err(|e| format!("failed to resolve template storage: {e}"))?;
+        let build_cache_storage = services
+            .runs_template_manager()
+            .then(|| storage.and_then(|storage| storage.build_cache()))
+            .transpose()
+            .map_err(|e| format!("failed to setup build storage: resolve build cache storage: {e}"))?;
         Ok(Self {
             grpc_port,
             node_id: var("NODE_ID").unwrap_or_else(|| DEFAULT_NODE_ID.to_owned()),
             firecracker: required("E2B_FIRECRACKER")?.into(),
             kernel: required("E2B_KERNEL")?.into(),
-            storage: storage_config(vars)?,
+            template_storage,
+            build_cache_storage,
+            local_upload_base_url: var("LOCAL_UPLOAD_BASE_URL").unwrap_or_default(),
             work_dir: var("E2B_WORK_DIR")
                 .unwrap_or_else(|| "/var/lib/e2b/sandboxes".to_owned())
                 .into(),
@@ -111,12 +125,12 @@ impl NodeConfig {
             max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
             max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
             local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
-            force_stop: go_bool(var("FORCE_STOP").as_deref(), "FORCE_STOP")?,
+            force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
             prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
             use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
-            services: Services::parse(var("ORCHESTRATOR_SERVICES").as_deref()),
+            services,
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
             hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
             logs_collector: var("LOGS_COLLECTOR_ADDRESS").unwrap_or_default(),
@@ -127,50 +141,38 @@ impl NodeConfig {
         })
     }
 
-    pub fn open_storage(&self) -> Result<Storage, String> {
-        match &self.storage {
-            StorageConfig::Local { root } => Storage::local(root),
-            StorageConfig::S3 {
-                bucket,
-                endpoint,
-                key,
-                secret,
-                region,
-            } => endpoint
-                .iter()
-                .fold(Storage::s3().bucket(bucket), |builder, endpoint| {
-                    builder.endpoint(endpoint)
-                })
-                .credentials(key, secret)
-                .region(region)
-                .build(),
+    pub fn open_template_storage(&self) -> Result<Storage, String> {
+        Storage::open(&self.template_storage, None)
+            .map_err(|e| format!("failed to create template storage provider: {e}"))
+    }
+
+    pub fn open_build_storage(&self) -> Result<Option<BuildStorage>, String> {
+        self.build_cache_storage
+            .as_ref()
+            .map(|spec| self.build_storage(spec))
+            .transpose()
+            .map_err(|e| format!("failed to setup build storage: {e}"))
+    }
+
+    fn build_storage(&self, spec: &StorageSpec) -> Result<BuildStorage, String> {
+        let uploads = (spec.provider == Provider::Local).then(|| {
+            let base_url = self.upload_base_url();
+            tracing::info!(upload_base_url = %base_url, base_path = %spec.base_path, "Local upload endpoint enabled for filesystem storage");
+            UploadHandler {
+                base_path: spec.base_path.clone().into(),
+                signer: UploadSigner::generate(&base_url),
+            }
+        });
+        Storage::open(spec, uploads.as_ref().map(|uploads| uploads.signer.clone()))
+            .map(|storage| BuildStorage { storage, uploads })
+            .map_err(|e| format!("create build cache storage provider: {e}"))
+    }
+
+    fn upload_base_url(&self) -> String {
+        match self.local_upload_base_url.as_str() {
+            "" => format!("http://localhost:{}", self.grpc_port),
+            url => url.to_owned(),
         }
-    }
-}
-
-fn go_bool(value: Option<&str>, name: &str) -> Result<bool, String> {
-    match value {
-        None | Some("") => Ok(false),
-        Some("1" | "t" | "T" | "TRUE" | "true" | "True") => Ok(true),
-        Some("0" | "f" | "F" | "FALSE" | "false" | "False") => Ok(false),
-        Some(other) => Err(format!(
-            "env: parse error on field \"ForceStop\" of type \"bool\": strconv.ParseBool: parsing {other:?}: invalid syntax ({name})"
-        )),
-    }
-}
-
-fn storage_config(vars: &HashMap<String, String>) -> Result<StorageConfig, String> {
-    let var = |name: &str| vars.get(name).cloned();
-    match (var("E2B_STORAGE_DIR"), var("E2B_S3_BUCKET")) {
-        (Some(root), _) => Ok(StorageConfig::Local { root: root.into() }),
-        (None, Some(bucket)) => Ok(StorageConfig::S3 {
-            bucket,
-            endpoint: var("E2B_S3_ENDPOINT"),
-            key: var("E2B_S3_KEY").unwrap_or_default(),
-            secret: var("E2B_S3_SECRET").unwrap_or_default(),
-            region: var("E2B_S3_REGION").unwrap_or_else(|| "us-east-1".to_owned()),
-        }),
-        (None, None) => Err("set E2B_STORAGE_DIR or E2B_S3_BUCKET".to_owned()),
     }
 }
 
@@ -200,7 +202,8 @@ mod tests {
         let config = NodeConfig::from_vars(&vars(&[
             ("E2B_FIRECRACKER", "/opt/fc"),
             ("E2B_KERNEL", "/opt/vmlinux"),
-            ("E2B_STORAGE_DIR", "/srv/builds"),
+            ("STORAGE_PROVIDER", "Local"),
+            ("LOCAL_TEMPLATE_STORAGE_BASE_PATH", "/srv/builds"),
         ]))
         .unwrap();
 
@@ -220,23 +223,20 @@ mod tests {
         assert!(!prefetch_source(Some("off")));
         assert!(prefetch_source(Some("unknown")));
         assert!(config.labels.is_empty());
-        assert_eq!(
-            config.storage,
-            StorageConfig::Local {
-                root: "/srv/builds".into()
-            }
-        );
+        assert_eq!(config.template_storage, StorageSpec::local("/srv/builds"));
+        assert_eq!(config.build_cache_storage, None);
+        assert_eq!(config.upload_base_url(), "http://localhost:5008");
     }
 
     #[test]
     fn missing_or_bad_values_are_errors() {
         assert_eq!(
-            NodeConfig::from_vars(&vars(&[("E2B_KERNEL", "/k"), ("E2B_STORAGE_DIR", "/s")])).unwrap_err(),
+            NodeConfig::from_vars(&vars(&[("E2B_KERNEL", "/k"), ("STORAGE_PROVIDER", "Local")])).unwrap_err(),
             "E2B_FIRECRACKER is not set"
         );
         assert_eq!(
             NodeConfig::from_vars(&vars(&[("E2B_FIRECRACKER", "/f"), ("E2B_KERNEL", "/k")])).unwrap_err(),
-            "set E2B_STORAGE_DIR or E2B_S3_BUCKET"
+            "failed to resolve template storage: template storage bucket not configured: set TEMPLATE_BUCKET_NAME"
         );
         assert_eq!(
             NodeConfig::from_vars(&vars(&[("GRPC_PORT", "x")])).unwrap_err(),
@@ -249,7 +249,7 @@ mod tests {
         let config = NodeConfig::from_vars(&vars(&[
             ("E2B_FIRECRACKER", "/f"),
             ("E2B_KERNEL", "/k"),
-            ("E2B_STORAGE_DIR", "/s"),
+            ("STORAGE_PROVIDER", "Local"),
             ("ENVIRONMENT", "local"),
             ("FORCE_STOP", "T"),
         ]))
@@ -259,10 +259,38 @@ mod tests {
             NodeConfig::from_vars(&vars(&[
                 ("E2B_FIRECRACKER", "/f"),
                 ("E2B_KERNEL", "/k"),
-                ("E2B_STORAGE_DIR", "/s"),
+                ("STORAGE_PROVIDER", "Local"),
                 ("FORCE_STOP", "yes")
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_build_cache_resolves_only_for_the_template_manager() {
+        let base = [
+            ("E2B_FIRECRACKER", "/f"),
+            ("E2B_KERNEL", "/k"),
+            ("TEMPLATE_STORAGE_URL", "file:///t"),
+            ("ORCHESTRATOR_SERVICES", "template-manager"),
+        ];
+        let config = NodeConfig::from_vars(&vars(&[&base[..], &[("STORAGE_PROVIDER", "Local")]].concat())).unwrap();
+        assert_eq!(config.build_cache_storage, Some(StorageSpec::local("/tmp/build-cache")));
+        assert_eq!(
+            NodeConfig::from_vars(&vars(&base)).unwrap_err(),
+            "failed to setup build storage: resolve build cache storage: build cache storage bucket not configured: set BUILD_CACHE_BUCKET_NAME"
+        );
+        let uploads = NodeConfig::from_vars(&vars(
+            &[
+                &base[..],
+                &[
+                    ("STORAGE_PROVIDER", "Local"),
+                    ("LOCAL_UPLOAD_BASE_URL", "http://node:5008"),
+                ],
+            ]
+            .concat(),
+        ))
+        .unwrap();
+        assert_eq!(uploads.upload_base_url(), "http://node:5008");
     }
 }

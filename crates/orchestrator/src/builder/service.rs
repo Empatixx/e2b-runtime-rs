@@ -33,18 +33,26 @@ pub trait TemplateBuilder: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>>;
 }
 
+#[derive(Clone)]
+pub struct TemplateStorages {
+    pub template: Storage,
+    pub build: Storage,
+}
+
 pub struct TemplateServer<B> {
     builds: Arc<BuildCache>,
     storage: Storage,
+    build_storage: Storage,
     builder: Arc<B>,
     tasks: TaskTracker,
 }
 
 impl<B: TemplateBuilder> TemplateServer<B> {
-    pub fn new(builds: Arc<BuildCache>, storage: Storage, builder: Arc<B>) -> Self {
+    pub fn new(builds: Arc<BuildCache>, storages: TemplateStorages, builder: Arc<B>) -> Self {
         Self {
             builds,
-            storage,
+            storage: storages.template,
+            build_storage: storages.build,
             builder,
             tasks: TaskTracker::new(),
         }
@@ -223,16 +231,19 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
         let request = request.into_inner();
         let scope = request.cache_scope.clone().unwrap_or(request.template_id.clone());
         let path = join_path(&[&scope, "files", &format!("{}.tar", request.hash)]);
+        self.build_storage
+            .open_blob(&path)
+            .map_err(|e| Status::unknown(format!("failed to open layer files cache: {e}")))?;
         let present = self
-            .storage
+            .build_storage
             .exists(&path)
             .await
             .map_err(|e| Status::unknown(format!("failed to check if layer files exists: {e}")))?;
-        let response = match self.storage.upload_signed_url(&path, SIGNED_URL_EXPIRATION).await {
-            Ok(url) => InitLayerFileUploadResponse {
+        let response = match self.build_storage.upload_signed_url(&path, SIGNED_URL_EXPIRATION).await {
+            Ok(upload) => InitLayerFileUploadResponse {
                 present,
-                url: Some(url),
-                headers: Default::default(),
+                url: Some(upload.url),
+                headers: upload.headers,
             },
             Err(e) if present => {
                 tracing::warn!(error = %e, "serving layer-file cache hit without an upload URL: signing the upload URL failed");
@@ -255,7 +266,10 @@ mod tests {
 
     use super::*;
     use crate::builder::phase::INTERNAL_ERROR_MESSAGE;
+    use crate::go_url::GoUrl;
     use crate::proto::TemplateConfig;
+    use crate::storage::local_upload::UploadSigner;
+    use crate::storage::spec::StorageSpec;
 
     struct Stub;
 
@@ -290,8 +304,12 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::local(dir.path()).unwrap();
+        let storages = TemplateStorages {
+            template: storage.clone(),
+            build: storage.clone(),
+        };
         Fixture {
-            server: TemplateServer::new(Arc::default(), storage.clone(), Arc::new(Stub)),
+            server: TemplateServer::new(Arc::default(), storages, Arc::new(Stub)),
             storage,
             _dir: dir,
         }
@@ -506,7 +524,40 @@ mod tests {
         assert_eq!((hit.present, hit.url), (true, None));
         assert_eq!(
             miss.message(),
-            "failed to get signed url: failed to presign PUT URL: local storage cannot sign URLs"
+            "failed to get signed url: file system storage does not support signed URLs (no local upload endpoint configured)"
         );
+    }
+
+    #[tokio::test]
+    async fn layer_file_upload_signs_local_uploads() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = UploadSigner::with_key("http://node:5008", vec![1; 32]);
+        let build = Storage::open(
+            &StorageSpec::local(&dir.path().display().to_string()),
+            Some(signer.clone()),
+        )
+        .unwrap();
+        let storages = TemplateStorages {
+            template: Storage::local(&dir.path().join("templates")).unwrap(),
+            build,
+        };
+        let server = TemplateServer::new(Arc::default(), storages, Arc::new(Stub));
+
+        let response = server
+            .init_layer_file_upload(Request::new(InitLayerFileUploadRequest {
+                template_id: "t1".to_owned(),
+                hash: "h1".to_owned(),
+                cache_scope: Some("scope".to_owned()),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.present);
+        assert!(response.headers.is_empty());
+        let url = GoUrl::parse(&response.url.unwrap()).unwrap();
+        assert_eq!((url.host.as_str(), url.path.as_str()), ("node:5008", "/upload"));
+        assert_eq!(url.query().values["path"], vec!["scope/files/h1.tar".to_owned()]);
+        assert!(dir.path().join("scope/files").is_dir());
     }
 }
