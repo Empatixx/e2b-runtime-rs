@@ -12,8 +12,14 @@ sudo curl -fsSL -o "$DIR/firecracker" "https://github.com/e2b-dev/fc-versions/re
 sudo curl -fsSL -o "$DIR/vmlinux" "https://github.com/e2b-dev/fc-kernels/releases/download/$KERNEL_RELEASE/$KERNEL_ASSET"
 sudo curl -fsSL -o "$DIR/alpine.tar.gz" "$ALPINE"
 sudo chmod +x "$DIR/firecracker"
+sudo apt-get install -y -qq busybox-static >/dev/null
+BUSYBOX_VERSION=$(busybox 2>&1 | head -1 | sed -n 's/^BusyBox v\([0-9.]*\).*/\1/p')
+sudo mkdir -p "$DIR/busybox/$BUSYBOX_VERSION/amd64"
+sudo cp "$(command -v busybox)" "$DIR/busybox/$BUSYBOX_VERSION/amd64/busybox"
 {
   echo "E2B_FIRECRACKER=$DIR/firecracker"
   echo "E2B_KERNEL=$DIR/vmlinux"
   echo "E2B_ALPINE_TAR=$DIR/alpine.tar.gz"
+  echo "HOST_BUSYBOX_DIR=$DIR/busybox"
+  echo "BUSYBOX_VERSION=$BUSYBOX_VERSION"
 } >> "${GITHUB_ENV:-/dev/null}"

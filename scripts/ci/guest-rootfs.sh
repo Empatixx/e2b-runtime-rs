@@ -19,4 +19,8 @@ echo "e2b" | sudo tee "$WORK/root/etc/hostname" >/dev/null
 sudo mkdir -p "$DIR"
 sudo rm -f "$DIR/rootfs.ext4"
 sudo mkfs.ext4 -q -F -d "$WORK/root" "$DIR/rootfs.ext4" "$SIZE"
-echo "E2B_ROOTFS=$DIR/rootfs.ext4" >> "${GITHUB_ENV:-/dev/null}"
+sudo cp target/debug/envd "$DIR/envd"
+{
+  echo "E2B_ROOTFS=$DIR/rootfs.ext4"
+  echo "HOST_ENVD_PATH=$DIR/envd"
+} >> "${GITHUB_ENV:-/dev/null}"

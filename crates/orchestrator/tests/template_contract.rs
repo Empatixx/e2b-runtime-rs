@@ -1,0 +1,207 @@
+#![cfg(target_os = "linux")]
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+
+use orchestrator::builder::config::BuilderConfig;
+use orchestrator::proto::template_config::Source;
+use orchestrator::proto::template_service_client::TemplateServiceClient;
+use orchestrator::proto::{TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest};
+use orchestrator::server::app::{App, TemplateManagerSetup};
+use orchestrator::server::config::NodeConfig;
+use orchestrator::server::node::Node;
+use orchestrator::server::services::Services;
+use orchestrator::storage::spec::StorageSpec;
+use uuid::Uuid;
+
+const SLOTS: std::ops::RangeInclusive<u32> = 4106..=4109;
+const BASE_IMAGE: &str = "debian:trixie-slim";
+const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+struct Host {
+    firecracker: PathBuf,
+    kernel: PathBuf,
+    builder_vars: HashMap<String, String>,
+}
+
+fn host() -> Option<Host> {
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let in_ci = var("CI").is_some_and(|value| value == "true");
+    let ready = nix::unistd::geteuid().is_root() && Path::new("/dev/kvm").exists();
+    let host = ready.then_some(()).and_then(|()| {
+        Some(Host {
+            firecracker: var("E2B_FIRECRACKER")?.into(),
+            kernel: var("E2B_KERNEL")?.into(),
+            builder_vars: ["HOST_ENVD_PATH", "HOST_BUSYBOX_DIR", "BUSYBOX_VERSION"]
+                .iter()
+                .map(|name| var(name).map(|value| (name.to_string(), value)))
+                .collect::<Option<HashMap<_, _>>>()?,
+        })
+    });
+    assert!(
+        host.is_some() || !in_ci,
+        "template contract needs root, KVM, E2B_FIRECRACKER, E2B_KERNEL, HOST_ENVD_PATH, HOST_BUSYBOX_DIR and BUSYBOX_VERSION in CI"
+    );
+    host
+}
+
+fn node_config(host: &Host, dir: &Path) -> NodeConfig {
+    let mut builder_vars = host.builder_vars.clone();
+    builder_vars.insert(
+        "TEMPLATES_DIR".to_owned(),
+        dir.join("build-templates").display().to_string(),
+    );
+    NodeConfig {
+        grpc_port: 0,
+        node_id: "template-node".to_owned(),
+        firecracker: host.firecracker.clone(),
+        kernel: host.kernel.clone(),
+        template_storage: StorageSpec::local(&dir.join("store").display().to_string()),
+        build_cache_storage: Some(StorageSpec::local(&dir.join("build-cache").display().to_string())),
+        local_upload_base_url: String::new(),
+        builder: BuilderConfig::from_vars(&builder_vars),
+        work_dir: dir.join("sandboxes"),
+        cache_dir: dir.join("cache"),
+        template_cache_dir: dir.join("templates"),
+        slots: SLOTS,
+        local_expiry: false,
+        envd_timeout: Duration::from_secs(10),
+        labels: Vec::new(),
+        max_sandboxes: 10,
+        max_starting: 3,
+        local: true,
+        force_stop: false,
+        build_cache_max_usage: 95.0,
+        prefetch_from_trace: true,
+        use_memfd: true,
+        services: Services::parse(Some("orchestrator,template-manager")),
+        orchestrator_ip: "192.0.2.1".to_owned(),
+        hyperloop_port: 0,
+        logs_collector: String::new(),
+        node_ip: "localhost".to_owned(),
+        redis: None,
+        clickhouse: None,
+        clickhouse_additional: Vec::new(),
+    }
+}
+
+async fn wait_for_build(
+    templates: &mut TemplateServiceClient<tonic::transport::Channel>,
+    template_id: &str,
+    build_id: &str,
+) -> (
+    i32,
+    Vec<String>,
+    Option<orchestrator::proto::TemplateBuildMetadata>,
+    String,
+) {
+    let deadline = tokio::time::Instant::now() + BUILD_TIMEOUT;
+    loop {
+        let status = templates
+            .template_build_status(TemplateStatusRequest {
+                template_id: template_id.to_owned(),
+                build_id: build_id.to_owned(),
+                limit: Some(100),
+                ..TemplateStatusRequest::default()
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let finished = status.status != TemplateBuildState::Building as i32;
+        if finished || tokio::time::Instant::now() > deadline {
+            let logs = status.log_entries.iter().map(|entry| entry.message.clone()).collect();
+            let reason = status.reason.map(|reason| reason.message).unwrap_or_default();
+            return (status.status, logs, status.metadata, reason);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_debian_image_becomes_a_provisioned_base_layer() {
+    let Some(host) = host() else {
+        eprintln!("skipped: needs root, KVM and the build assets");
+        return;
+    };
+    SLOTS.for_each(|index| {
+        drop(
+            Command::new("ip")
+                .args(["netns", "delete", &format!("ns-{index}")])
+                .status(),
+        )
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = node_config(&host, dir.path());
+    let node = Arc::new(Node::new(&config).unwrap());
+    let setup = config.open_build_storage().unwrap().map(|build| TemplateManagerSetup {
+        build,
+        builder: config.builder.clone(),
+        development: true,
+    });
+    let app = App::new(node.clone(), setup).unwrap();
+    app.start_background();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app.router()).into_future());
+    let mut templates = TemplateServiceClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let template_id = format!("t{}", Uuid::new_v4().simple());
+    let build_id = Uuid::new_v4().to_string();
+
+    templates
+        .template_create(TemplateCreateRequest {
+            template: Some(TemplateConfig {
+                template_id: template_id.clone(),
+                build_id: build_id.clone(),
+                memory_mb: 1024,
+                v_cpu_count: 2,
+                disk_size_mb: 2048,
+                source: Some(Source::FromImage(BASE_IMAGE.to_owned())),
+                team_id: "team".to_owned(),
+                ..TemplateConfig::default()
+            }),
+            ..TemplateCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let (state, logs, metadata, reason) = wait_for_build(&mut templates, &template_id, &build_id).await;
+
+    eprintln!("build logs:\n{}", logs.join("\n"));
+    assert_eq!(state, TemplateBuildState::Completed as i32, "build failed: {reason}");
+    for line in [
+        "Requesting Docker Image",
+        "Provisioning sandbox template",
+        "Provisioning was successful, cleaning up",
+        "Sandbox template provisioned",
+        "Creating base sandbox template layer",
+    ] {
+        assert!(logs.iter().any(|log| log == line), "missing log line {line:?}");
+    }
+    let metadata = metadata.unwrap();
+    assert!(!metadata.envd_version_key.is_empty());
+    assert_eq!(
+        (metadata.kernel_version.as_str(), metadata.firecracker_version.as_str()),
+        ("vmlinux-6.1.158", "v1.14-0.2.0")
+    );
+    assert!(
+        metadata.rootfs_size_key >= 2048,
+        "rootfs is {} MB",
+        metadata.rootfs_size_key
+    );
+    let index_dir = dir.path().join("build-cache").join(&template_id).join("index");
+    let entries: Vec<_> = std::fs::read_dir(&index_dir).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    let base_build = std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
+    let base_build: serde_json::Value = serde_json::from_str(&base_build).unwrap();
+    let base_dir = dir
+        .path()
+        .join("store")
+        .join(base_build["template"]["build_id"].as_str().unwrap());
+    for file in ["metadata.json", "rootfs.ext4.header", "memfile.header", "snapfile"] {
+        assert!(base_dir.join(file).is_file(), "missing {file}");
+    }
+}
