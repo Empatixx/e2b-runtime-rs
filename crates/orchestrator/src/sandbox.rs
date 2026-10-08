@@ -140,6 +140,11 @@ impl Sandbox {
 
     async fn start(&mut self) -> Result<(), String> {
         let rootfs = self.attach_disk_and_slot().await?;
+        if let Some(hook) = self.config.pre_boot.take() {
+            hook(rootfs.clone())
+                .await
+                .map_err(|e| format!("pre-boot hook failed: {e}"))?;
+        }
         let client = self.spawn_firecracker(rootfs).await?;
         self.boot(&client).await?;
         match self.config.wait_for_envd {

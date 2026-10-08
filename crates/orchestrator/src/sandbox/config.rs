@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
+use futures::future::BoxFuture;
 use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 
 use crate::envd::EnvdInit;
 use crate::firecracker::kernel_args::BootOptions;
@@ -15,6 +17,8 @@ const DEFAULT_INIT_PATH: &str = "/sbin/init";
 const DEFAULT_VCPUS: u32 = 2;
 const DEFAULT_MEMORY_MIB: u32 = 1024;
 const DEFAULT_ENVD_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub type PreBoot = Box<dyn FnOnce(PathBuf) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 #[derive(Clone)]
 pub enum Rootfs {
@@ -36,6 +40,8 @@ pub struct SandboxConfig {
     pub io_engine: Option<String>,
     pub console: Option<UnboundedSender<String>>,
     pub wait_for_envd: bool,
+    pub memory_base: Option<Uuid>,
+    pub pre_boot: Option<PreBoot>,
     pub vcpus: u32,
     pub memory_mib: u32,
     pub work_dir: PathBuf,
@@ -73,6 +79,8 @@ pub struct SandboxBuilder {
     io_engine: Option<String>,
     console: Option<UnboundedSender<String>>,
     skip_envd: bool,
+    memory_base: Option<Uuid>,
+    pre_boot: Option<PreBoot>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     work_dir: Option<PathBuf>,
@@ -121,6 +129,16 @@ impl SandboxBuilder {
 
     pub fn console(mut self, console: UnboundedSender<String>) -> Self {
         self.console = Some(console);
+        self
+    }
+
+    pub fn memory_base(mut self, build_id: Uuid) -> Self {
+        self.memory_base = Some(build_id);
+        self
+    }
+
+    pub fn pre_boot(mut self, hook: PreBoot) -> Self {
+        self.pre_boot = Some(hook);
         self
     }
 
@@ -226,6 +244,8 @@ impl SandboxBuilder {
             io_engine: self.io_engine,
             console: self.console,
             wait_for_envd: !self.skip_envd,
+            memory_base: self.memory_base,
+            pre_boot: self.pre_boot,
             vcpus: self.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             work_dir: self.work_dir.ok_or("work dir is required")?,

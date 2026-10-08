@@ -115,6 +115,22 @@ impl TemplateMetadata {
         }
     }
 
+    pub fn new_version(&self, template: TemplateVersions) -> Self {
+        Self {
+            version: CURRENT_VERSION,
+            template,
+            context: self.context.clone(),
+            start: self.start.clone(),
+            from_image: self.from_image.clone(),
+            from_template: self.from_template.clone(),
+            cmdline_args: self.cmdline_args.clone(),
+            balloon: self.balloon.clone(),
+            cpu_template: self.cpu_template.clone(),
+            build_cpu_template: self.build_cpu_template.clone(),
+            ..Self::default()
+        }
+    }
+
     pub fn same_version(&self, template: TemplateVersions) -> Self {
         Self {
             template,
@@ -235,5 +251,40 @@ mod tests {
         assert_eq!(lenient.template, TemplateVersions::default());
         assert!(lenient.context.env_vars.is_empty());
         assert_eq!(lenient.memory_prefetch().map(|memory| memory.indices.len()), Some(0));
+    }
+
+    #[test]
+    fn a_new_version_keeps_the_build_context_and_drops_the_rest() {
+        let source = TemplateMetadata {
+            version: 1,
+            context: Context {
+                user: Some("user".to_owned()),
+                ..Context::default()
+            },
+            start: Some(serde_json::json!({ "start_command": "x" })),
+            from_image: Some("debian".to_owned()),
+            prefetch: Some(Prefetch { memory: None }),
+            filesystem_only: true,
+            fs_quiesced: true,
+            ..TemplateMetadata::default()
+        };
+        let template = TemplateVersions {
+            build_id: "b".to_owned(),
+            kernel_version: "k".to_owned(),
+            firecracker_version: "f".to_owned(),
+        };
+
+        let next = source.new_version(template.clone());
+
+        assert_eq!(next.version, CURRENT_VERSION);
+        assert_eq!(next.template, template);
+        assert_eq!(
+            (next.context, next.start, next.from_image),
+            (source.context, source.start, source.from_image)
+        );
+        assert_eq!(
+            (next.prefetch, next.filesystem_only, next.fs_quiesced),
+            (None, false, false)
+        );
     }
 }

@@ -13,6 +13,7 @@ use crate::builder::phase::{BuildError, Phase};
 use crate::builder::provision::wait_for_provisioning;
 use crate::builder::rootfs::{MB, RootfsRequest, create_ext4_filesystem};
 use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISION_RESULT_PATH, provision_script};
+use crate::builder::uploads::LayerUpload;
 use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
 use crate::go_exec::GoCommand;
@@ -303,9 +304,12 @@ impl BaseBuild<'_> {
         ext4.set_reserved_blocks(RESERVED_DISK_SPACE_MB, BLOCK_SIZE)
             .await
             .map_err(|e| BuildError::Internal(format!("create sandbox: pre-boot hook failed: {e}")))?;
+        let base_build = Uuid::parse_str(&metadata.template.build_id)
+            .map_err(|e| BuildError::Internal(format!("failed to parse build id: {e}")))?;
         let held = self.build_slot("create sandbox").await?;
         let mut sandbox = held
             .builder
+            .memory_base(base_build)
             .rootfs_file(&ext4.file)
             .init_path(SYSTEMD_INIT)
             .kernel_logs(self.phase.env.development)
@@ -368,15 +372,15 @@ impl BaseBuild<'_> {
             .with("team_id", &self.phase.request.team_id)
             .with("template_id", &self.phase.request.template_id)
             .with("build_origin", BUILD_ORIGIN);
-        node.upload_now(local, object_metadata)
-            .await
-            .map_err(|e| BuildError::Internal(format!("error uploading snapshot: {e}")))?;
-        self.phase
-            .index
-            .save(hash, build_id)
-            .await
-            .map_err(|e| BuildError::Internal(format!("error saving UUID to hash mapping: {e}")))?;
-        self.log.push(LogLevel::Debug, format!("Saved: {build_id}"));
+        self.phase.uploads.start(
+            node.spawn_upload(local, object_metadata),
+            LayerUpload {
+                index: self.phase.index.clone(),
+                hash: hash.to_owned(),
+                build_id: build_id.clone(),
+                fields: self.log.fields.clone(),
+            },
+        );
         Ok(metadata)
     }
 }

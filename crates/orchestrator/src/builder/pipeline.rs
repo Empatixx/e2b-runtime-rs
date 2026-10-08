@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -6,13 +5,14 @@ use futures::future::BoxFuture;
 
 use super::builds::BuildInfo;
 use super::index::LayerIndex;
+use super::layer::envd_version;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
 use super::phases::base::{BasePhase, BaseRequest, BaseSource};
 use super::service::TemplateBuilder;
+use super::uploads::LayerUploads;
 use uuid::Uuid;
 
-use crate::go_exec::GoCommand;
 use crate::proto::template_config::Source;
 use crate::proto::{TemplateBuildMetadata, TemplateConfig, TemplateCreateRequest};
 use crate::storage::paths::BuildPaths;
@@ -24,7 +24,12 @@ pub struct PhasePipeline {
 }
 
 impl PhasePipeline {
-    fn phases(&self, request: &TemplateCreateRequest, envd_version: &str) -> Result<Vec<Box<dyn Phase>>, BuildError> {
+    fn phases(
+        &self,
+        request: &TemplateCreateRequest,
+        envd_version: &str,
+        uploads: &Arc<LayerUploads>,
+    ) -> Result<Vec<Box<dyn Phase>>, BuildError> {
         let config = request.template.clone().unwrap_or_default();
         let scope = request
             .cache_scope
@@ -39,6 +44,7 @@ impl PhasePipeline {
             env: self.env.clone(),
             request: base_request(&config, envd_version)?,
             index,
+            uploads: uploads.clone(),
         };
         Ok(vec![Box::new(base)])
     }
@@ -56,8 +62,23 @@ impl TemplateBuilder for PhasePipeline {
             let envd_version = envd_version(&env.config.envd)
                 .await
                 .map_err(|e| BuildError::Internal(format!("error getting envd version: {e}")))?;
-            let phases = pipeline.phases(&request, &envd_version)?;
-            let last = run_phases(&info.log, &phases).await?;
+            let uploads = Arc::new(LayerUploads::new(info.clone()));
+            let phases = pipeline.phases(&request, &envd_version, &uploads)?;
+            let built = run_phases(&info.log, &phases).await;
+            let landed = uploads.wait().await;
+            let last = match (built, landed) {
+                (Err(e), Err(upload)) => {
+                    tracing::error!(error = %upload, "template layer upload wait failed");
+                    return Err(e);
+                }
+                (Err(e), Ok(())) => return Err(e),
+                (Ok(_), Err(upload)) => {
+                    return Err(BuildError::Internal(format!(
+                        "error waiting for layers upload: {upload}"
+                    )));
+                }
+                (Ok(last), Ok(())) => last,
+            };
             let rootfs_size = rootfs_size(&env, &last).await?;
             Ok(result_metadata(&env, rootfs_size, envd_version))
         }
@@ -108,13 +129,4 @@ fn result_metadata(env: &BuildEnv, rootfs_size: u64, envd_version: String) -> Te
         firecracker_version: env.config.firecracker_version.clone(),
         scheduling_metadata: None,
     }
-}
-
-async fn envd_version(envd: &Path) -> Result<String, String> {
-    GoCommand::new(envd)
-        .args(["-version"])
-        .run()
-        .await
-        .map(|output| String::from_utf8_lossy(&output).trim().to_owned())
-        .map_err(|e| format!("error while getting envd version: {}", e.message))
 }

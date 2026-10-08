@@ -1,6 +1,8 @@
 mod checkpoint;
+pub mod layers;
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 
 use parking_lot::Mutex;
@@ -216,17 +218,24 @@ impl Node {
     }
 
     pub async fn upload_now(&self, local: LocalSnapshot, object_metadata: ObjectMetadata) -> Result<(), String> {
+        self.spawn_upload(local, object_metadata).await
+    }
+
+    pub fn spawn_upload(
+        &self,
+        local: LocalSnapshot,
+        object_metadata: ObjectMetadata,
+    ) -> impl Future<Output = Result<(), String>> + Send + 'static {
         let build = local.snapshot.build.clone();
         let attempt = upload_attempt(local, self.storage.clone(), object_metadata);
         let uploads = self.uploads.clone();
         let store = self.store.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let uploaded = uploads.run(build.build_id, parents(&build), attempt).await;
             store.unpin(build.build_id);
             uploaded
-        })
-        .await
-        .map_err(|e| format!("snapshot upload task failed: {e}"))?
+        });
+        async move { task.await.map_err(|e| format!("snapshot upload task failed: {e}"))? }
     }
 
     pub fn build_sandbox(&self, sandbox_id: &str, template_id: &str) -> SandboxBuilder {

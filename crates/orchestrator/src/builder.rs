@@ -3,6 +3,8 @@ pub mod config;
 pub mod ext4;
 pub mod hash;
 pub mod index;
+#[cfg(target_os = "linux")]
+pub mod layer;
 pub mod logs;
 pub mod oci;
 pub mod phase;
@@ -13,5 +15,7 @@ pub mod pipeline;
 pub mod provision;
 #[cfg(target_os = "linux")]
 pub mod rootfs;
+pub mod sandbox_command;
 pub mod service;
 pub mod template_files;
+pub mod uploads;

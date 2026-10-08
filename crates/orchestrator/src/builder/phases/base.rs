@@ -12,6 +12,7 @@ use crate::builder::index::{CacheMiss, LayerIndex, MetadataError};
 use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta};
 use crate::builder::template_files::hash::provision_version;
+use crate::builder::uploads::LayerUploads;
 use crate::proto::FromImageRegistry;
 use crate::template::metadata::{CURRENT_VERSION, Context, TemplateMetadata, TemplateVersions};
 
@@ -48,6 +49,7 @@ pub struct BasePhase {
     pub env: Arc<BuildEnv>,
     pub request: BaseRequest,
     pub index: Arc<LayerIndex>,
+    pub uploads: Arc<LayerUploads>,
 }
 
 impl BasePhase {

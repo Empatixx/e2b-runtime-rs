@@ -17,7 +17,7 @@ use crate::memory::server::MemoryServer;
 use crate::memory::snapshot::{GuestMemory, diff_metadata, export_pages, memfile_pages};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
-use crate::storage::header::{DiffMetadata, Header, Metadata};
+use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
 
 const ROOTFS_BLOCK_SIZE: u64 = 4096;
 
@@ -241,7 +241,16 @@ impl Sandbox {
 
     fn memory_parent(&self, page_size: u64, size: u64) -> Result<Header, String> {
         self.config.memfile.as_ref().map_or_else(
-            || Header::new(Metadata::template(Uuid::nil(), page_size, size), Vec::new()),
+            || {
+                let base = self.config.memory_base.unwrap_or_else(Uuid::nil);
+                let empty = BuildMapping {
+                    offset: 0,
+                    length: size,
+                    build_id: Uuid::nil(),
+                    storage_offset: 0,
+                };
+                Header::new(Metadata::template(base, page_size, size), vec![empty])
+            },
             |memfile| Ok(memfile.header().clone()),
         )
     }
