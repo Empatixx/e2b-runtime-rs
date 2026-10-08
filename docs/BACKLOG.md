@@ -137,3 +137,12 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `max_sandboxes` and the starting limit are read once from env; upstream refreshes them from feature flags every 30 s | API |
 | Fresh (non-resume) creates use `TryAcquire` upstream; every Create here is a resume and waits up to 15 s | template build |
 
+## Orchestrator: async pause (M11)
+
+| Item | Matters from |
+|---|---|
+| No peer-to-peer chunk routing: another node resuming a build whose upload is still running gets `FailedPrecondition` | API |
+| A failed upload is only logged; upstream also counts it in a metric and keeps the template marked for the superseded-release logic | API |
+| `metadata.json` is not written or uploaded yet (M12 adds it with the prefetch trace) | M12 |
+| Disk-pressure eviction dooms one entry per second; upstream re-ticks immediately after an eviction | API |
+

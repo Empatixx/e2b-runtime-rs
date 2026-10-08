@@ -11,7 +11,8 @@ Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `f
 Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/storage/         object_store backends, build paths, header V3
-  src/block/           sparse cache + tracker, chunker, build file, overlay
+  src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
+                       disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
                        pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
   src/network/         slot.rs (netns, veth, tap, iptables per slot; HostSlots), pool.rs (NetworkPool: 32 new,
@@ -27,14 +28,15 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/envd.rs          envd POST /init client (upstream retry semantics)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
-                       snapshot.rs (Snapshot, snapshot/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
+                       snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
                        resume.rs (snapshot load over uffd)
   src/server/          gRPC node: config.rs (env), node.rs (Node: storage, store, registry, network pool, template cache),
                        lifecycle.rs (task per sandbox: commands, end_time expiry, death watch), service.rs (SandboxService),
                        registry.rs, status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
                        metrics poller, /proc parsers), info.rs (InfoService), health.rs (/health on the tonic router),
                        admission.rs (max sandboxes, starting semaphore), shutdown.rs (drain), app.rs (App: one axum
-                       router for SandboxService, InfoService, grpc health and /health)
+                       router for SandboxService, InfoService, grpc health and /health), retry.rs (upload retry
+                       policy), uploads.rs (Uploads: background snapshot uploads, parents land first)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/orchestrator.proto (no package upstream)
   src/main.rs          orchestrator binary: NodeConfig::from_env, App served by axum on GRPC_PORT (5008), upstream shutdown order
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
