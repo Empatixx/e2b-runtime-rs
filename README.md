@@ -7,7 +7,7 @@ A self-hosted [E2B](https://e2b.dev) runtime written in Rust, aimed at bare-meta
 | Component | What it does | State |
 |---|---|---|
 | **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 in progress (milestones M0–M9 in the [spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume and pause work end to end in CI (M0–M7); gRPC server next ([spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
 | template build | OCI image → ext4 → snapshot | planned |
 | api | REST API for the SDK, node selection | planned |
 | client-proxy | `https://<port>-<sandbox>.<domain>` routing | planned |

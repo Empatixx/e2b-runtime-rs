@@ -79,7 +79,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | M8 |
 | Prefetch from a build-time page trace (needs template build) | template build |
-| Firecracker `use_memfd` / `use_sync_wp` (write-protect tracking, memfd copy-out) are not used | M7 |
+| Firecracker `use_memfd` (memfd copy-out instead of `process_vm_readv`) and `use_sync_wp` (synchronous WP events) are not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty` | M8 |
 | A memory server that dies while the sandbox runs is only noticed at `stop()`; watch it and stop the sandbox | M8 |
 | Rate limiter reset `PATCH`es after snapshot load (upstream sends empty limiters) | M8 |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
@@ -92,4 +92,15 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The uffd handshake socket is `0777` (upstream parity); `0600` would do, since Firecracker runs as root | M8 |
 | `Regions::addresses_of` / `total_size` are only used by tests; `testing::Pages::read_byte` is a safe fn dereferencing any address | any |
 | `Chunker::fetch_attempts` / `open_with_timeout` are public only for tests | any |
+
+## Orchestrator: pause (M7)
+
+| Item | Target |
+|---|---|
+| In-place pause (snapshot and keep running, `ResumeInPlace`) | M8 |
+| Deferred/background rootfs export (reflink, `copy_file_range`) and async memfile header | M8 |
+| Dedup of the memory diff against the parent memfile | later |
+| `metadata.json` is not written with a build | M8 |
+| Pause has no envd freeze / fsfreeze before snapshot; the test runs `sync` in the guest itself | M8 |
+| If write-protect is unavailable the resumed pause falls back to resident−empty (correct but large); surface it as a metric | M8 |
 

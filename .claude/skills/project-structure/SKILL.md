@@ -22,7 +22,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/envd.rs          envd POST /init client (upstream retry semantics)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
-                       snapshot.rs (pause + export + upload), resume.rs (snapshot load over uffd)
+                       snapshot.rs (Snapshot, snapshot/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload),
+                       resume.rs (snapshot load over uffd)
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
   tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
 docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
