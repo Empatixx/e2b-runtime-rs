@@ -59,7 +59,7 @@ impl TemplateBuilder for PhasePipeline {
             let phases = pipeline.phases(&request, &envd_version)?;
             let last = run_phases(&info.log, &phases).await?;
             let rootfs_size = rootfs_size(&env, &last).await?;
-            Ok(result_metadata(&last, rootfs_size, envd_version))
+            Ok(result_metadata(&env, rootfs_size, envd_version))
         }
         .boxed()
     }
@@ -100,12 +100,12 @@ async fn rootfs_size(env: &BuildEnv, last: &LayerResult) -> Result<u64, BuildErr
         .map_err(|e| BuildError::Internal(format!("error getting rootfs size: {e}")))
 }
 
-fn result_metadata(last: &LayerResult, rootfs_size: u64, envd_version: String) -> TemplateBuildMetadata {
+fn result_metadata(env: &BuildEnv, rootfs_size: u64, envd_version: String) -> TemplateBuildMetadata {
     TemplateBuildMetadata {
         rootfs_size_key: (rootfs_size / MB) as i32,
         envd_version_key: envd_version,
-        kernel_version: last.metadata.template.kernel_version.clone(),
-        firecracker_version: last.metadata.template.firecracker_version.clone(),
+        kernel_version: env.config.kernel_version.clone(),
+        firecracker_version: env.config.firecracker_version.clone(),
         scheduling_metadata: None,
     }
 }

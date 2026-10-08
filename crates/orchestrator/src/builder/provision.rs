@@ -43,7 +43,7 @@ pub async fn wait_for_provisioning(log: &ScopedLog<'_>, mut console: UnboundedRe
         if let Some(text) = raw.strip_prefix(PROVISION_LOG_PREFIX) {
             log.push(LogLevel::Debug, text);
         }
-        if raw.len() > MAX_LINE {
+        if raw.len() >= MAX_LINE {
             return Err("bufio.Scanner: token too long".to_owned());
         }
         let line = raw.strip_suffix('\r').unwrap_or(&raw);

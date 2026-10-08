@@ -143,7 +143,7 @@ impl Sandbox {
         let client = self.spawn_firecracker(rootfs).await?;
         self.boot(&client).await?;
         match self.config.wait_for_envd {
-            true => self.init_envd().await,
+            true => self.wait_for_envd().await,
             false => Ok(()),
         }
     }
@@ -229,7 +229,7 @@ impl Sandbox {
         }
     }
 
-    async fn init_envd(&mut self) -> Result<(), String> {
+    pub async fn wait_for_envd(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + self.config.envd_timeout;
         let address = self.envd_address();
         let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;

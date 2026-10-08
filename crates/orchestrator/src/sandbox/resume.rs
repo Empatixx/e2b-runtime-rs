@@ -73,7 +73,7 @@ impl Sandbox {
         self.phases.mark("resume_vm");
         client.set_mmds(&self.mmds_metadata()).await?;
         self.phases.mark("mmds");
-        self.init_envd().await?;
+        self.wait_for_envd().await?;
         self.phases.mark("envd_init");
         self.phases.note("faults", self.faults_served());
         self.phases.note("prefetched", self.prefetch_stats.installed());

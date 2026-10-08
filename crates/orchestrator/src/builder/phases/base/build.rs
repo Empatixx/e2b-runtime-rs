@@ -15,9 +15,11 @@ use crate::builder::rootfs::{MB, RootfsRequest, create_ext4_filesystem};
 use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISION_RESULT_PATH, provision_script};
 use crate::envd::process::{CommandContext, run_command};
 use crate::envd::version::is_at_least;
+use crate::go_exec::GoCommand;
 use crate::proto::LogLevel;
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
+use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::TemplateMetadata;
 
@@ -31,6 +33,7 @@ const MIN_ENVD_FOR_KVM_CLOCK: &str = "0.2.11";
 const SYNC_COMMAND: &str = "/usr/bin/busybox sync";
 const BUILD_ORIGIN: &str = "template_build_cache";
 const SANDBOX_ID_LEN: usize = 20;
+const ROOT_USER: &str = "root";
 
 pub struct BaseBuild<'a> {
     pub phase: &'a BasePhase,
@@ -223,10 +226,14 @@ impl BaseBuild<'_> {
             tracing::debug!("no need to enlarge rootfs, skipping");
             return Ok(());
         }
-        let final_size = ext4.enlarge(size_diff).await.map_err(|e| {
-            tracing::error!(error = %e, "error enlarging rootfs");
-            format!("error enlarging rootfs: {e}")
-        })?;
+        let final_size = match ext4.enlarge(size_diff).await {
+            Ok(size) => size,
+            Err(e) => {
+                let (output, error) = tune2fs_listing(&ext4.file).await;
+                tracing::error!(error = ?error, "{output}");
+                return Err(format!("error enlarging rootfs: {e}"));
+            }
+        };
         self.final_integrity(ext4).await?;
         let size = std::fs::metadata(&ext4.file)
             .map_err(|e| format!("error getting rootfs file info: {e}"))?
@@ -238,15 +245,19 @@ impl BaseBuild<'_> {
     }
 
     async fn final_integrity(&self, ext4: &Ext4) -> Result<(), String> {
-        if let Err(e) = ext4.check_integrity(false).await {
-            tracing::error!(error = %e, "final enlarge filesystem ext4 integrity");
-            ext4.check_integrity(true).await.map_err(|e| {
-                tracing::error!(error = %e, "final enlarge filesystem ext4 integrity - retry with fix");
-                format!("error checking final enlarge filesystem integrity: {e}")
-            })?;
-        }
-        tracing::debug!("final enlarge filesystem ext4 integrity");
-        Ok(())
+        let first = match ext4.check_integrity(false).await {
+            Ok(result) => {
+                tracing::debug!(result = %result, "final enlarge filesystem ext4 integrity");
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        tracing::error!(result = %first, error = %first, "final enlarge filesystem ext4 integrity");
+        let retried = ext4.check_integrity(true).await;
+        tracing::error!(result = ?retried, "final enlarge filesystem ext4 integrity - retry with fix");
+        retried
+            .map(drop)
+            .map_err(|e| format!("error checking final enlarge filesystem integrity: {e}"))
     }
 
     async fn build_layer(
@@ -255,11 +266,11 @@ impl BaseBuild<'_> {
         metadata: TemplateMetadata,
         hash: &str,
     ) -> Result<TemplateMetadata, BuildError> {
+        let kvm_clock = is_at_least(&self.phase.request.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
+            .map_err(|e| BuildError::Internal(format!("error comparing envd version: {e}")))?;
         ext4.set_reserved_blocks(RESERVED_DISK_SPACE_MB, BLOCK_SIZE)
             .await
-            .map_err(|e| BuildError::Internal(format!("create sandbox: {e}")))?;
-        let kvm_clock = is_at_least(&self.phase.request.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
-            .map_err(|e| BuildError::Internal(format!("create sandbox: error comparing envd version: {e}")))?;
+            .map_err(|e| BuildError::Internal(format!("create sandbox: pre-boot hook failed: {e}")))?;
         let lease = self
             .phase
             .env
@@ -272,48 +283,60 @@ impl BaseBuild<'_> {
             .slot()
             .ok_or_else(|| BuildError::Internal("create sandbox: no network slot".to_owned()))?;
         let (sandbox_id, builder) = self.sandbox_builder();
-        let _network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
-        let sandbox = builder
+        let network = self.phase.env.node.assign_build_network(slot.host_ip(), &sandbox_id);
+        let mut sandbox = builder
             .pooled_slot(slot)
             .rootfs_file(&ext4.file)
             .init_path(SYSTEMD_INIT)
             .kernel_logs(self.phase.env.development)
             .kvm_clock(kvm_clock)
             .envd_timeout(ENVD_WAIT)
+            .skip_envd()
             .cold_boot()
             .await
-            .map_err(|e| BuildError::Internal(format!("create sandbox: wait for envd: {e}")))?;
-        let synced = run_command(
-            sandbox.envd_address(),
-            SYNC_COMMAND,
-            &CommandContext {
-                user: "root".to_owned(),
-                ..CommandContext::default()
-            },
-            |_, _| {},
-        )
-        .await;
-        if let Err(e) = synced {
+            .map_err(|e| BuildError::Internal(format!("create sandbox: {e}")))?;
+        if let Err(e) = sandbox.wait_for_envd().await {
+            let _ = sandbox.stop().await;
+            return Err(BuildError::Internal(format!("wait for envd: {e}")));
+        }
+        if let Err(e) = self.sync(&sandbox).await {
             let _ = sandbox.stop().await;
             return Err(BuildError::Internal(format!("error running sync command: {e}")));
         }
-        self.pause_and_upload(sandbox, metadata, hash).await
-    }
-
-    async fn pause_and_upload(
-        &self,
-        sandbox: Sandbox,
-        metadata: TemplateMetadata,
-        hash: &str,
-    ) -> Result<TemplateMetadata, BuildError> {
-        let node = &self.phase.env.node;
         let build_id = Uuid::parse_str(&metadata.template.build_id)
             .map_err(|e| BuildError::Internal(format!("pause and upload: error processing vm: {e}")))?;
-        let dir = node.layer_dir(build_id);
+        let dir = self.phase.env.node.layer_dir(build_id);
         let local = sandbox
             .pause_into(&dir, build_id)
             .await
             .map_err(|e| BuildError::Internal(format!("pause and upload: error processing vm: {e}")))?;
+        drop(network);
+        drop(lease);
+        self.upload(local, dir, metadata, hash).await
+    }
+
+    async fn sync(&self, sandbox: &Sandbox) -> Result<(), String> {
+        run_command(
+            sandbox.envd_address(),
+            SYNC_COMMAND,
+            &CommandContext {
+                user: ROOT_USER.to_owned(),
+                ..CommandContext::default()
+            },
+            |_, _| {},
+        )
+        .await
+    }
+
+    async fn upload(
+        &self,
+        local: LocalSnapshot,
+        dir: PathBuf,
+        metadata: TemplateMetadata,
+        hash: &str,
+    ) -> Result<TemplateMetadata, BuildError> {
+        let node = &self.phase.env.node;
+        let build_id = &metadata.template.build_id;
         self.log
             .push(LogLevel::Debug, format!("Adding layer to cache: {build_id}"));
         node.cache_layer(&local, metadata.clone(), dir).map_err(|e| {
@@ -331,11 +354,25 @@ impl BaseBuild<'_> {
             .map_err(|e| BuildError::Internal(format!("error uploading snapshot: {e}")))?;
         self.phase
             .index
-            .save(hash, &metadata.template.build_id)
+            .save(hash, build_id)
             .await
             .map_err(|e| BuildError::Internal(format!("error saving UUID to hash mapping: {e}")))?;
         self.log.push(LogLevel::Debug, format!("Saved: {build_id}"));
         Ok(metadata)
+    }
+}
+
+async fn tune2fs_listing(file: &Path) -> (String, Option<String>) {
+    match GoCommand::new("tune2fs")
+        .args(["-l".as_ref(), file.as_os_str()])
+        .run()
+        .await
+    {
+        Ok(output) => (String::from_utf8_lossy(&output).into_owned(), None),
+        Err(failure) => (
+            String::from_utf8_lossy(&failure.output).into_owned(),
+            Some(failure.message),
+        ),
     }
 }
 
