@@ -383,7 +383,10 @@ async fn sandbox_lifecycle_over_grpc() {
 
     assert!(
         eventually(Duration::from_secs(20), || pool_namespaces_left(pool).is_empty()
-            && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx-2").exists())
+            && !Path::new("/sys/fs/cgroup/e2b/grpc-sbx").exists()
+            && !Path::new("/sys/fs/cgroup/e2b/grpc-race").exists()
+            && !cluster.dir.path().join("sandboxes").join("grpc-sbx").exists()
+            && !nbd_connected_with_size(template_size(&host)))
         .await,
         "left behind: {:?}",
         pool_namespaces_left(pool)
