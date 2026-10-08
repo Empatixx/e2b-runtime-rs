@@ -61,6 +61,7 @@ pub enum Command {
 pub struct SandboxHandle {
     pub info: Arc<Mutex<SandboxInfo>>,
     pub commands: mpsc::Sender<Command>,
+    pub updates: Arc<tokio::sync::Mutex<()>>,
     cleanup: Arc<AtomicBool>,
 }
 
@@ -106,6 +107,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
     let handle = SandboxHandle {
         info: Arc::new(Mutex::new(info)),
         commands,
+        updates: Arc::default(),
         cleanup: Arc::default(),
     };
     let host_stats = node
@@ -157,11 +159,15 @@ impl Running {
         if let Some(collector) = self.host_stats.take() {
             collector.stop().await;
         }
-        if let Err(e) = self.sandbox.stop().await {
-            tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
-        }
+        let stopped = self.sandbox.stop().await;
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&lifecycle));
-        self.node.network.return_slot(self.slot);
+        match stopped {
+            Ok(()) => self.node.network.return_slot(self.slot),
+            Err(e) => {
+                tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
+                self.node.network.discard_slot(self.slot);
+            }
+        }
         self.node.registry.finish(&lifecycle);
     }
 

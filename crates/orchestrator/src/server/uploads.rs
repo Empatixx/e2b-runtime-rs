@@ -43,7 +43,9 @@ impl Uploads {
             if let Err(e) = &uploaded {
                 tracing::error!(build = %build_id, error = %e, "snapshot upload failed; the build stays only in this node's cache");
             }
-            finished(settle(&sender, &uploaded));
+            let outcome = settle(&sender, &uploaded);
+            uploads.forget_landed(build_id, outcome);
+            finished(outcome);
         });
     }
 
@@ -59,8 +61,15 @@ impl Uploads {
         let uploaded = tokio::time::timeout(UPLOAD_TIMEOUT, once)
             .await
             .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
-        settle(&sender, &uploaded);
+        let outcome = settle(&sender, &uploaded);
+        self.forget_landed(build_id, outcome);
         uploaded
+    }
+
+    fn forget_landed(&self, build_id: Uuid, outcome: Outcome) {
+        if outcome == Outcome::Landed {
+            self.outcomes.lock().remove(&build_id);
+        }
     }
 
     fn register(&self, build_id: Uuid) -> watch::Sender<Outcome> {
@@ -143,7 +152,8 @@ mod tests {
         assert_eq!(failed, Err("bucket is gone".to_owned()));
         assert_eq!(uploads.outcome(id(1)), Some(Outcome::Failed));
         assert_eq!(landed, Ok(()));
-        assert_eq!(uploads.outcome(id(2)), Some(Outcome::Landed));
+        assert_eq!(uploads.outcome(id(2)), None);
+        assert_eq!(uploads.wait(id(2)).await, Outcome::Landed);
     }
 
     #[tokio::test(start_paused = true)]
@@ -181,6 +191,24 @@ mod tests {
         assert_eq!(uploads.outcome(id(2)), Some(Outcome::Pending));
         release.send(()).unwrap();
         assert_eq!(uploads.wait(id(2)).await, Outcome::Landed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn landed_uploads_are_forgotten_and_failed_ones_are_kept() {
+        let uploads = Arc::new(Uploads::default());
+        uploads.start(id(1), Vec::new(), || async { Ok(()) }, |_| {});
+        uploads.start(
+            id(2),
+            Vec::new(),
+            || async { Err(Failure::Terminal("snapshot files are gone".to_owned())) },
+            |_| {},
+        );
+
+        uploads.wait_all().await;
+
+        assert_eq!(uploads.outcome(id(1)), None);
+        assert_eq!(uploads.outcome(id(2)), Some(Outcome::Failed));
+        assert_eq!(uploads.wait(id(1)).await, Outcome::Landed);
     }
 
     #[tokio::test(start_paused = true)]

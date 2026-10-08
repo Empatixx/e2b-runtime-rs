@@ -26,6 +26,7 @@ use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::header::{Header, Metadata};
+use orchestrator::storage::paths::BuildPaths;
 use orchestrator::storage::spec::StorageSpec;
 use tonic::Code;
 use tonic::transport::Channel;
@@ -41,6 +42,12 @@ const EXPIRY_POOL: Pool = Pool {
     template_slot: 4098,
     first: 4104,
     last: 4105,
+};
+
+const CANCEL_POOL: Pool = Pool {
+    template_slot: 4097,
+    first: 4110,
+    last: 4111,
 };
 
 #[derive(Clone, Copy)]
@@ -462,8 +469,8 @@ async fn sandbox_lifecycle_over_grpc() {
     println!("grpc pause took {} ms", pause_started.elapsed().as_millis());
     assert!(cluster.client.list(()).await.unwrap().into_inner().sandboxes.is_empty());
     assert!(
-        cluster.node.uploads.outcome(paused_build).is_some(),
-        "pause started no upload"
+        eventually(Duration::from_secs(60), || upload_landed(&cluster, paused_build)).await,
+        "pause did not upload its snapshot"
     );
 
     let resume_started = std::time::Instant::now();
@@ -507,10 +514,7 @@ async fn sandbox_lifecycle_over_grpc() {
         .into_inner();
     println!("grpc checkpoint took {} ms", checkpoint_started.elapsed().as_millis());
     assert!(checkpointed.scheduling_metadata.is_some());
-    assert_eq!(
-        cluster.node.uploads.outcome(checkpoint_build),
-        Some(orchestrator::server::uploads::Outcome::Landed)
-    );
+    assert!(upload_landed(&cluster, checkpoint_build));
     let listed = cluster.client.list(()).await.unwrap().into_inner().sandboxes;
     assert_eq!(
         listed
@@ -665,6 +669,75 @@ async fn an_expired_sandbox_is_removed() {
         eventually(Duration::from_secs(20), || pool_namespaces_left(EXPIRY_POOL).is_empty()).await,
         "closing the pool left a slot"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_create_and_pause_requests_still_run_to_completion() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    let cluster = cluster(&host, CANCEL_POOL, false, 200).await;
+    let mut client = cluster.client.clone();
+
+    let abandoned_create = tokio::time::timeout(
+        Duration::from_millis(50),
+        client.create(create_request(
+            "grpc-cancelled",
+            cluster.template_build,
+            Duration::from_secs(600),
+        )),
+    )
+    .await;
+    assert!(
+        abandoned_create.is_err(),
+        "the create finished inside the cancel window"
+    );
+    let mut listed = Vec::new();
+    for _ in 0..150 {
+        listed = client.list(()).await.unwrap().into_inner().sandboxes;
+        if !listed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        listed
+            .iter()
+            .map(|sandbox| sandbox.sandbox_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grpc-cancelled"]
+    );
+
+    let paused_build = Uuid::new_v4();
+    let abandoned_pause = tokio::time::timeout(
+        Duration::from_millis(1),
+        client.pause(SandboxPauseRequest {
+            sandbox_id: "grpc-cancelled".to_owned(),
+            template_id: "grpc-template".to_owned(),
+            build_id: paused_build.to_string(),
+            filesystem_only: false,
+        }),
+    )
+    .await;
+    assert!(abandoned_pause.is_err(), "the pause finished inside the cancel window");
+    assert!(
+        eventually(Duration::from_secs(60), || upload_landed(&cluster, paused_build)).await,
+        "the cancelled pause did not finish its snapshot"
+    );
+    assert!(client.list(()).await.unwrap().into_inner().sandboxes.is_empty());
+    cluster.node.close().await;
+    assert!(
+        eventually(Duration::from_secs(20), || pool_namespaces_left(CANCEL_POOL).is_empty()).await,
+        "closing the pool left a slot"
+    );
+}
+
+fn upload_landed(cluster: &Cluster, build: Uuid) -> bool {
+    let paths = BuildPaths::new(build);
+    [paths.snapfile(), paths.rootfs_header(), paths.metadata()]
+        .iter()
+        .all(|object| cluster.dir.path().join("store").join(object).exists())
 }
 
 fn cgroup_left(sandbox_id: &str) -> bool {

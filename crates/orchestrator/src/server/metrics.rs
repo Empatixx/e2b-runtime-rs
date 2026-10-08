@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use sysinfo::{Disks, System};
 
 use crate::proto::{DiskMetrics, MachineInfo};
@@ -39,11 +39,15 @@ impl HostMetrics {
     }
 
     pub async fn run(self: Arc<Self>) {
-        let mut system = System::new();
+        let system = Arc::new(Mutex::new(System::new()));
         let mut ticks = tokio::time::interval(SAMPLE_INTERVAL);
         loop {
             ticks.tick().await;
-            *self.latest.write() = sample(&mut system);
+            let sampler = system.clone();
+            match tokio::task::spawn_blocking(move || sample(&mut sampler.lock())).await {
+                Ok(sampled) => *self.latest.write() = sampled,
+                Err(e) => tracing::warn!(error = %e, "host metrics sampling failed"),
+            }
         }
     }
 }
@@ -51,16 +55,36 @@ impl HostMetrics {
 fn sample(system: &mut System) -> HostSample {
     system.refresh_cpu_usage();
     system.refresh_memory();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
     HostSample {
         cpu_percent: system.global_cpu_usage() as u32,
         cpu_count: std::thread::available_parallelism().map_or(0, |count| count.get() as u32),
-        memory_used_bytes: system.used_memory(),
+        memory_used_bytes: memory_used_bytes(&meminfo).unwrap_or_else(|| system.used_memory()),
         memory_total_bytes: system.total_memory(),
         disks: disks(),
-        hugepages: std::fs::read_to_string("/proc/meminfo")
-            .map(|meminfo| hugepages(&meminfo))
-            .unwrap_or_default(),
+        hugepages: hugepages(&meminfo),
     }
+}
+
+pub fn memory_used_bytes(meminfo: &str) -> Option<u64> {
+    let kib = |name: &str| meminfo_field(meminfo, name) * 1024;
+    let total = kib("MemTotal");
+    let cached = kib("Cached") + kib("SReclaimable");
+    (total > 0).then(|| {
+        total
+            .saturating_sub(kib("MemFree"))
+            .saturating_sub(kib("Buffers"))
+            .saturating_sub(cached)
+    })
+}
+
+fn meminfo_field(meminfo: &str, name: &str) -> u64 {
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn disks() -> Vec<DiskMetrics> {
@@ -84,14 +108,7 @@ fn disks() -> Vec<DiskMetrics> {
 }
 
 pub fn hugepages(meminfo: &str) -> Hugepages {
-    let field = |name: &str| {
-        meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|rest| rest.trim_start_matches(':').split_whitespace().next())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0)
-    };
+    let field = |name: &str| meminfo_field(meminfo, name);
     let total = field("HugePages_Total");
     Hugepages {
         total,
@@ -154,6 +171,17 @@ mod tests {
             }
         );
         assert_eq!(hugepages(""), Hugepages::default());
+    }
+
+    #[test]
+    fn used_memory_is_total_minus_free_buffers_and_cache_like_gopsutil() {
+        let meminfo = "MemTotal:       16000000 kB\nMemFree:         4000000 kB\nMemAvailable:    9000000 kB\nBuffers:          500000 kB\nCached:          3000000 kB\nSReclaimable:     500000 kB\n";
+
+        assert_eq!(
+            memory_used_bytes(meminfo),
+            Some((16_000_000 - 4_000_000 - 500_000 - 3_500_000) * 1024)
+        );
+        assert_eq!(memory_used_bytes(""), None);
     }
 
     #[test]

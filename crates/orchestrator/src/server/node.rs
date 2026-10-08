@@ -14,9 +14,10 @@ use tonic::Status;
 use uuid::Uuid;
 
 pub use self::checkpoint::CheckpointRequest;
-use super::admission::Admission;
+use super::admission::{Admission, StartKind};
 use super::build_id;
 use super::config::NodeConfig;
+use super::config::binaries::Binaries;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::oom_monitor::SharedWatermark;
 use super::registry::{Lifecycle, Registry};
@@ -72,8 +73,9 @@ pub struct Node {
     admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
-    firecracker: PathBuf,
-    kernel: PathBuf,
+    binaries: Binaries,
+    build_kernel_version: String,
+    build_firecracker_version: String,
     work_dir: PathBuf,
     envd_timeout: Duration,
     build_cache_max_usage: f64,
@@ -165,8 +167,14 @@ impl Node {
             registry: Registry::new(),
             network: NetworkPool::new(HostSlots, host_slot_storage(config.slots.clone())),
             local_expiry: config.local_expiry,
-            firecracker: config.firecracker.clone(),
-            kernel: config.kernel.clone(),
+            binaries: Binaries::from_vars(
+                &std::env::vars().collect(),
+                &config.builder.target_arch,
+                &config.firecracker,
+                &config.kernel,
+            ),
+            build_kernel_version: config.builder.kernel_version.clone(),
+            build_firecracker_version: config.builder.firecracker_version.clone(),
             work_dir: config.work_dir.clone(),
             envd_timeout: config.envd_timeout,
             build_cache_max_usage: config.build_cache_max_usage,
@@ -189,7 +197,11 @@ impl Node {
         build_id: Uuid,
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
-        let local = sandbox.snapshot_into(&dir, build_id).await?;
+        let local = sandbox
+            .snapshot_into(&dir, build_id)
+            .await
+            .map_err(|e| format!("error snapshotting sandbox: {e}"))
+            .inspect_err(|_| discard_snapshot_dir(&dir))?;
         let metadata = match &parent.metadata {
             Some(metadata) => metadata.clone(),
             None => self.parent_metadata(&parent.config.build_id).await,
@@ -199,9 +211,12 @@ impl Node {
             kernel_version: parent.config.kernel_version.clone(),
             firecracker_version: parent.config.firecracker_version.clone(),
         });
-        if let Err(e) = self.cache_snapshot(&local, metadata, dir) {
-            tracing::warn!(build = %build_id, error = %e, "the paused snapshot is not cached on this node");
-        }
+        self.cache_snapshot(&local, metadata, dir.clone())
+            .map_err(|e| format!("error adding snapshot to template cache: {e}"))
+            .inspect_err(|_| {
+                self.store.unpin(build_id);
+                discard_snapshot_dir(&dir);
+            })?;
         Ok(local)
     }
 
@@ -242,8 +257,8 @@ impl Node {
         Sandbox::builder()
             .id(sandbox_id)
             .template_id(template_id)
-            .firecracker(&self.firecracker)
-            .kernel(&self.kernel)
+            .firecracker(self.binaries.firecracker_for(&self.build_firecracker_version))
+            .kernel(self.binaries.kernel_for(&self.build_kernel_version))
             .work_dir(self.work_dir.join(sandbox_id))
             .hyperloop_ip(&self.orchestrator_ip)
             .envd(self.build_envd(EnvdDefaults::default()))
@@ -365,7 +380,12 @@ impl Node {
         let id = lifecycle.sandbox_id.clone();
         self.registry.reserve(&id).map_err(Status::already_exists)?;
         let started = async {
-            let _permit = self.admission.admit(self.registry.running().len()).await?;
+            let kind = if config.snapshot {
+                StartKind::Resume
+            } else {
+                StartKind::Fresh
+            };
+            let _permit = self.admission.admit(self.registry.running().len(), kind).await?;
             let template = self.template_of(&config)?;
             self.start(StartRequest {
                 template,
@@ -424,14 +444,21 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        loop {
+            self.stop_running().await;
+            if self.registry.is_empty() || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn stop_running(&self) {
         for handle in self.registry.running() {
             if let Some(stopped) = self.mark_stopping(&handle.lifecycle()).await {
                 let _ = stopped.commands.send(Command::Delete).await;
             }
-        }
-        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
-        while !self.registry.is_empty() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -568,8 +595,8 @@ impl Node {
             .rootfs(Arc::new(overlay))
             .memfile(memfile)
             .pooled_slot(slot)
-            .firecracker(&self.firecracker)
-            .kernel(&self.kernel)
+            .firecracker(self.binaries.firecracker_for(&config.firecracker_version))
+            .kernel(self.binaries.kernel_for(&config.kernel_version))
             .work_dir(work_dir)
             .envd_timeout(self.envd_timeout)
             .prefetch(prefetch)
@@ -694,6 +721,10 @@ fn parents(build: &Build) -> Vec<Uuid> {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn discard_snapshot_dir(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn slot_taken_back() -> StartFailure {

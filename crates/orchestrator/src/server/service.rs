@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tonic::{Request, Response, Status};
 
@@ -17,6 +17,8 @@ use crate::proto::{
 };
 use crate::sandbox::snapshot::Snapshot;
 use serde_json::json;
+
+const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 
 pub struct SandboxServer {
     node: Arc<Node>,
@@ -54,6 +56,7 @@ impl SandboxService for SandboxServer {
     async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let handle = self.running(&request.sandbox_id, "sandbox not found")?;
+        let _serialised = handle.updates.lock().await;
         let rules = request
             .egress
             .as_ref()
@@ -169,11 +172,7 @@ impl SandboxService for SandboxServer {
                     )),
                 })
             })
-            .map_err(|e| {
-                Status::internal(format!(
-                    "error snapshotting sandbox '{id}': error snapshotting sandbox: {e}"
-                ))
-            })
+            .map_err(|e| Status::internal(format!("error snapshotting sandbox '{id}': {e}")))
     }
 
     async fn checkpoint(
@@ -230,7 +229,7 @@ async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> 
         Ok(build_id) => build_id,
         Err(e) => {
             let _ = handle.commands.send(Command::Delete).await;
-            return Err(format!("failed to parse build id: {e}"));
+            return Err(format!("error snapshotting sandbox: failed to parse build id: {e}"));
         }
     };
     let (reply, snapshot) = tokio::sync::oneshot::channel();
@@ -242,10 +241,48 @@ async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> 
             reply,
         })
         .await
-        .map_err(|_| "the sandbox stopped".to_owned())?;
-    snapshot.await.map_err(|_| "the sandbox stopped".to_owned())?
+        .map_err(|_| STOPPED.to_owned())?;
+    snapshot.await.map_err(|_| STOPPED.to_owned())?
 }
 
 fn system_time(timestamp: prost_types::Timestamp) -> SystemTime {
-    SystemTime::try_from(timestamp).unwrap_or(SystemTime::UNIX_EPOCH)
+    let nanos = i128::from(timestamp.seconds) * 1_000_000_000 + i128::from(timestamp.nanos);
+    let offset = Duration::new(
+        (nanos.unsigned_abs() / 1_000_000_000) as u64,
+        (nanos.unsigned_abs() % 1_000_000_000) as u32,
+    );
+    match nanos >= 0 {
+        true => SystemTime::UNIX_EPOCH.checked_add(offset),
+        false => SystemTime::UNIX_EPOCH.checked_sub(offset),
+    }
+    .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timestamp(seconds: i64, nanos: i32) -> prost_types::Timestamp {
+        prost_types::Timestamp { seconds, nanos }
+    }
+
+    #[test]
+    fn timestamps_convert_like_go_time_unix() {
+        assert_eq!(
+            system_time(timestamp(10, 500_000_000)),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(10_500)
+        );
+        assert_eq!(
+            system_time(timestamp(10, -500_000_000)),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(9_500)
+        );
+        assert_eq!(
+            system_time(timestamp(10, 1_500_000_000)),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(11_500)
+        );
+        assert_eq!(
+            system_time(timestamp(-5, 0)),
+            SystemTime::UNIX_EPOCH - Duration::from_secs(5)
+        );
+    }
 }

@@ -47,6 +47,8 @@ struct DiffKey {
 pub const DIFF_EXPIRATION: Duration = Duration::from_secs(25 * 60 * 60);
 pub const EVICTION_DELAY: Duration = Duration::from_secs(60);
 const EVICTION_TICK: Duration = Duration::from_secs(1);
+const EVICTION_FAST_TICK: Duration = Duration::from_micros(1);
+const FALLBACK_DIFF_SIZE: u64 = 100 << 20;
 
 type ChunkerCell = Arc<OnceCell<Arc<Chunker>>>;
 
@@ -73,6 +75,7 @@ struct Entry {
     expires: Instant,
     pinned: bool,
     doomed: Option<Instant>,
+    doomed_bytes: u64,
     pending: Option<Pending>,
 }
 
@@ -83,6 +86,7 @@ impl Entry {
             expires: Instant::now() + DIFF_EXPIRATION,
             pinned,
             doomed: None,
+            doomed_bytes: 0,
             pending: None,
         }
     }
@@ -91,6 +95,10 @@ impl Entry {
         self.expires = Instant::now() + DIFF_EXPIRATION;
         self.doomed = None;
         self.cell.clone()
+    }
+
+    fn disk_bytes(&self) -> u64 {
+        self.cell.get().map_or(FALLBACK_DIFF_SIZE, |chunker| chunker.size())
     }
 
     fn is_gone(&self, now: Instant) -> bool {
@@ -156,27 +164,44 @@ impl DiffStore {
         self.entries.lock().is_empty()
     }
 
-    pub fn evict(&self, over_limit: bool) {
+    pub fn evict(&self, over_limit: bool) -> bool {
         let now = Instant::now();
         let mut entries = self.entries.lock();
-        if over_limit {
-            let next = entries
-                .values_mut()
-                .filter(|entry| !entry.pinned && entry.doomed.is_none())
-                .min_by_key(|entry| entry.expires);
-            if let Some(entry) = next {
+        let doomed = over_limit
+            .then(|| {
+                entries
+                    .values_mut()
+                    .filter(|entry| !entry.pinned && entry.doomed.is_none())
+                    .min_by_key(|entry| entry.expires)
+            })
+            .flatten()
+            .map(|entry| {
                 entry.doomed = Some(now + EVICTION_DELAY);
-            }
-        }
+                entry.doomed_bytes = entry.disk_bytes();
+            })
+            .is_some();
         entries.retain(|_, entry| !entry.is_gone(now));
+        doomed
+    }
+
+    fn pending_delete_bytes(&self) -> u64 {
+        self.entries
+            .lock()
+            .values()
+            .filter(|entry| entry.doomed.is_some())
+            .map(|entry| entry.doomed_bytes)
+            .sum()
+    }
+
+    fn evict_under_pressure(&self, max_usage_percent: f64) -> bool {
+        let usage = disk_usage_percent(&self.cache_dir, self.pending_delete_bytes());
+        self.evict(usage.is_some_and(|usage| usage > max_usage_percent))
     }
 
     pub async fn run_eviction(self: Arc<Self>, max_usage_percent: f64) {
-        let mut ticks = tokio::time::interval(EVICTION_TICK);
         loop {
-            ticks.tick().await;
-            let over_limit = disk_usage_percent(&self.cache_dir).is_some_and(|usage| usage > max_usage_percent);
-            self.evict(over_limit);
+            let doomed = self.evict_under_pressure(max_usage_percent);
+            tokio::time::sleep(if doomed { EVICTION_FAST_TICK } else { EVICTION_TICK }).await;
         }
     }
 
@@ -196,10 +221,12 @@ impl DiffStore {
     }
 }
 
-fn disk_usage_percent(path: &Path) -> Option<f64> {
+fn disk_usage_percent(path: &Path, pending_delete_bytes: u64) -> Option<f64> {
     let stats = nix::sys::statvfs::statvfs(path).ok()?;
-    let total = stats.blocks() as f64;
-    (total > 0.0).then(|| (total - stats.blocks_free() as f64) * 100.0 / total)
+    let block = stats.fragment_size() as f64;
+    let total = stats.blocks() as f64 * block;
+    let used = (stats.blocks() as f64 - stats.blocks_free() as f64) * block - pending_delete_bytes as f64;
+    (total > 0.0).then(|| used * 100.0 / total)
 }
 
 pub struct BuildFile {
@@ -450,6 +477,18 @@ mod tests {
         store.evict(false);
         assert!(store.is_empty());
         assert!(!diff.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_doomed_diff_counts_as_pending_and_leaves_nothing_more_to_doom() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_one_diff(&dir).await;
+
+        assert_eq!(store.pending_delete_bytes(), 0);
+        assert!(store.evict(true));
+        assert_eq!(store.pending_delete_bytes(), 4096);
+        assert!(!store.evict(true));
+        assert!(!store.evict(false));
     }
 
     #[tokio::test(start_paused = true)]

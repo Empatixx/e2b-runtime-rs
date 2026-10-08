@@ -119,6 +119,11 @@ impl<F: SlotFactory> NetworkPool<F> {
         self.return_after(slot, RETURN_DELAY);
     }
 
+    pub fn discard_slot(self: &Arc<Self>, slot: Slot) {
+        let pool = self.clone();
+        self.tasks.spawn(async move { pool.cleanup(slot).await });
+    }
+
     fn return_after(self: &Arc<Self>, slot: Slot, delay: Duration) {
         let pool = self.clone();
         self.tasks.spawn(async move {
@@ -324,6 +329,32 @@ mod tests {
         let created: BTreeSet<u32> = slots.created.lock().iter().copied().collect();
         assert_eq!(*slots.destroyed.lock(), created);
         assert_eq!(pool.get().await, Err("network pool is closed".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_discarded_slot_is_destroyed_instead_of_reused() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+        let slot = pool.get().await.unwrap();
+
+        pool.discard_slot(slot);
+        tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
+
+        assert!(slots.destroyed.lock().contains(&slot.index));
+        assert_ne!(pool.get().await.unwrap(), slot);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slot_returned_after_close_is_destroyed_without_the_return_delay() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+        let slot = pool.get().await.unwrap();
+        pool.close().await;
+
+        pool.return_slot(slot);
+        settle().await;
+
+        assert!(slots.destroyed.lock().contains(&slot.index));
     }
 
     #[tokio::test(start_paused = true)]

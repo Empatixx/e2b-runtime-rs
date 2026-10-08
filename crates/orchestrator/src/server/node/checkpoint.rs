@@ -17,6 +17,7 @@ use crate::server::scheduling::from_headers;
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
 
+const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 const BUILD_ORIGIN: &str = "snapshot_template";
 
 pub struct CheckpointRequest {
@@ -56,16 +57,14 @@ impl Node {
     ) -> Result<SchedulingMetadata, Status> {
         let parent = handle.info.lock().clone();
         let id = parent.config.sandbox_id.clone();
-        let snapshot_error = |e: String| {
-            Status::internal(format!(
-                "error snapshotting sandbox '{id}': error snapshotting sandbox: {e}"
-            ))
-        };
+        let snapshot_error = |e: String| Status::internal(format!("error snapshotting sandbox '{id}': {e}"));
         let build_id = match build_id::parse(&request.build_id) {
             Ok(build_id) => build_id,
             Err(e) => {
                 let _ = handle.commands.send(Command::Delete).await;
-                return Err(snapshot_error(format!("failed to parse build id: {e}")));
+                return Err(snapshot_error(format!(
+                    "error snapshotting sandbox: failed to parse build id: {e}"
+                )));
             }
         };
         let local = snapshot(&handle, build_id).await.map_err(snapshot_error)?;
@@ -162,8 +161,8 @@ async fn snapshot(handle: &SandboxHandle, build_id: Uuid) -> Result<LocalSnapsho
         .commands
         .send(Command::Checkpoint { build_id, reply })
         .await
-        .map_err(|_| "the sandbox stopped".to_owned())?;
-    snapshot.await.map_err(|_| "the sandbox stopped".to_owned())?
+        .map_err(|_| STOPPED.to_owned())?;
+    snapshot.await.map_err(|_| STOPPED.to_owned())?
 }
 
 async fn trace(handle: &SandboxHandle) -> Option<Trace> {
