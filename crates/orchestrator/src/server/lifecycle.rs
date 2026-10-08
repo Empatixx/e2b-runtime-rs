@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::node::Node;
+use super::status::Work;
 use crate::network::slot::Slot;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
@@ -52,6 +53,7 @@ struct Running {
     info: Arc<Mutex<SandboxInfo>>,
     commands: mpsc::Receiver<Command>,
     node: Arc<Node>,
+    _work: Work,
 }
 
 pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -> SandboxHandle {
@@ -65,6 +67,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
         slot,
         info: handle.info.clone(),
         commands: receiver,
+        _work: node.status.track_work(),
         node,
     };
     tokio::spawn(running.run());

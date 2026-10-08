@@ -118,7 +118,7 @@ async fn template_build(host: &Host, dir: &Path, storage: &Storage, slot: u32) -
     build_id
 }
 
-async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
+async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64) -> Cluster {
     let dir = tempfile::tempdir().unwrap();
     let store_root = dir.path().join("store");
     let storage = Storage::local(&store_root).unwrap();
@@ -143,7 +143,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool) -> Cluster {
         local_expiry,
         envd_timeout: Duration::from_secs(10),
         labels: Vec::new(),
-        max_sandboxes: 200,
+        max_sandboxes,
         max_starting: 3,
     };
     let node = Arc::new(Node::new(&config).unwrap());
@@ -320,7 +320,7 @@ async fn sandbox_lifecycle_over_grpc() {
         return;
     };
     let pool = LIFECYCLE_POOL;
-    let mut cluster = cluster(&host, pool, false).await;
+    let mut cluster = cluster(&host, pool, false, 200).await;
     let build = cluster.template_build;
 
     let created = cluster
@@ -457,7 +457,7 @@ async fn an_expired_sandbox_is_removed() {
         eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
         return;
     };
-    let cluster = cluster(&host, EXPIRY_POOL, true).await;
+    let cluster = cluster(&host, EXPIRY_POOL, true, 1).await;
     let mut client = cluster.client.clone();
 
     client
@@ -468,6 +468,21 @@ async fn an_expired_sandbox_is_removed() {
         ))
         .await
         .unwrap();
+    let full = client
+        .create(create_request(
+            "grpc-one-too-many",
+            cluster.template_build,
+            Duration::from_secs(60),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (full.code(), full.message()),
+        (
+            Code::ResourceExhausted,
+            "max number of running sandboxes on node reached (1), please retry"
+        )
+    );
 
     let mut emptied = false;
     for _ in 0..100 {

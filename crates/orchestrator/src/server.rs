@@ -1,3 +1,4 @@
+pub mod admission;
 #[cfg(target_os = "linux")]
 pub mod app;
 pub mod config;

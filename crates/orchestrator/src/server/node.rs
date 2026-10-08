@@ -6,9 +6,11 @@ use std::time::{Duration, SystemTime};
 use tonic::Status;
 use uuid::Uuid;
 
+use super::admission::Admission;
 use super::config::NodeConfig;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::registry::Registry;
+use super::status::NodeStatus;
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::envd::EnvdInit;
@@ -22,6 +24,7 @@ use crate::template::cache::TemplateCache;
 use crate::template::{Template, TemplateError};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub struct Node {
@@ -32,6 +35,8 @@ pub struct Node {
     pub local_expiry: bool,
     pub templates: Arc<TemplateCache>,
     pub labels: Vec<String>,
+    pub status: Arc<NodeStatus>,
+    admission: Admission,
     pub max_sandboxes: i64,
     store: Arc<DiffStore>,
     firecracker: PathBuf,
@@ -52,6 +57,8 @@ impl Node {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
             labels: config.labels.clone(),
+            status: Arc::default(),
+            admission: Admission::new(config.max_sandboxes, config.max_starting),
             max_sandboxes: config.max_sandboxes,
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
@@ -87,9 +94,14 @@ impl Node {
     }
 
     pub async fn create(self: Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<(), Status> {
+        let _work = self.status.track_work();
         let id = config.sandbox_id.clone();
         self.registry.reserve(&id).map_err(Status::already_exists)?;
-        match self.start(config, lifetime).await {
+        let started = async {
+            let _permit = self.admission.admit(self.registry.running().len()).await?;
+            self.start(config, lifetime).await
+        };
+        match started.await {
             Ok(handle) => {
                 self.registry.activate(&id, handle);
                 Ok(())
@@ -139,9 +151,17 @@ impl Node {
 
     async fn start(self: &Arc<Self>, config: SandboxConfig, lifetime: Lifetime) -> Result<SandboxHandle, Status> {
         let template = self.template_of(&config)?;
-        let (build, snapfile) =
-            tokio::try_join!(template.build(), template.snapfile()).map_err(|e| template_status(&config, e))?;
-        let slot = self.network.get().await.map_err(Status::resource_exhausted)?;
+        let (files, slot) = tokio::join!(
+            async { tokio::try_join!(template.build(), template.snapfile()) },
+            tokio::time::timeout(REQUEST_TIMEOUT, self.network.get())
+        );
+        let slot = slot
+            .unwrap_or_else(|_| Err("request timed out".to_owned()))
+            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))?;
+        let (build, snapfile) = files.map_err(|e| {
+            self.network.return_slot(slot);
+            template_status(&config, e)
+        })?;
         match self.resume(&config, &build, &snapfile, slot).await {
             Ok(sandbox) => Ok(lifecycle::spawn(
                 sandbox,

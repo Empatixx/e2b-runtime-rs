@@ -27,8 +27,8 @@ pub struct App {
 impl App {
     pub fn new(node: Arc<Node>) -> Self {
         Self {
+            status: node.status.clone(),
             node,
-            status: Arc::default(),
             metrics: Arc::default(),
         }
     }
