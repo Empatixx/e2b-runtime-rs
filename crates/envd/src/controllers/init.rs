@@ -1,3 +1,5 @@
+mod resume_freeze;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -83,10 +85,12 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
         tracing::error!("{e}");
         return (StatusCode::UNAUTHORIZED, version, e).into_response();
     }
+    let freeze_audit = resume_freeze::audit_header(&state);
 
     if is_newest(&state, request.timestamp) {
         apply(&state, request);
     }
+    resume_freeze::unfreeze_user_cgroups(&state).await;
     state.initialized.store(true, Ordering::SeqCst);
 
     let poller = state.clone();
@@ -99,12 +103,16 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
         fallback: !defaults.user_delivered,
     };
     let reported = serde_json::to_string(&effective).unwrap_or_default();
-    (
+    let mut response = (
         StatusCode::NO_CONTENT,
         version,
         [("cache-control", "no-store"), ("X-Envd-Defaults", reported.as_str())],
     )
-        .into_response()
+        .into_response();
+    if let Some(audit) = freeze_audit.and_then(|audit| audit.parse().ok()) {
+        response.headers_mut().insert(resume_freeze::FREEZE_AUDIT_HEADER, audit);
+    }
+    response
 }
 
 #[derive(Serialize)]

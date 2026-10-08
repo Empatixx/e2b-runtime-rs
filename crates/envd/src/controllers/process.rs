@@ -122,7 +122,7 @@ impl Process for ProcessService {
         let defaults = self.state.defaults();
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let request = request.to_owned_message();
-        let placement = self.state.cgroups.placement(process_type(&request));
+        let placement = self.state.freezer.manager().placement(process_type(&request));
         let launch = Launch {
             request,
             placement,

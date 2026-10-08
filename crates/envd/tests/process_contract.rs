@@ -454,3 +454,60 @@ async fn processes_start_in_their_cgroup() {
         "{nobody_trailer:?}"
     );
 }
+
+#[tokio::test]
+async fn freeze_stops_the_workload_and_unfreeze_resumes_it() {
+    let root = std::path::PathBuf::from(format!("/sys/fs/cgroup/envd-freeze-{}", std::process::id()));
+    let cgroup2 =
+        nix::sys::statfs::statfs("/sys/fs/cgroup").is_ok_and(|stats| stats.filesystem_type().0 == 0x6367_7270);
+    if !nix::unistd::geteuid().is_root() || !cgroup2 {
+        eprintln!("skipping: needs root and cgroup2");
+        return;
+    }
+    std::fs::create_dir_all(&root).unwrap();
+    let (addr, state) = spawn_server_with_flags(&["-cgroup-root", root.to_str().unwrap()]).await;
+    let mut sleeper = open(addr, "Start", start_body("/bin/sleep", &["30"])).await;
+    let pid = next_frame(&mut sleeper).await.unwrap().body["event"]["start"]["pid"]
+        .as_u64()
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let frozen: Value = client
+        .post(format!("http://{addr}/freeze?maxWaitMs=2000&mode=hierarchy"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let state_while_frozen = std::fs::read_to_string(root.join("user/cgroup.events")).unwrap();
+    let thawed = client
+        .post(format!("http://{addr}/unfreeze"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    let state_after = std::fs::read_to_string(root.join("user/cgroup.events")).unwrap();
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    drop(sleeper);
+    drop(state);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ["user", "ptys", "socats"]
+        .iter()
+        .for_each(|name| drop(std::fs::remove_dir(root.join(name))));
+    let _ = std::fs::remove_dir(&root);
+
+    assert_eq!(frozen["mode"], "hierarchy", "{frozen}");
+    assert_eq!(
+        (frozen["requested"].as_i64(), frozen["notFrozen"].as_i64()),
+        (Some(2), Some(0)),
+        "{frozen}"
+    );
+    assert_eq!(frozen["allowlisted"], 1, "{frozen}");
+    assert!(state_while_frozen.contains("frozen 1"), "{state_while_frozen}");
+    assert_eq!(thawed, 204);
+    assert!(state_after.contains("frozen 0"), "{state_after}");
+}

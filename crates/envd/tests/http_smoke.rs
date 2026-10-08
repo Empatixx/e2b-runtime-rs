@@ -14,7 +14,7 @@ async fn health_returns_204_no_store() {
 async fn phase2_routes_return_501() {
     let (addr, _) = spawn_server_with_state().await;
     let c = reqwest::Client::new();
-    for p in ["/freeze", "/unfreeze", "/fsfreeze", "/fsthaw", "/collapse"] {
+    for p in ["/fsfreeze", "/fsthaw", "/collapse"] {
         let res = c.post(format!("http://{addr}{p}")).send().await.unwrap();
         assert_eq!(res.status(), 501, "{p}");
     }
@@ -155,4 +155,41 @@ async fn token_check_runs_before_basic_user_lookup() {
         body,
         serde_json::json!({ "code": 401, "message": "unauthorized access, please provide a valid access token or method signing if supported" })
     );
+}
+
+#[tokio::test]
+async fn freeze_and_unfreeze_answer_like_upstream() {
+    let (addr, _) = spawn_server_with_state().await;
+    let c = reqwest::Client::new();
+    let post = |path: &str| c.post(format!("http://{addr}{path}")).send();
+
+    let bare = post("/freeze").await.unwrap();
+    assert_eq!(bare.status(), 204);
+
+    let reported = post("/freeze?maxWaitMs=20&mode=hierarchy").await.unwrap();
+    assert_eq!(reported.status(), 200);
+    assert_eq!(reported.headers()["cache-control"], "no-store");
+    assert_eq!(reported.headers()["content-type"], "application/json");
+    let body = reported.text().await.unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        body.starts_with("{\"allowlisted\":0,\"failed\":0,\"frozen\":0,\"mode\":\"legacy\",\"notFrozen\":0,"),
+        "{body}"
+    );
+    assert!(body.ends_with("}\n"));
+    assert_eq!(
+        (parsed["requested"].as_i64(), parsed["unobservable"].as_i64()),
+        (Some(2), Some(2))
+    );
+
+    let invalid = post("/freeze?maxWaitMs=soon").await.unwrap();
+    assert_eq!(invalid.status(), 400);
+    assert_eq!(
+        invalid.text().await.unwrap(),
+        "Invalid format for parameter maxWaitMs: error binding string parameter: strconv.ParseInt: parsing \"soon\": invalid syntax\n"
+    );
+
+    let thawed = post("/unfreeze").await.unwrap();
+    assert_eq!(thawed.status(), 204);
+    assert_eq!(thawed.headers()["cache-control"], "no-store");
 }

@@ -14,6 +14,7 @@ use crate::auth::{ACCESS_TOKEN_HEADER, validate_signing};
 use crate::user::User;
 use crate::util::error_response::ErrorResponse;
 use crate::util::metadata::read_metadata;
+use crate::util::query::parse_int;
 
 #[derive(Deserialize)]
 pub struct FilesQuery {
@@ -101,17 +102,5 @@ pub fn lookup_user(username: Option<&str>, default_user: &str) -> Result<User, E
 }
 
 fn parse_expiration(value: &str) -> Result<i64, ErrorResponse> {
-    value.parse::<i64>().map_err(|e| {
-        let reason = match e.kind() {
-            std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => "value out of range",
-            _ => "invalid syntax",
-        };
-        ErrorResponse::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .message(format!(
-                "Invalid format for parameter signature_expiration: error binding string parameter: strconv.ParseInt: parsing {value:?}: {reason}"
-            ))
-            .plain_text()
-            .build()
-    })
+    parse_int("signature_expiration", value)
 }

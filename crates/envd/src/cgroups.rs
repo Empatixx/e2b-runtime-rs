@@ -1,3 +1,6 @@
+pub mod freeze;
+pub mod hierarchy;
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -6,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::util::fs::os_error;
 
 const MEGABYTE: u64 = 1024 * 1024;
 const MAX_MEMORY_RESERVED: u64 = 128 * MEGABYTE;
@@ -36,6 +40,46 @@ struct Cgroup {
 pub struct CgroupManager {
     root: PathBuf,
     cgroups: HashMap<ProcessType, Cgroup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Vanished,
+    Unobservable,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupError {
+    pub failure: Failure,
+    pub message: String,
+}
+
+impl std::fmt::Display for CgroupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl CgroupError {
+    pub fn vanished(&self) -> bool {
+        self.failure == Failure::Vanished
+    }
+
+    fn unobservable() -> Self {
+        Self {
+            failure: Failure::Unobservable,
+            message: "cgroup freeze state unobservable".to_owned(),
+        }
+    }
+
+    fn file(op: &str, path: &Path, error: &io::Error) -> Self {
+        let vanished = error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(nix::libc::ENODEV);
+        Self {
+            failure: if vanished { Failure::Vanished } else { Failure::Other },
+            message: os_error(op, path, error),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -74,6 +118,23 @@ impl CgroupManager {
 
     pub fn path_of(&self, process_type: ProcessType) -> Option<&Path> {
         self.cgroups.get(&process_type).map(|cgroup| cgroup.path.as_path())
+    }
+
+    pub fn walk_root(&self) -> Option<&Path> {
+        (!self.cgroups.is_empty()).then_some(self.root.as_path())
+    }
+
+    pub fn freeze(&self, process_type: ProcessType) -> Result<(), CgroupError> {
+        self.path_of(process_type).map_or(Ok(()), freeze_at)
+    }
+
+    pub fn unfreeze(&self, process_type: ProcessType) -> Result<(), CgroupError> {
+        self.path_of(process_type).map_or(Ok(()), unfreeze_at)
+    }
+
+    pub fn frozen(&self, process_type: ProcessType) -> Result<bool, CgroupError> {
+        self.path_of(process_type)
+            .map_or(Err(CgroupError::unobservable()), frozen_at)
     }
 
     fn cgroup2(root: &Path, specs: Vec<CgroupSpec>) -> Result<Self, String> {
@@ -152,7 +213,7 @@ fn specs(mem_total: u64) -> Vec<CgroupSpec> {
     ]
 }
 
-fn process_type_name(process_type: ProcessType) -> &'static str {
+pub(crate) fn process_type_name(process_type: ProcessType) -> &'static str {
     match process_type {
         ProcessType::Pty => "pty",
         ProcessType::User => "user",
@@ -214,12 +275,61 @@ fn create_cgroup(path: &Path, properties: &[(&str, String)]) -> Result<Cgroup, S
         .map_err(|e| e.to_string())
 }
 
-pub fn write_property(path: &Path, value: &str) -> io::Result<()> {
+fn write_property(path: &Path, value: &str) -> io::Result<()> {
     OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(path)?
         .write_all(value.as_bytes())
+}
+
+fn write_file(path: &Path, value: &str) -> Result<(), CgroupError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| CgroupError::file("open", path, &e))?;
+    file.write_all(value.as_bytes())
+        .map_err(|e| CgroupError::file("write", path, &e))
+}
+
+fn read_file(path: &Path) -> Result<String, CgroupError> {
+    std::fs::read_to_string(path).map_err(|e| CgroupError::file("open", path, &e))
+}
+
+pub fn freeze_at(path: &Path) -> Result<(), CgroupError> {
+    write_file(&path.join("cgroup.freeze"), "1")
+}
+
+pub fn unfreeze_at(path: &Path) -> Result<(), CgroupError> {
+    write_file(&path.join("cgroup.freeze"), "0")
+}
+
+pub fn frozen_at(path: &Path) -> Result<bool, CgroupError> {
+    read_file(&path.join("cgroup.events")).map(|events| frozen_from_events(&events))
+}
+
+pub fn freeze_requested_at(path: &Path) -> Result<bool, CgroupError> {
+    read_file(&path.join("cgroup.freeze")).map(|requested| requested.trim() == "1")
+}
+
+pub fn children_of(path: &Path) -> Result<Vec<PathBuf>, CgroupError> {
+    let entries = std::fs::read_dir(path).map_err(|e| CgroupError::file("open", path, &e))?;
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| path.join(entry.file_name()))
+        .collect();
+    children.sort();
+    Ok(children)
+}
+
+fn frozen_from_events(events: &str) -> bool {
+    events
+        .lines()
+        .filter_map(|line| line.trim().split_once(' '))
+        .find(|(key, _)| *key == "frozen")
+        .is_some_and(|(_, value)| value == "1")
 }
 
 #[cfg(test)]

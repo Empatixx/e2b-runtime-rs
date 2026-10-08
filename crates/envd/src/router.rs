@@ -10,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::app::AppState;
 use crate::controllers::filesystem::FilesystemService;
 use crate::controllers::process::ProcessService;
-use crate::controllers::{envs, files, health, init};
+use crate::controllers::{envs, files, freeze, health, init};
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
 use crate::proto::filesystem::FilesystemExt;
@@ -43,8 +43,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/envs", get(envs::get_envs))
         .route("/files/compose", post(files::compose::post_files_compose))
         .route("/metrics", get(health::get_metrics))
-        .route("/freeze", post(health::not_implemented))
-        .route("/unfreeze", post(health::not_implemented))
+        .route("/freeze", post(freeze::post_freeze))
+        .route("/unfreeze", post(freeze::post_unfreeze))
         .route("/fsfreeze", post(health::not_implemented))
         .route("/fsthaw", post(health::not_implemented))
         .route("/collapse", post(health::not_implemented))

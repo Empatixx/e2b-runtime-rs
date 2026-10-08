@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use parking_lot::RwLock;
 
 use crate::cgroups::CgroupManager;
+use crate::cgroups::freeze::WorkloadFreezer;
 use crate::config::Config;
 use crate::envvars::EnvVars;
 use crate::host::metrics::{CpuUsage, read_metrics};
@@ -35,7 +36,7 @@ pub struct AppState {
     pub last_set_time: AtomicI64,
     pub init_lock: tokio::sync::Mutex<()>,
     pub cpu: CpuUsage,
-    pub cgroups: CgroupManager,
+    pub freezer: Arc<WorkloadFreezer>,
     pub oom_kills: Option<Arc<OomWatcher>>,
 }
 
@@ -43,10 +44,11 @@ impl AppState {
     pub fn new(config: Config) -> Arc<Self> {
         let cpu = CpuUsage::start();
         let cgroups = CgroupManager::create(&config, || read_metrics(&cpu).map(|metrics| metrics.mem_total));
+        let freezer = WorkloadFreezer::new(Arc::new(cgroups));
         Arc::new(Self {
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
-            cgroups,
+            freezer,
             config,
             defaults: RwLock::default(),
             env_vars: EnvVars::default(),
