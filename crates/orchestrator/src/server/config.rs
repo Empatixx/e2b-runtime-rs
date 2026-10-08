@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod binaries;
 mod storage;
 
 use super::services::Services;
@@ -74,7 +75,6 @@ impl NodeConfig {
 
     pub fn from_vars(vars: &HashMap<String, String>) -> Result<Self, String> {
         let var = |name: &str| vars.get(name).cloned();
-        let required = |name: &str| var(name).ok_or_else(|| format!("{name} is not set"));
         let grpc_port = var("GRPC_PORT")
             .map(|port| port.parse().map_err(|_| format!("GRPC_PORT is not a port: {port}")))
             .transpose()?
@@ -100,8 +100,8 @@ impl NodeConfig {
         Ok(Self {
             grpc_port,
             node_id: var("NODE_ID").unwrap_or_else(|| DEFAULT_NODE_ID.to_owned()),
-            firecracker: required("E2B_FIRECRACKER")?.into(),
-            kernel: required("E2B_KERNEL")?.into(),
+            firecracker: var("E2B_FIRECRACKER").unwrap_or_default().into(),
+            kernel: var("E2B_KERNEL").unwrap_or_default().into(),
             template_storage,
             build_cache_storage,
             local_upload_base_url: var("LOCAL_UPLOAD_BASE_URL").unwrap_or_default(),
@@ -236,16 +236,29 @@ mod tests {
     #[test]
     fn missing_or_bad_values_are_errors() {
         assert_eq!(
-            NodeConfig::from_vars(&vars(&[("E2B_KERNEL", "/k"), ("STORAGE_PROVIDER", "Local")])).unwrap_err(),
-            "E2B_FIRECRACKER is not set"
-        );
-        assert_eq!(
             NodeConfig::from_vars(&vars(&[("E2B_FIRECRACKER", "/f"), ("E2B_KERNEL", "/k")])).unwrap_err(),
             "failed to resolve template storage: template storage bucket not configured: set TEMPLATE_BUCKET_NAME"
         );
         assert_eq!(
             NodeConfig::from_vars(&vars(&[("GRPC_PORT", "x")])).unwrap_err(),
             "GRPC_PORT is not a port: x"
+        );
+    }
+
+    #[test]
+    fn the_firecracker_and_kernel_overrides_are_optional() {
+        let bare = NodeConfig::from_vars(&vars(&[("STORAGE_PROVIDER", "Local")])).unwrap();
+        let overridden = NodeConfig::from_vars(&vars(&[
+            ("STORAGE_PROVIDER", "Local"),
+            ("E2B_FIRECRACKER", "/f"),
+            ("E2B_KERNEL", "/k"),
+        ]))
+        .unwrap();
+
+        assert_eq!((bare.firecracker, bare.kernel), (PathBuf::new(), PathBuf::new()));
+        assert_eq!(
+            (overridden.firecracker, overridden.kernel),
+            (PathBuf::from("/f"), PathBuf::from("/k"))
         );
     }
 
