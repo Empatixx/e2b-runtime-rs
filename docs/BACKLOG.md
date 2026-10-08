@@ -84,4 +84,12 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Rate limiter reset `PATCH`es after snapshot load (upstream sends empty limiters) | M8 |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | M8 |
 | `resume` builds the memfile `BuildFile` in the caller; a template cache should own it | M8 |
+| Huge pages: `MAX_RUN_PAGES` counts pages, so a 2 MiB-page run can exceed `process_vm_readv`'s MAX_RW_COUNT; cap runs by bytes | M8 |
+| A failed `PUT /snapshot/load` still waits up to 10 s for the uffd handshake; cancel it when the load fails | M8 |
+| A memory server that dies during resume shows up as an envd timeout; race init against the server task too | M8 |
+| A shared chunk fetch whose waiters are all cancelled stays in `in_flight` unpolled; spawn the fetch and share its handle | M8 |
+| The received uffd fd is assumed `O_NONBLOCK`; set it with `fcntl` on receipt | any |
+| The uffd handshake socket is `0777` (upstream parity); `0600` would do, since Firecracker runs as root | M8 |
+| `Regions::addresses_of` / `total_size` are only used by tests; `testing::Pages::read_byte` is a safe fn dereferencing any address | any |
+| `Chunker::fetch_attempts` / `open_with_timeout` are public only for tests | any |
 
