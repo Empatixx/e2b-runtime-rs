@@ -38,6 +38,7 @@ Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of t
 | 17 | Layer file uploads | `InitLayerFileUpload` on the build cache with signed-URL headers (Azure `x-ms-blob-type`), local HMAC `PUT /upload` |
 | 19 | Template base phase (M14) | OCI pull with go-containerregistry texts, moby-like untar with whiteouts, overlayfs + rsync into ext4, upstream injected files byte for byte, provisioning console scan, Go kernel args, base layer upload and index |
 | 20 | Template steps (M15) | RUN, ENV/ARG, WORKDIR, USER, COPY/ADD with upstream scripts and error texts, the default user phase from v2.1.0, sticky force, layers resumed or cold-booted with an envd update, uploads in the background with the index written after landing |
+| 21 | Template finalize and optimize (M16) | finalize cold-boots the requested build id with the context's envd defaults, runs the embedded `configure.sh`, the start command in the background and the ready loop (2 s, 10 min, Go default ready commands), packs the CA cert bundle and uploads with `build_origin=template_build`; optimize resumes it twice and writes the intersected prefetch to `metadata.json`; the result carries the rootfs size and scheduling metadata |
 | 18 | Shutdown | 15 s pause unless `ENVIRONMENT=local`, template builds drained with a 15 s consumer grace, `FORCE_STOP` |
 
 Also: cgroups are named `sbx-<id>-<random>` as upstream, so a same-id resume or checkpoint never shares the old sandbox's cgroup.
@@ -53,7 +54,12 @@ These paths are off by default upstream. We follow the default:
 - ClickHouse alternate endpoints are parsed and logged only;
 - resume-time envd live upgrade.
 
-Not ported yet: the template builder finalize and optimize (M16) and the envd `oom_kills` metric in envd-rs.
+Not ported yet: the `ensurefreedisk` template phase (`build-ensure-free-disk-space`, default false) and the envd `oom_kills` metric in envd-rs.
+
+## Deliberate rulings where Go is nondeterministic
+
+- A build cancelled during the finalize ready loop: Go's `select` picks randomly between `waiting for start command failed: context canceled` and a cert bundle run on a cancelled context. We always give the first.
+- The prefetch `metadata.json`: Go's optimize puts it while the finalize upload may still write the local file without the prefetch, so the last writer wins. We rewrite the local file before the put, so the prefetch survives whichever write lands last.
 
 ## Same as upstream (checked)
 

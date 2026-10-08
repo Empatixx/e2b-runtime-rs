@@ -48,7 +48,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (LayerUploads: background layer uploads, index written after landing), layer.rs
                        (LayerExecutor: resume or cold boot, update_envd, pause and upload), sandbox_command.rs
                        (logStream adapter), commands.rs + commands/ (RUN, ENV, WORKDIR, USER, COPY; script.rs
-                       renders the embedded assets/template/commands/*.sh), phases/ (base, steps: steps and default user)
+                       renders the embedded assets/template/commands/*.sh), phases/ (base, steps: steps and default user,
+                       finalize: configure.sh, start/ready, CA bundle from assets/template/finalize/, optimize: prefetch)
   src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)

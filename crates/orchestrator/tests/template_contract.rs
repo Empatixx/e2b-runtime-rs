@@ -1,17 +1,23 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use orchestrator::builder::config::BuilderConfig;
+use orchestrator::envd::ENVD_PORT;
+use orchestrator::envd::process::{CommandContext, run_command};
 use orchestrator::network::settings::NetworkSettings;
+use orchestrator::network::slot::Slot;
+use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
 use orchestrator::proto::template_config::Source;
 use orchestrator::proto::template_service_client::TemplateServiceClient;
 use orchestrator::proto::{
-    FromTemplateConfig, TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest, TemplateStep,
+    FromTemplateConfig, SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest, TemplateBuildMetadata,
+    TemplateBuildState, TemplateConfig, TemplateCreateRequest, TemplateStatusRequest, TemplateStep,
 };
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
@@ -27,6 +33,65 @@ const LOG_PAGE: u32 = 100;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const V2_VERSION: &str = "v2.1.0";
 const FILES_HASH: &str = "contract-files";
+const START_COMMAND: &str = "echo \"Starting with TEST_VAR=$TEST_VAR\"; echo 'Initialization complete'; sleep infinity";
+
+struct BuildRequest {
+    source: Source,
+    steps: Vec<TemplateStep>,
+    version: &'static str,
+    start_command: &'static str,
+    ready_command: &'static str,
+}
+
+impl BuildRequest {
+    fn new(source: Source) -> Self {
+        Self {
+            source,
+            steps: Vec::new(),
+            version: "",
+            start_command: "",
+            ready_command: "",
+        }
+    }
+
+    fn steps(self, steps: Vec<TemplateStep>) -> Self {
+        Self { steps, ..self }
+    }
+
+    fn version(self, version: &'static str) -> Self {
+        Self { version, ..self }
+    }
+
+    fn start(self, start_command: &'static str, ready_command: &'static str) -> Self {
+        Self {
+            start_command,
+            ready_command,
+            ..self
+        }
+    }
+}
+
+struct Built {
+    build_id: String,
+    state: i32,
+    logs: Vec<String>,
+    metadata: Option<TemplateBuildMetadata>,
+    reason: String,
+}
+
+impl Built {
+    fn has(&self, line: &str) -> bool {
+        self.logs.iter().any(|log| log == line)
+    }
+
+    fn has_prefix(&self, prefix: &str) -> bool {
+        self.logs.iter().any(|log| log.starts_with(prefix))
+    }
+
+    fn last(&self, prefix: &str) -> Option<usize> {
+        self.logs.iter().rposition(|log| log.starts_with(prefix))
+    }
+}
 
 struct Host {
     firecracker: PathBuf,
@@ -100,12 +165,7 @@ async fn wait_for_build(
     templates: &mut TemplateServiceClient<tonic::transport::Channel>,
     template_id: &str,
     build_id: &str,
-) -> (
-    i32,
-    Vec<String>,
-    Option<orchestrator::proto::TemplateBuildMetadata>,
-    String,
-) {
+) -> Built {
     let deadline = tokio::time::Instant::now() + BUILD_TIMEOUT;
     loop {
         let status = templates
@@ -120,9 +180,13 @@ async fn wait_for_build(
             .into_inner();
         let finished = status.status != TemplateBuildState::Building as i32;
         if finished || tokio::time::Instant::now() > deadline {
-            let logs = all_logs(templates, template_id, build_id).await;
-            let reason = status.reason.map(|reason| reason.message).unwrap_or_default();
-            return (status.status, logs, status.metadata, reason);
+            return Built {
+                build_id: build_id.to_owned(),
+                state: status.status,
+                logs: all_logs(templates, template_id, build_id).await,
+                metadata: status.metadata,
+                reason: status.reason.map(|reason| reason.message).unwrap_or_default(),
+            };
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -166,10 +230,15 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
     let template_id = format!("t{}", Uuid::new_v4().simple());
     let image = Source::FromImage(BASE_IMAGE.to_owned());
 
-    let (state, logs, metadata, reason) = build(&mut templates, &template_id, image.clone()).await;
+    let first = build(&mut templates, &template_id, BuildRequest::new(image.clone())).await;
 
-    eprintln!("build logs:\n{}", logs.join("\n"));
-    assert_eq!(state, TemplateBuildState::Completed as i32, "build failed: {reason}");
+    eprintln!("build logs:\n{}", first.logs.join("\n"));
+    assert_eq!(
+        first.state,
+        TemplateBuildState::Completed as i32,
+        "build failed: {}",
+        first.reason
+    );
     for line in [
         "Requesting Docker Image",
         "Provisioning sandbox template",
@@ -177,9 +246,16 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
         "Sandbox template provisioned",
         "Creating base sandbox template layer",
     ] {
-        assert!(logs.iter().any(|log| log == line), "missing log line {line:?}");
+        assert!(first.has(line), "missing log line {line:?}");
     }
-    let metadata = metadata.unwrap();
+    for prefix in [
+        "[finalize] Finalizing template build [",
+        "[optimize] Optimizing template [",
+    ] {
+        assert!(first.has_prefix(prefix), "missing {prefix:?}");
+    }
+    assert!(!first.has_prefix("Waiting for template to be ready"));
+    let metadata = first.metadata.clone().unwrap();
     assert!(!metadata.envd_version_key.is_empty());
     assert_eq!(
         (metadata.kernel_version.as_str(), metadata.firecracker_version.as_str()),
@@ -190,78 +266,211 @@ async fn a_debian_image_becomes_a_provisioned_base_layer() {
         "rootfs is {} MB",
         metadata.rootfs_size_key
     );
-    let index_dir = dir.path().join("build-cache").join(&template_id).join("index");
-    let entries: Vec<_> = std::fs::read_dir(&index_dir).unwrap().collect();
-    assert_eq!(entries.len(), 1);
-    let base_build = std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
-    let base_build: serde_json::Value = serde_json::from_str(&base_build).unwrap();
-    let base_dir = dir
-        .path()
-        .join("store")
-        .join(base_build["template"]["build_id"].as_str().unwrap());
+    assert!(metadata.scheduling_metadata.is_some());
+    let store = dir.path().join("store");
+    let indexed = indexed_builds(&dir.path().join("build-cache").join(&template_id).join("index"));
+    assert_eq!(indexed.len(), 2);
+    assert!(indexed.contains(&first.build_id));
+    let base_build_id = indexed.into_iter().find(|id| *id != first.build_id).unwrap();
     for file in ["metadata.json", "rootfs.ext4.header", "memfile.header", "snapfile"] {
-        assert!(base_dir.join(file).is_file(), "missing {file}");
+        assert!(store.join(&base_build_id).join(file).is_file(), "missing {file}");
     }
-
-    let (cached_state, cached_logs, _, _) = build(&mut templates, &template_id, image).await;
-    let base_build_id = base_build["template"]["build_id"].as_str().unwrap().to_owned();
-    let from_template = Source::FromTemplate(FromTemplateConfig {
-        alias: "base".to_owned(),
-        build_id: base_build_id,
-    });
-    let (derived_state, derived_logs, _, _) = build(&mut templates, &template_id, from_template).await;
-
-    assert_eq!(cached_state, TemplateBuildState::Completed as i32);
-    assert!(
-        cached_logs
-            .iter()
-            .any(|log| log.starts_with(&format!("CACHED [base] FROM {BASE_IMAGE} [")))
+    let final_metadata = read_json(&store.join(&first.build_id).join("metadata.json"));
+    assert_eq!(final_metadata["template"]["build_id"], first.build_id.as_str());
+    assert_eq!(
+        final_metadata["balloon"],
+        serde_json::json!({"reporting": false, "hinting": false})
     );
-    assert!(!cached_logs.iter().any(|log| log == "Provisioning sandbox template"));
-    assert_eq!(derived_state, TemplateBuildState::Completed as i32);
     assert!(
-        derived_logs
-            .iter()
-            .any(|log| log.starts_with("CACHED [base] FROM TEMPLATE base ["))
+        final_metadata["prefetch"].is_object(),
+        "no prefetch in {final_metadata}"
     );
+
+    let cached = build(&mut templates, &template_id, BuildRequest::new(image)).await;
+    let from_template = || {
+        Source::FromTemplate(FromTemplateConfig {
+            alias: "base".to_owned(),
+            build_id: base_build_id.clone(),
+        })
+    };
+    let derived = build(&mut templates, &template_id, BuildRequest::new(from_template())).await;
+
+    assert_eq!(cached.state, TemplateBuildState::Completed as i32);
+    assert!(cached.has_prefix(&format!("CACHED [base] FROM {BASE_IMAGE} [")));
+    assert!(!cached.has("Provisioning sandbox template"));
+    assert_eq!(derived.state, TemplateBuildState::Completed as i32);
+    assert!(derived.has_prefix("CACHED [base] FROM TEMPLATE base ["));
 
     write_layer_files(&dir.path().join("build-cache").join(&template_id).join("files"));
-    let derived = Source::FromTemplate(FromTemplateConfig {
-        alias: "base".to_owned(),
-        build_id: base_build["template"]["build_id"].as_str().unwrap().to_owned(),
-    });
-    let (steps_state, steps_logs, _, steps_reason) =
-        build_with(&mut templates, &template_id, derived.clone(), steps(), V2_VERSION).await;
-    eprintln!("steps build logs:\n{}", steps_logs.join("\n"));
+    let with_steps = || BuildRequest::new(from_template()).steps(steps()).version(V2_VERSION);
+    let stepped = build(&mut templates, &template_id, with_steps()).await;
+    eprintln!("steps build logs:\n{}", stepped.logs.join("\n"));
     assert_eq!(
-        steps_state,
+        stepped.state,
         TemplateBuildState::Completed as i32,
-        "steps build failed: {steps_reason}"
+        "steps build failed: {}",
+        stepped.reason
     );
     let total = steps().len();
     for prefix in [
         "[base] DEFAULT USER user [".to_owned(),
         format!("[builder 1/{total}] ENV GREETING Hello, World! ["),
     ] {
-        assert!(
-            steps_logs.iter().any(|log| log.starts_with(&prefix)),
-            "missing {prefix:?}"
-        );
+        assert!(stepped.has_prefix(&prefix), "missing {prefix:?}");
     }
-    assert!(
-        steps_logs
-            .iter()
-            .any(|log| log == &format!("[builder 3/{total}] [stdout]: Hello, World!"))
-    );
+    assert!(stepped.has(&format!("[builder 3/{total}] [stdout]: Hello, World!")));
 
-    let (rebuilt_state, rebuilt_logs, _, _) =
-        build_with(&mut templates, &template_id, derived, steps(), V2_VERSION).await;
-    assert_eq!(rebuilt_state, TemplateBuildState::Completed as i32);
-    assert!(
-        rebuilt_logs
-            .iter()
-            .any(|log| log.starts_with(&format!("CACHED [builder 1/{total}] ENV GREETING Hello, World! [")))
+    let rebuilt = build(&mut templates, &template_id, with_steps()).await;
+    assert_eq!(rebuilt.state, TemplateBuildState::Completed as i32);
+    assert!(rebuilt.has_prefix(&format!("CACHED [builder 1/{total}] ENV GREETING Hello, World! [")));
+
+    let started = build(
+        &mut templates,
+        &template_id,
+        BuildRequest::new(from_template())
+            .steps(start_steps())
+            .version(V2_VERSION)
+            .start(START_COMMAND, "sleep 2"),
+    )
+    .await;
+    eprintln!("start build logs:\n{}", started.logs.join("\n"));
+    assert_eq!(
+        started.state,
+        TemplateBuildState::Completed as i32,
+        "start build failed: {}",
+        started.reason
     );
+    let running = format!("Running start command: {START_COMMAND}");
+    for line in [
+        running.as_str(),
+        "[start] [stdout]: Starting with TEST_VAR=test_value",
+        "[start] [stdout]: Initialization complete",
+        "Waiting for template to be ready: sleep 2",
+        "Template is ready",
+    ] {
+        assert!(started.has(line), "missing log line {line:?}");
+    }
+    assert!(started.last("Running start command") < started.last("Waiting for template to be ready"));
+    assert!(started.last("Waiting for template to be ready") < started.last("Template is ready"));
+    check_final_sandbox(address, &template_id, &started).await;
+
+    let failed = build(
+        &mut templates,
+        &template_id,
+        BuildRequest::new(from_template())
+            .version(V2_VERSION)
+            .start("exit 3", "sleep 5"),
+    )
+    .await;
+    assert_eq!(failed.state, TemplateBuildState::Failed as i32);
+    assert_eq!(
+        failed.reason,
+        "start command failed: error running start command: exit status 3"
+    );
+    assert!(failed.has("Template is ready"));
+}
+
+fn indexed_builds(index: &Path) -> Vec<String> {
+    std::fs::read_dir(index)
+        .unwrap()
+        .map(|entry| {
+            read_json(&entry.unwrap().path())["template"]["build_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+async fn check_final_sandbox(address: SocketAddr, template_id: &str, built: &Built) {
+    let mut sandboxes = SandboxServiceClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let metadata = built.metadata.clone().unwrap();
+    let now = SystemTime::now();
+    sandboxes
+        .create(SandboxCreateRequest {
+            sandbox: Some(SandboxConfig {
+                sandbox_id: "final-sbx".to_owned(),
+                template_id: template_id.to_owned(),
+                build_id: built.build_id.clone(),
+                team_id: "team".to_owned(),
+                execution_id: "final-execution".to_owned(),
+                kernel_version: metadata.kernel_version,
+                firecracker_version: metadata.firecracker_version,
+                envd_version: metadata.envd_version_key,
+                vcpu: 2,
+                ram_mb: 1024,
+                ..SandboxConfig::default()
+            }),
+            start_time: Some(now.into()),
+            end_time: Some((now + Duration::from_secs(600)).into()),
+            filesystem_boot: None,
+        })
+        .await
+        .unwrap();
+    let envd = running_envd().await;
+    assert_eq!(
+        guest_output(envd, "cat /.e2b").await,
+        Ok(format!(
+            "ENV_ID={template_id}\nTEMPLATE_ID={template_id}\nBUILD_ID={}\n",
+            built.build_id
+        ))
+    );
+    assert!(guest_output(envd, "pgrep -x sleep").await.is_ok());
+    assert!(
+        guest_output(envd, "test -s /usr/local/share/e2b/ssl-certs.tar")
+            .await
+            .is_ok()
+    );
+    sandboxes
+        .delete(SandboxDeleteRequest {
+            sandbox_id: "final-sbx".to_owned(),
+            kill_reason: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn running_envd() -> SocketAddr {
+    let client = reqwest::Client::new();
+    for _ in 0..20 {
+        for index in SLOTS {
+            let envd = SocketAddr::from((Slot::new(index).unwrap().host_ip(), ENVD_PORT));
+            let health = client
+                .get(format!("http://{envd}/health"))
+                .timeout(Duration::from_millis(500))
+                .send()
+                .await;
+            if health.is_ok_and(|response| response.status() == 204) {
+                return envd;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("no envd answers in slots {SLOTS:?}")
+}
+
+async fn guest_output(envd: SocketAddr, command: &str) -> Result<String, String> {
+    let root = CommandContext {
+        user: "root".to_owned(),
+        ..CommandContext::default()
+    };
+    let mut output = String::new();
+    run_command(envd, command, &root, |stdout, _| output.push_str(stdout))
+        .await
+        .map(|()| output)
+}
+
+fn start_steps() -> Vec<TemplateStep> {
+    vec![
+        step("RUN", &["echo 'Setting up template'"]),
+        step("ENV", &["TEST_VAR", "test_value"]),
+    ]
 }
 
 fn step(kind: &str, args: &[&str]) -> TemplateStep {
@@ -332,28 +541,8 @@ fn write_layer_files(dir: &Path) {
 async fn build(
     templates: &mut TemplateServiceClient<tonic::transport::Channel>,
     template_id: &str,
-    source: Source,
-) -> (
-    i32,
-    Vec<String>,
-    Option<orchestrator::proto::TemplateBuildMetadata>,
-    String,
-) {
-    build_with(templates, template_id, source, Vec::new(), "").await
-}
-
-async fn build_with(
-    templates: &mut TemplateServiceClient<tonic::transport::Channel>,
-    template_id: &str,
-    source: Source,
-    steps: Vec<TemplateStep>,
-    version: &str,
-) -> (
-    i32,
-    Vec<String>,
-    Option<orchestrator::proto::TemplateBuildMetadata>,
-    String,
-) {
+    request: BuildRequest,
+) -> Built {
     let build_id = Uuid::new_v4().to_string();
     templates
         .template_create(TemplateCreateRequest {
@@ -363,12 +552,14 @@ async fn build_with(
                 memory_mb: 1024,
                 v_cpu_count: 2,
                 disk_size_mb: 2048,
-                source: Some(source),
+                source: Some(request.source),
                 team_id: "team".to_owned(),
-                steps,
+                steps: request.steps,
+                start_command: request.start_command.to_owned(),
+                ready_command: request.ready_command.to_owned(),
                 ..TemplateConfig::default()
             }),
-            version: Some(version.to_owned()).filter(|version| !version.is_empty()),
+            version: Some(request.version.to_owned()).filter(|version| !version.is_empty()),
             ..TemplateCreateRequest::default()
         })
         .await

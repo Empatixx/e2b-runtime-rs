@@ -158,7 +158,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `collect_prefetch` returns the mapping; writing `metadata.json`, invalidating the template and log-only failure belong to the template build | template build |
 | Prefault installs zero pages that upstream skips | API |
 
-## Orchestrator: template builder (M13–M15)
+## Orchestrator: template builder (M13–M16)
 
 | Item | Matters from |
 |---|---|
@@ -172,4 +172,8 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Kernel and Firecracker binaries come from `E2B_KERNEL`/`E2B_FIRECRACKER`, not from `HOST_KERNELS_DIR/<version>` and `FIRECRACKER_VERSIONS_DIR/<version>` as upstream; the recorded versions are only labels | template build |
 | Feature flags read through LaunchDarkly upstream are fixed at their defaults: `build-provision-version` (0), `build-envd-memory-protection` (false), `build-reserved-disk-space-mb` (256), `build-base-rootfs-size-limit-mb` (25000), `build-kernel-version`/`build-firecracker-version` (env defaults) | template build |
 | A rate-limited layer index write (GCS `ResourceExhausted`) fails the build with `error saving UUID to hash mapping`; upstream logs a warning, skips the index entry and still logs `Saved:`. object_store retries 429 itself and hides the status, so the storage layer must expose a rate-limited error first | template build |
+| The `ensurefreedisk` phase is not ported; upstream runs it between the steps and finalize only with `build-ensure-free-disk-space` (default false): a VM-less host-side ext4 grow over NBD to `freeDiskSizeMB` (proto field 17), see section 1 of `docs/superpowers/research/2026-10-21-m16-upstream-digest.md` | template build |
+| Build sandboxes have no lifetime; upstream kills a finalize sandbox after 20 min and an optimize resume after 5 min. Our commands carry their own timeouts (configure 5 min, ready 10 min), the start command and the prefetch resumes do not | template build |
+| `/init` from build sandboxes always sends `"envVars": {}`; Go's `EnvVars` is `omitempty` and sends nothing for an empty map | template build |
+| Finalize and optimize flags are fixed at their defaults: `build-io-engine` (Sync), `free-page-reporting` and `free-page-hinting-config` (off, so `balloon` is `{"reporting":false,"hinting":false}`), `build-kernel-cmdline-args` (none), `build-cpu-template` (none) | template build |
 | The injected files and symlink layers are gzipped with flate2, so their logged `sha256:` digests differ from Go's compress/gzip output for the same tar | template build |
