@@ -3,16 +3,16 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::sys::socket::{getsockopt, setsockopt, sockopt};
+use nix::sys::socket::{getsockopt, sockopt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 
-use super::rules::{MatchType, egress_allowed, in_always_denied};
+use super::dial::Dialer;
+use super::rules::{MatchType, egress_allowed};
 use super::sniff::{http_head_complete, http_host, tls_record_complete, tls_sni};
 use crate::network::settings::NetworkSettings;
 use crate::proto::SandboxNetworkEgressConfig;
 
-const UPSTREAM_DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_PREFACE: usize = 16 * 1024;
 
@@ -33,14 +33,16 @@ enum Protocol {
 
 pub struct TcpFirewall {
     lookup: FirewallLookup,
-    tos: u8,
+    dialer: Dialer,
 }
 
 impl TcpFirewall {
     pub fn new(lookup: FirewallLookup, settings: &NetworkSettings) -> Arc<Self> {
         Arc::new(Self {
             lookup,
-            tos: settings.egress_dscp << 2,
+            dialer: Dialer {
+                tos: settings.egress_dscp << 2,
+            },
         })
     }
 
@@ -109,8 +111,8 @@ impl TcpFirewall {
             return;
         }
         let upstream = match (decision.matched, hostname) {
-            (MatchType::Domain, Some(hostname)) => self.dial_hostname(&hostname, destination.port()).await,
-            _ => self.dial(destination).await,
+            (MatchType::Domain, Some(hostname)) => self.dialer.dial_hostname(&hostname, destination.port()).await,
+            _ => self.dialer.dial(destination).await,
         };
         let Ok(mut upstream) = upstream.inspect_err(|e| {
             tracing::debug!(sandbox_id = %sandbox.sandbox_id, error = %e, "upstream dial failed");
@@ -120,31 +122,6 @@ impl TcpFirewall {
         if upstream.write_all(&preface).await.is_ok() {
             let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
         }
-    }
-
-    async fn dial_hostname(&self, hostname: &str, port: u16) -> io::Result<TcpStream> {
-        let resolved = tokio::net::lookup_host((hostname, port))
-            .await?
-            .find(SocketAddr::is_ipv4)
-            .ok_or_else(|| io::Error::other(format!("no IPv4 address for {hostname}")))?;
-        if in_always_denied(resolved.ip()) {
-            tracing::warn!(upstream_addr = %hostname, resolved_ip = %resolved.ip(), "Blocked connection to internal IP via hostname");
-            return Err(io::Error::other(format!(
-                "hostname resolved to internal IP {}",
-                resolved.ip()
-            )));
-        }
-        self.dial(resolved).await
-    }
-
-    async fn dial(&self, address: SocketAddr) -> io::Result<TcpStream> {
-        let socket = TcpSocket::new_v4()?;
-        if self.tos != 0 {
-            setsockopt(&socket, sockopt::IpTos, &i32::from(self.tos)).map_err(io::Error::from)?;
-        }
-        tokio::time::timeout(UPSTREAM_DIAL_TIMEOUT, socket.connect(address))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "upstream dial timed out"))?
     }
 }
 

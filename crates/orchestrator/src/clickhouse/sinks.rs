@@ -66,8 +66,18 @@ impl EventSink for ClickhouseEvents {
     }
 }
 
+impl ClickhouseEvents {
+    pub async fn stop(&self) {
+        self.batcher.stop().await;
+    }
+}
+
 impl ClickhouseHostStats {
     pub fn push(&self, row: HostStatRow) -> Result<(), String> {
         self.batcher.push(row)
+    }
+
+    pub async fn stop(&self) {
+        self.batcher.stop().await;
     }
 }

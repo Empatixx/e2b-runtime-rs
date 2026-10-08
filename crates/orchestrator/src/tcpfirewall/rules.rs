@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use crate::network::firewall::DENIED_SANDBOX_CIDRS;
 use crate::proto::SandboxNetworkEgressConfig;
@@ -71,37 +71,61 @@ pub fn matches_domain(hostname: &str, pattern: &str) -> bool {
 pub fn in_always_denied(ip: IpAddr) -> bool {
     DENIED_SANDBOX_CIDRS
         .iter()
-        .filter_map(|cidr| parse_cidr(cidr).ok())
-        .any(|(network, prefix)| contains(network, prefix, ip))
+        .filter_map(|cidr| Cidr::parse(cidr).ok())
+        .any(|cidr| cidr.contains(ip))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cidr {
+    network: IpAddr,
+    prefix: u32,
+}
+
+impl Cidr {
+    fn parse(text: &str) -> Result<Self, String> {
+        let invalid = || format!("invalid CIDR address: {text}");
+        let (address, prefix) = text.split_once('/').ok_or_else(invalid)?;
+        let network = address.parse::<IpAddr>().map_err(|_| invalid())?;
+        let bits = match network {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        Some(prefix)
+            .filter(|prefix| !prefix.is_empty() && prefix.bytes().all(|digit| digit.is_ascii_digit()))
+            .and_then(|prefix| prefix.parse::<u32>().ok())
+            .filter(|prefix| *prefix <= bits)
+            .map(|prefix| Self { network, prefix })
+            .ok_or_else(invalid)
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip.to_canonical()) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                masked(u128::from(u32::from(network)) << 96, self.prefix)
+                    == masked(u128::from(u32::from(ip)) << 96, self.prefix)
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                masked(u128::from(network), self.prefix) == masked(u128::from(ip), self.prefix)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn masked(address: u128, prefix: u32) -> u128 {
+    address & u128::MAX.checked_shl(128 - prefix).unwrap_or(0)
 }
 
 fn any_contains(cidrs: &[String], ip: IpAddr, kind: &str) -> Result<bool, String> {
-    cidrs.iter().try_fold(false, |found, cidr| {
-        parse_cidr(cidr)
-            .map(|(network, prefix)| found || contains(network, prefix, ip))
-            .map_err(|e| format!("invalid {kind} CIDR {cidr:?}: {e}"))
-    })
-}
-
-fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u32), String> {
-    let (address, prefix) = cidr.split_once('/').ok_or("invalid CIDR address")?;
-    let address = address
-        .parse::<Ipv4Addr>()
-        .map_err(|_| "invalid CIDR address".to_owned())?;
-    let prefix = prefix
-        .parse::<u32>()
-        .ok()
-        .filter(|prefix| *prefix <= 32)
-        .ok_or("invalid CIDR address")?;
-    Ok((address, prefix))
-}
-
-fn contains(network: Ipv4Addr, prefix: u32, ip: IpAddr) -> bool {
-    let IpAddr::V4(ip) = ip else {
-        return false;
-    };
-    let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
-    u32::from(network) & mask == u32::from(ip) & mask
+    for cidr in cidrs {
+        if Cidr::parse(cidr)
+            .map_err(|e| format!("invalid {kind} CIDR {cidr:?}: {e}"))?
+            .contains(ip)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -172,8 +196,19 @@ mod tests {
         let rules = egress(&[], &["nope"], &[]);
         assert_eq!(
             egress_allowed(Some(&rules), None, ip("1.1.1.1")).unwrap_err(),
-            "invalid allowed CIDR \"nope\": invalid CIDR address"
+            "invalid allowed CIDR \"nope\": invalid CIDR address: nope"
         );
+        let mixed = egress(&[], &["1.2.3.0/24", "2001:db8::/32", "bad"], &[]);
+        assert!(egress_allowed(Some(&mixed), None, ip("1.2.3.4")).unwrap().allowed);
+        assert_eq!(
+            egress_allowed(Some(&mixed), None, ip("9.9.9.9")).unwrap_err(),
+            "invalid allowed CIDR \"bad\": invalid CIDR address: bad"
+        );
+        let v6 = egress(&[], &[], &["2001:db8::/32", "0.0.0.0/0"]);
+        assert!(!egress_allowed(Some(&v6), None, ip("2001:db8::1")).unwrap().allowed);
+        assert!(!egress_allowed(Some(&v6), None, ip("::ffff:8.8.8.8")).unwrap().allowed);
+        assert!(Cidr::parse("1.2.3.0/33").is_err());
+        assert!(Cidr::parse("1.2.3.0/+8").is_err());
         assert!(in_always_denied(ip("10.1.2.3")));
         assert!(in_always_denied(ip("169.254.169.254")));
         assert!(!in_always_denied(ip("1.1.1.1")));

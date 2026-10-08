@@ -1,8 +1,10 @@
 use std::future::Future;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_QUEUE_SIZE: usize = 1000;
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 1000;
@@ -27,7 +29,8 @@ impl Default for BatcherOptions {
 
 pub struct Batcher<T> {
     sender: mpsc::Sender<T>,
-    flusher: JoinHandle<()>,
+    closing: CancellationToken,
+    flusher: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl<T: Send + 'static> Batcher<T> {
@@ -38,8 +41,13 @@ impl<T: Send + 'static> Batcher<T> {
     {
         let (sender, receiver) = mpsc::channel(options.queue_size.max(1));
         let name = name.to_owned();
-        let flusher = tokio::spawn(run(name, options, receiver, flush));
-        Self { sender, flusher }
+        let closing = CancellationToken::new();
+        let flusher = tokio::spawn(run(name, options, receiver, closing.clone(), flush));
+        Self {
+            sender,
+            closing,
+            flusher: Mutex::new(Some(flusher)),
+        }
     }
 
     pub fn push(&self, item: T) -> Result<(), String> {
@@ -49,14 +57,22 @@ impl<T: Send + 'static> Batcher<T> {
         })
     }
 
-    pub async fn stop(self) {
-        drop(self.sender);
-        let _ = self.flusher.await;
+    pub async fn stop(&self) {
+        self.closing.cancel();
+        let flusher = self.flusher.lock().take();
+        if let Some(flusher) = flusher {
+            let _ = flusher.await;
+        }
     }
 }
 
-async fn run<T, F, Fut>(name: String, options: BatcherOptions, mut receiver: mpsc::Receiver<T>, flush: F)
-where
+async fn run<T, F, Fut>(
+    name: String,
+    options: BatcherOptions,
+    mut receiver: mpsc::Receiver<T>,
+    closing: CancellationToken,
+    flush: F,
+) where
     F: Fn(Vec<T>) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
@@ -79,6 +95,14 @@ where
                 }
             },
             _ = ticks.tick() => send(&name, &flush, &mut batch).await,
+            () = closing.cancelled() => {
+                receiver.close();
+                while let Some(item) = receiver.recv().await {
+                    batch.push(item);
+                }
+                send(&name, &flush, &mut batch).await;
+                return;
+            }
         }
     }
 }
@@ -99,8 +123,6 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
-    use parking_lot::Mutex;
 
     use super::*;
 
@@ -149,7 +171,9 @@ mod tests {
         batcher.push(2).unwrap();
         assert_eq!(batcher.push(3), Err("batcher queue is full".to_owned()));
         batcher.stop().await;
+        batcher.stop().await;
 
         assert_eq!(flushed.lock().concat(), vec![1, 2]);
+        assert_eq!(batcher.push(4), Err("batcher is not started".to_owned()));
     }
 }

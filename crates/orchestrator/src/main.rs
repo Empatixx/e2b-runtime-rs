@@ -36,10 +36,15 @@ mod serve {
             }
             None => tracing::warn!("redis disabled; orchestrator sandbox routing records are not published"),
         }
-        if let Some(primary) = &config.clickhouse {
-            let clickhouse = Clickhouse::open(primary, &config.clickhouse_additional)?;
-            event_sinks.push(Arc::new(clickhouse.events));
-            let _ = node.host_stats.set(Arc::new(clickhouse.host_stats));
+        let clickhouse = config
+            .clickhouse
+            .as_ref()
+            .map(|primary| Clickhouse::open(primary, &config.clickhouse_additional))
+            .transpose()?
+            .map(|clickhouse| (Arc::new(clickhouse.events), Arc::new(clickhouse.host_stats)));
+        if let Some((events, host_stats)) = &clickhouse {
+            event_sinks.push(events.clone());
+            let _ = node.host_stats.set(host_stats.clone());
         }
         node.events.install(event_sinks);
         node.sweep().await;
@@ -96,6 +101,9 @@ mod serve {
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
         node.close().await;
+        if let Some((events, host_stats)) = &clickhouse {
+            tokio::join!(events.stop(), host_stats.stop());
+        }
         served
     }
 
