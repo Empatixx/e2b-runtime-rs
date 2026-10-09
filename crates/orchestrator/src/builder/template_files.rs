@@ -162,7 +162,7 @@ impl InjectedFiles {
             .into_iter()
             .map(|file| {
                 (
-                    file.path.trim_start_matches('/').to_owned(),
+                    file.path.strip_prefix('/').unwrap_or(&file.path).to_owned(),
                     LayerFile {
                         bytes: data.clone(),
                         mode: file.mode,

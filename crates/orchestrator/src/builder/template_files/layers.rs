@@ -1,81 +1,37 @@
 use std::collections::BTreeMap;
 
-use tar::{Builder, EntryType, Header};
-
 use super::{LayerFile, SYMLINKS};
 use crate::go_gzip::gzip_best_speed;
+use crate::go_tar::{TarEntry, TarWriter};
 
 const SYMLINK_MODE: u32 = 0o777;
 
 pub fn files_layer(files: &BTreeMap<String, LayerFile>) -> Result<Vec<u8>, String> {
-    files
+    let entries = files
         .iter()
-        .try_fold(Builder::new(Vec::new()), |mut builder, (name, file)| {
-            let mut header = Header::new_ustar();
-            header.set_entry_type(EntryType::Regular);
-            header.set_size(file.bytes.len() as u64);
-            header.set_mode(file.mode);
-            zero_owner_and_time(&mut header);
-            set_name(&mut header, name)?;
-            seal(&mut header)?;
-            builder.append(&header, file.bytes.as_slice()).map(|()| builder)
-        })
-        .and_then(Builder::into_inner)
-        .map_err(|e| format!("error creating layer from files: {e}"))
+        .map(|(name, file)| TarEntry::file(name, file.mode, &file.bytes));
+    tar_of(entries).map_err(|e| format!("error creating layer from files: {e}"))
+}
+
+pub fn symlink_layer() -> Result<Vec<u8>, String> {
+    let mut links = SYMLINKS.to_vec();
+    links.sort();
+    let entries = links
+        .iter()
+        .map(|(name, target)| TarEntry::symlink(name, SYMLINK_MODE, target));
+    tar_of(entries).map_err(|e| format!("error creating layer from symlinks: {e}"))
 }
 
 pub fn gzipped(tar: &[u8]) -> Vec<u8> {
     gzip_best_speed(tar)
 }
 
-fn zero_owner_and_time(header: &mut Header) {
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-}
-
-fn set_name(header: &mut Header, name: &str) -> std::io::Result<()> {
-    let raw = header
-        .as_ustar_mut()
-        .ok_or_else(|| std::io::Error::other("not a ustar header"))?;
-    let field = raw
-        .name
-        .get_mut(..name.len())
-        .ok_or_else(|| std::io::Error::other(format!("tar name too long: {name}")))?;
-    field.copy_from_slice(name.as_bytes());
-    Ok(())
-}
-
-fn seal(header: &mut Header) -> std::io::Result<()> {
-    header.set_device_major(0)?;
-    header.set_device_minor(0)?;
-    header.set_cksum();
-    let checksum = header.cksum()?;
-    header
-        .as_old_mut()
-        .cksum
-        .copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
-    Ok(())
-}
-
-pub fn symlink_layer() -> Result<Vec<u8>, String> {
-    let mut links = SYMLINKS.to_vec();
-    links.sort();
-    links
-        .iter()
-        .try_fold(Builder::new(Vec::new()), |mut builder, (name, target)| {
-            let mut header = Header::new_ustar();
-            header.set_entry_type(EntryType::Symlink);
-            header.set_size(0);
-            header.set_mode(SYMLINK_MODE);
-            zero_owner_and_time(&mut header);
-            set_name(&mut header, name)?;
-            header.set_link_name(target)?;
-            seal(&mut header)?;
-            builder.append(&header, std::io::empty()).map(|()| builder)
+fn tar_of<'a>(mut entries: impl Iterator<Item = TarEntry<'a>>) -> Result<Vec<u8>, String> {
+    entries
+        .try_fold(TarWriter::new(), |mut writer, entry| {
+            writer.append(&entry).map(|()| writer)
         })
-        .and_then(Builder::into_inner)
-        .map_err(|e| format!("error creating layer from symlinks: {e}"))
+        .map(TarWriter::finish)
 }
 
 #[cfg(test)]

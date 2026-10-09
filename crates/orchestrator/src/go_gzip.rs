@@ -26,6 +26,11 @@ impl GoGzipWriter {
         }
     }
 
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        self.crc.update(bytes);
+        self.deflate.write(bytes);
+    }
+
     pub fn finish(self) -> Vec<u8> {
         let mut out = HEADER.to_vec();
         out.extend(self.deflate.finish());
@@ -37,8 +42,7 @@ impl GoGzipWriter {
 
 impl Write for GoGzipWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.crc.update(bytes);
-        self.deflate.write(bytes);
+        self.write_bytes(bytes);
         Ok(bytes.len())
     }
 
@@ -49,7 +53,8 @@ impl Write for GoGzipWriter {
 
 pub fn gzip_best_speed(bytes: &[u8]) -> Vec<u8> {
     let mut writer = GoGzipWriter::best_speed();
-    writer.write_all(bytes).map(|()| writer.finish()).unwrap_or_default()
+    writer.write_bytes(bytes);
+    writer.finish()
 }
 
 #[cfg(test)]
