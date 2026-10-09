@@ -13,6 +13,7 @@ aws-credential-types = "1"
 aws-sdk-ecr = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 azure_core = "1"
 azure_identity = "1"
+backon = { version = "1", default-features = false, features = ["std"] }
 base64 = "0.22"
 futures = "0.3"
 hmac = "0.12"

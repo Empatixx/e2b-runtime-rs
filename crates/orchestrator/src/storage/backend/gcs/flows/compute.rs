@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::OnceCell;
@@ -15,7 +16,7 @@ const METADATA_IP: &str = "169.254.169.254";
 const HOST_ENV: &str = "GCE_METADATA_HOST";
 const TOKEN_PATH: &str = "instance/service-accounts/default/token";
 const USER_AGENT: &str = "gcloud-golang/0.1";
-const MAX_RETRIES: u32 = 5;
+const MAX_RETRIES: usize = 5;
 const FIRST_PAUSE: Duration = Duration::from_millis(100);
 const MAX_PAUSE: Duration = Duration::from_secs(30);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -107,28 +108,12 @@ fn jittered(ceiling: Duration) -> Duration {
     Duration::from_nanos(1 + rand::random::<u64>() % nanos)
 }
 
-struct Backoff {
-    ceiling: Duration,
-    attempts: u32,
-}
-
-impl Backoff {
-    fn new() -> Self {
-        Self {
-            ceiling: FIRST_PAUSE,
-            attempts: 0,
-        }
-    }
-
-    fn next_pause(&mut self, retryable: bool) -> Option<Duration> {
-        if !retryable || self.attempts == MAX_RETRIES {
-            return None;
-        }
-        self.attempts += 1;
-        let pause = jittered(self.ceiling);
-        self.ceiling = (self.ceiling * 2).min(MAX_PAUSE);
-        Some(pause)
-    }
+fn pauses() -> ExponentialBackoff {
+    ExponentialBuilder::default()
+        .with_min_delay(FIRST_PAUSE)
+        .with_max_delay(MAX_PAUSE)
+        .with_max_times(MAX_RETRIES)
+        .build()
 }
 
 impl ComputeFlow {
@@ -158,7 +143,7 @@ impl ComputeFlow {
     async fn get(&self, suffix: &str) -> Result<String, String> {
         let host = self.host.clone().unwrap_or_else(metadata_host);
         let url = format!("http://{host}/computeMetadata/v1/{}", suffix.trim_start_matches('/'));
-        let mut backoff = Backoff::new();
+        let mut pauses = pauses();
         loop {
             let sent = self
                 .client
@@ -171,7 +156,7 @@ impl ComputeFlow {
                 Ok(response) => retryable_status(response.status().as_u16()),
                 Err(error) => transient(error),
             };
-            if let Some(pause) = backoff.next_pause(retryable) {
+            if let Some(pause) = pauses.next().filter(|_| retryable).map(jittered) {
                 tokio::time::sleep(pause).await;
                 continue;
             }
@@ -386,23 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn backoff_gives_up_after_five_retries_and_never_retries_permanent_failures() {
-        let mut backoff = Backoff::new();
+    fn the_pause_ceiling_doubles_from_100ms_for_five_retries() {
+        let ceilings: Vec<u128> = pauses().map(|pause| pause.as_millis()).collect();
 
-        assert_eq!(backoff.next_pause(false), None);
-        assert!((0..5).all(|_| backoff.next_pause(true).is_some()));
-        assert_eq!(backoff.next_pause(true), None);
-    }
-
-    #[test]
-    fn the_pause_ceiling_doubles_up_to_thirty_seconds() {
-        let mut backoff = Backoff::new();
-
-        (0..5).for_each(|_| {
-            backoff.next_pause(true);
-        });
-
-        assert_eq!(backoff.ceiling, Duration::from_millis(3200));
+        assert_eq!(ceilings, vec![100, 200, 400, 800, 1600]);
     }
 
     #[tokio::test(start_paused = true)]
