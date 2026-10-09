@@ -87,7 +87,7 @@ fn xml_error_code(body: &str) -> Option<String> {
     (!code.is_empty() && code.chars().all(|c| c.is_alphanumeric() || c == '_')).then(|| code.to_owned())
 }
 
-fn indent_json(text: &str) -> String {
+pub fn indent_json(text: &str) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
     let mut in_string = false;

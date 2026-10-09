@@ -2,6 +2,7 @@ pub mod aws;
 pub mod azure;
 mod credential_cache;
 pub mod gcs;
+pub(crate) mod pem;
 mod providers;
 
 use std::collections::{BTreeMap, HashMap};

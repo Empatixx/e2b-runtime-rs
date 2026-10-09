@@ -1,10 +1,14 @@
+mod aad;
 pub mod azcore;
+mod client_certificate;
 mod connection_string;
 pub mod default_credential;
 mod delegation;
 mod sas;
 #[cfg(test)]
 pub mod testing;
+mod token_source;
+mod username_password;
 
 use std::sync::Arc;
 use std::time::Duration;
