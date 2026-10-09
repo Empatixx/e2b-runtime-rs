@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::admission::MaxSandboxes;
 use super::metrics::HostMetrics;
 use super::status::NodeStatus;
 use crate::proto::info_service_server::InfoService;
@@ -22,7 +23,7 @@ pub struct InfoServer {
     pub started: SystemTime,
     pub labels: Vec<String>,
     pub roles: Vec<ServiceInfoRole>,
-    pub max_sandboxes: i64,
+    pub max_sandboxes: MaxSandboxes,
     pub machine: MachineInfo,
     pub status: Arc<NodeStatus>,
     pub metrics: Arc<HostMetrics>,
@@ -69,7 +70,7 @@ impl InfoServer {
             labels: self.labels.clone(),
             service_status_changed_at: Some(state.changed_at.into()),
             outstanding_work: self.status.outstanding_work(),
-            max_sandboxes: self.max_sandboxes,
+            max_sandboxes: self.max_sandboxes.load(),
             metric_sandboxes_running: allocated.sandboxes,
             metric_cpu_percent: host.cpu_percent,
             metric_memory_used_bytes: host.memory_used_bytes,
@@ -128,7 +129,7 @@ mod tests {
             started: SystemTime::UNIX_EPOCH,
             labels: vec!["gpu".to_owned()],
             roles: vec![ServiceInfoRole::Orchestrator],
-            max_sandboxes: 200,
+            max_sandboxes: MaxSandboxes::new(200),
             machine: MachineInfo::default(),
             status: Arc::default(),
             metrics: Arc::default(),

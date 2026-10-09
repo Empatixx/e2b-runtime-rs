@@ -10,6 +10,7 @@ use super::services::Services;
 use super::upload::UploadHandler;
 use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
+use crate::featureflags::{FeatureFlags, FeatureFlagsBuilder, FlagContext};
 use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
 use crate::routing::redis::RedisSettings;
@@ -22,8 +23,6 @@ use storage::StorageEnv;
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
 const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_MAX_SANDBOXES: i64 = 200;
-const DEFAULT_MAX_STARTING: usize = 3;
 const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
 const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
 const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
@@ -53,8 +52,9 @@ pub struct NodeConfig {
     pub local_expiry: bool,
     pub envd_timeout: Duration,
     pub labels: Vec<String>,
-    pub max_sandboxes: i64,
-    pub max_starting: usize,
+    pub domain_name: String,
+    pub instance_group_name: String,
+    pub feature_flags: FeatureFlags,
     pub local: bool,
     pub development: bool,
     pub force_stop: bool,
@@ -134,8 +134,9 @@ impl NodeConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            max_sandboxes: number(vars, "MAX_SANDBOXES_PER_NODE")?.unwrap_or(DEFAULT_MAX_SANDBOXES),
-            max_starting: number(vars, "MAX_STARTING_INSTANCES_PER_NODE")?.unwrap_or(DEFAULT_MAX_STARTING),
+            domain_name: var("DOMAIN_NAME").unwrap_or_default(),
+            instance_group_name: var("INSTANCE_GROUP_NAME").unwrap_or_default(),
+            feature_flags: FeatureFlags::offline(),
             local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
             development: var("ENVIRONMENT").is_some_and(|environment| environment == "local" || environment == "dev"),
             force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
@@ -152,6 +153,20 @@ impl NodeConfig {
             clickhouse: clickhouse.0,
             clickhouse_additional: clickhouse.1,
         })
+    }
+
+    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder {
+        FeatureFlags::builder()
+            .api_key_from_env()
+            .deployment_name(self.domain_name.as_str())
+            .context_provider(FlagContext::orchestrator(&self.node_id, commit))
+            .context_provider(FlagContext::instance_group(self.instance_group_name.trim()))
+    }
+
+    pub fn with_feature_flags(mut self, feature_flags: FeatureFlags) -> Self {
+        self.builder.feature_flags = feature_flags.clone();
+        self.feature_flags = feature_flags;
+        self
     }
 
     pub fn open_template_storage(&self) -> Result<Storage, String> {
@@ -258,7 +273,6 @@ mod tests {
         assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
-        assert_eq!((config.max_sandboxes, config.max_starting), (200, 3));
         assert!(!config.local && !config.force_stop);
         assert!(config.prefetch_from_trace);
         assert!(config.use_memfd);

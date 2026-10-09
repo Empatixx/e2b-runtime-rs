@@ -17,13 +17,13 @@ use teardown::{Step, Teardown};
 use unpack::{UnpackError, temp_dir, unpack_rootfs};
 
 pub const MB: i64 = 1 << 20;
-pub const BASE_ROOTFS_SIZE_LIMIT_MB: i64 = 25_000;
 
 pub struct RootfsRequest<'a> {
     pub meta: &'a PhaseMeta,
     pub from_image: &'a str,
     pub registry: Option<&'a FromImageRegistry>,
     pub disk_size_mb: i64,
+    pub max_rootfs_size_mb: i64,
     pub injected: InjectedSources,
     pub path: &'a Path,
 }
@@ -52,7 +52,7 @@ pub async fn create_ext4_filesystem(
     layers.extend(injected);
     log.push(LogLevel::Info, "Creating file system and pulling Docker image");
     let ext4 = Ext4::new(request.path);
-    let ext4_size = to_ext4(log, &ext4, layers, BASE_ROOTFS_SIZE_LIMIT_MB * MB)
+    let ext4_size = to_ext4(log, &ext4, layers, request.max_rootfs_size_mb * MB)
         .await
         .map_err(|e| match e {
             UnpackError::TooLarge(too_large) => BuildError::user(request.meta, too_large.to_string()),

@@ -14,7 +14,7 @@ use crate::builder::commands::{
     CommandRun, PROCESS_CANCELLED, REQUEST_CANCELLED, START_CANCELLED, as_context, root_only,
 };
 use crate::builder::hash::finalize_hash;
-use crate::builder::layer::{BUILD_ORIGIN, LayerBuild, SandboxCreator, sync_changes_to_disk};
+use crate::builder::layer::{BUILD_ORIGIN, LayerBuild, SandboxCreator, SandboxShape, sync_changes_to_disk};
 use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta, internal_context};
 use crate::envd::EnvdDefaults;
@@ -50,13 +50,13 @@ pub struct FinalizePhase {
 
 impl FinalizePhase {
     fn final_layer(&self, source: &LayerResult, hash: String) -> LayerResult {
-        let config = &self.build.env.config;
+        let settings = &self.build.settings;
         let metadata = TemplateMetadata {
             start: start_of(&source.metadata, &self.start_command, &self.ready_command),
             template: TemplateVersions {
                 build_id: self.build_id.clone(),
-                kernel_version: config.kernel_version.clone(),
-                firecracker_version: config.firecracker_version.clone(),
+                kernel_version: settings.kernel_version.clone(),
+                firecracker_version: settings.firecracker_version.clone(),
             },
             cmdline_args: BTreeMap::new(),
             balloon: Some(Balloon::default()),
@@ -77,6 +77,8 @@ impl FinalizePhase {
         source: &LayerResult,
         current: LayerResult,
     ) -> Result<LayerResult, BuildError> {
+        let io_engine = self.build.settings.flags.io_engine();
+        tracing::debug!(io_engine = %io_engine, "using io engine");
         let layer = LayerBuild {
             source_build_id: &source.metadata.template.build_id,
             envd_defaults: envd_defaults(&current.metadata.context, self.context_defaults),
@@ -84,7 +86,10 @@ impl FinalizePhase {
             hash: &current.hash,
             update_envd: source.cached,
             creator: SandboxCreator::ColdBoot,
-            shape: self.build.shape(),
+            shape: SandboxShape {
+                io_engine: &io_engine,
+                ..self.build.shape()
+            },
             reserved_blocks: source.cached,
             build_origin: BUILD_ORIGIN,
         };

@@ -9,6 +9,7 @@ use std::time::Duration;
 use futures::FutureExt;
 use uuid::Uuid;
 
+use super::config::BuildSettings;
 use super::ext4::{BLOCK_SIZE, Ext4};
 use super::index::LayerIndex;
 use super::logs::ScopedLog;
@@ -32,9 +33,8 @@ use crate::server::node::layers::{LayerSandbox, LayerSource};
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
 
-pub const IO_ENGINE: &str = "Sync";
+pub const DEFAULT_IO_ENGINE: &str = "Sync";
 pub const SYSTEMD_INIT: &str = "/sbin/init";
-pub const RESERVED_DISK_SPACE_MB: i64 = 256;
 pub const ENVD_WAIT: Duration = Duration::from_secs(60);
 pub const MIN_ENVD_FOR_KVM_CLOCK: &str = "0.2.11";
 const SYNC_COMMAND: &str = "/usr/bin/busybox sync";
@@ -95,6 +95,7 @@ fn replace_script() -> String {
 
 pub struct LayerExecutor<'a> {
     pub env: &'a BuildEnv,
+    pub settings: &'a BuildSettings,
     pub index: &'a Arc<LayerIndex>,
     pub uploads: &'a LayerUploads,
     pub log: &'a ScopedLog<'a>,
@@ -106,6 +107,7 @@ pub struct SandboxShape<'a> {
     pub vcpus: i64,
     pub memory_mb: i64,
     pub envd_version: &'a str,
+    pub io_engine: &'a str,
 }
 
 pub enum SandboxCreator {
@@ -176,8 +178,8 @@ impl LayerExecutor<'_> {
         };
         let metadata = metadata.new_version(TemplateVersions {
             build_id,
-            kernel_version: self.env.config.kernel_version.clone(),
-            firecracker_version: self.env.config.firecracker_version.clone(),
+            kernel_version: self.settings.kernel_version.clone(),
+            firecracker_version: self.settings.firecracker_version.clone(),
         });
         self.pause_and_upload(sandbox, build.hash, metadata, build.build_origin)
             .await
@@ -202,7 +204,7 @@ impl LayerExecutor<'_> {
             source,
             sandbox_id,
             template_id: self.template_id,
-            firecracker_version: &self.env.config.firecracker_version,
+            firecracker_version: &self.settings.firecracker_version,
         }
     }
 
@@ -232,7 +234,7 @@ impl LayerExecutor<'_> {
             .kvm_clock(kvm_clock)
             .envd(self.env.node.build_envd(build.envd_defaults.clone()));
         let builder = match build.reserved_blocks {
-            true => builder.pre_boot(reserved_blocks()),
+            true => builder.pre_boot(reserved_blocks(self.settings.flags.reserved_disk_space_mb())),
             false => builder,
         };
         let mut sandbox = builder.cold_boot().await.map_err(created)?;
@@ -246,7 +248,7 @@ impl LayerExecutor<'_> {
         builder
             .vcpus(shape.vcpus as u32)
             .memory_mib(shape.memory_mb as u32)
-            .io_engine(IO_ENGINE)
+            .io_engine(shape.io_engine)
             .without_mmds()
             .init_path(SYSTEMD_INIT)
             .kernel_logs(self.env.development)
@@ -343,11 +345,11 @@ pub async fn sync_changes_to_disk(envd: SocketAddr) -> Result<(), String> {
     run_quiet(envd, SYNC_COMMAND, &root).await
 }
 
-pub fn reserved_blocks() -> PreBoot {
-    Box::new(|device: PathBuf| {
+pub fn reserved_blocks(reserved_disk_space_mb: i64) -> PreBoot {
+    Box::new(move |device: PathBuf| {
         async move {
             Ext4::new(&device)
-                .set_reserved_blocks(RESERVED_DISK_SPACE_MB, BLOCK_SIZE)
+                .set_reserved_blocks(reserved_disk_space_mb, BLOCK_SIZE)
                 .await
         }
         .boxed()

@@ -8,10 +8,12 @@ use uuid::Uuid;
 
 use super::BuildEnv;
 use crate::builder::commands::{self, CommandRun};
+use crate::builder::config::BuildSettings;
 use crate::builder::hash::{step_hash, user_hash};
 use crate::builder::index::{CacheMiss, LayerIndex};
 use crate::builder::layer::{
-    BUILD_CACHE_ORIGIN, LayerBuild, LayerExecutor, SandboxCreator, SandboxShape, sync_changes_to_disk,
+    BUILD_CACHE_ORIGIN, DEFAULT_IO_ENGINE, LayerBuild, LayerExecutor, SandboxCreator, SandboxShape,
+    sync_changes_to_disk,
 };
 use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta, internal_context};
@@ -28,6 +30,7 @@ const DEFAULT_USER_STEP_NUMBER: usize = 1;
 
 pub struct StepsBuild {
     pub env: Arc<BuildEnv>,
+    pub settings: Arc<BuildSettings>,
     pub index: Arc<LayerIndex>,
     pub uploads: Arc<LayerUploads>,
     pub template_id: String,
@@ -43,6 +46,7 @@ impl StepsBuild {
     pub fn executor<'a>(&'a self, log: &'a ScopedLog<'a>) -> LayerExecutor<'a> {
         LayerExecutor {
             env: &self.env,
+            settings: &self.settings,
             index: &self.index,
             uploads: &self.uploads,
             log,
@@ -56,6 +60,7 @@ impl StepsBuild {
             vcpus: self.vcpus,
             memory_mb: self.memory_mb,
             envd_version: &self.envd_version,
+            io_engine: DEFAULT_IO_ENGINE,
         }
     }
 }
@@ -108,12 +113,12 @@ impl StepPhase {
     }
 
     fn fresh_layer(&self, source: &LayerResult, hash: String) -> LayerResult {
-        let config = &self.build.env.config;
+        let settings = &self.build.settings;
         let metadata = TemplateMetadata {
             template: TemplateVersions {
                 build_id: Uuid::new_v4().to_string(),
-                kernel_version: config.kernel_version.clone(),
-                firecracker_version: config.firecracker_version.clone(),
+                kernel_version: settings.kernel_version.clone(),
+                firecracker_version: settings.firecracker_version.clone(),
             },
             ..source.metadata.clone()
         };

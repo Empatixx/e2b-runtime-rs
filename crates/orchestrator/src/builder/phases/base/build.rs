@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::{BasePhase, BaseSource};
 use crate::builder::ext4::{BLOCK_SIZE, Ext4};
 use crate::builder::layer::{
-    BUILD_CACHE_ORIGIN, IO_ENGINE, LayerExecutor, MIN_ENVD_FOR_KVM_CLOCK, RESERVED_DISK_SPACE_MB, SandboxShape,
-    new_sandbox_id, sync_changes_to_disk,
+    BUILD_CACHE_ORIGIN, DEFAULT_IO_ENGINE, LayerExecutor, MIN_ENVD_FOR_KVM_CLOCK, SandboxShape, new_sandbox_id,
+    sync_changes_to_disk,
 };
 use crate::builder::logs::ScopedLog;
 use crate::builder::oci::pull::{ImageConfig, parse_envs};
@@ -98,6 +98,7 @@ impl BaseBuild<'_> {
                 from_image: image,
                 registry: registry.as_ref(),
                 disk_size_mb: self.phase.request.disk_size_mb,
+                max_rootfs_size_mb: self.phase.settings.flags.base_rootfs_size_limit_mb(),
                 injected,
                 path: rootfs,
             },
@@ -113,7 +114,7 @@ impl BaseBuild<'_> {
             busybox: config.busybox.clone(),
             provision_script,
             memory_mb: self.phase.request.memory_mb,
-            envd_memory_protection: false,
+            envd_memory_protection: self.phase.settings.envd_memory_protection,
         }
     }
 
@@ -163,6 +164,7 @@ impl BaseBuild<'_> {
     fn executor(&self) -> LayerExecutor<'_> {
         LayerExecutor {
             env: &self.phase.env,
+            settings: &self.phase.settings,
             index: &self.phase.index,
             uploads: &self.phase.uploads,
             log: self.log,
@@ -176,6 +178,7 @@ impl BaseBuild<'_> {
             vcpus: self.phase.request.vcpus,
             memory_mb: self.phase.request.memory_mb,
             envd_version: &self.phase.request.envd_version,
+            io_engine: DEFAULT_IO_ENGINE,
         }
     }
 
@@ -186,7 +189,7 @@ impl BaseBuild<'_> {
             .build_sandbox(sandbox_id, &self.phase.request.template_id)
             .vcpus(self.phase.request.vcpus as u32)
             .memory_mib(self.phase.request.memory_mb as u32)
-            .io_engine(IO_ENGINE)
+            .io_engine(DEFAULT_IO_ENGINE)
             .without_mmds()
     }
 
@@ -263,7 +266,7 @@ impl BaseBuild<'_> {
     ) -> Result<TemplateMetadata, BuildError> {
         let kvm_clock = is_at_least(&self.phase.request.envd_version, MIN_ENVD_FOR_KVM_CLOCK)
             .map_err(|e| BuildError::Internal(format!("error comparing envd version: {e}")))?;
-        ext4.set_reserved_blocks(RESERVED_DISK_SPACE_MB, BLOCK_SIZE)
+        ext4.set_reserved_blocks(self.phase.settings.flags.reserved_disk_space_mb(), BLOCK_SIZE)
             .await
             .map_err(|e| BuildError::Internal(format!("create sandbox: pre-boot hook failed: {e}")))?;
         let base_build = Uuid::parse_str(&metadata.template.build_id)

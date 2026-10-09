@@ -1,7 +1,13 @@
+mod flags;
+mod settings;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::go_strconv::parse_bool;
+pub use flags::BuildFlags;
+pub use settings::BuildSettings;
+
+use crate::featureflags::FeatureFlags;
 
 const DEFAULT_BUSYBOX_VERSION: &str = "1.36.1";
 const DEFAULT_BUSYBOX_DIR: &str = "/fc-busybox";
@@ -24,7 +30,7 @@ pub struct BuilderConfig {
     pub dockerhub_url: String,
     pub kernel_version: String,
     pub firecracker_version: String,
-    pub ensure_free_disk_space: bool,
+    pub feature_flags: FeatureFlags,
 }
 
 impl BuilderConfig {
@@ -60,9 +66,7 @@ impl BuilderConfig {
             dockerhub_url: var("DOCKERHUB_REMOTE_REPOSITORY_URL", ""),
             kernel_version: var("DEFAULT_KERNEL_VERSION", DEFAULT_KERNEL_VERSION),
             firecracker_version: var("DEFAULT_FIRECRACKER_VERSION", DEFAULT_FIRECRACKER_VERSION),
-            ensure_free_disk_space: vars
-                .get("BUILD_ENSURE_FREE_DISK_SPACE")
-                .is_some_and(|value| parse_bool(value).unwrap_or(false)),
+            feature_flags: FeatureFlags::offline(),
         }
     }
 }
@@ -181,16 +185,6 @@ mod tests {
             (config.kernel_version.as_str(), config.firecracker_version.as_str()),
             ("vmlinux-6.1.158", "v1.14-0.2.0")
         );
-    }
-
-    #[test]
-    fn ensuring_free_disk_space_is_off_unless_the_env_parses_as_true() {
-        assert!(!config(&[]).ensure_free_disk_space);
-        assert!(!config(&[("BUILD_ENSURE_FREE_DISK_SPACE", "")]).ensure_free_disk_space);
-        assert!(!config(&[("BUILD_ENSURE_FREE_DISK_SPACE", "yes")]).ensure_free_disk_space);
-        assert!(!config(&[("BUILD_ENSURE_FREE_DISK_SPACE", "false")]).ensure_free_disk_space);
-        assert!(config(&[("BUILD_ENSURE_FREE_DISK_SPACE", "true")]).ensure_free_disk_space);
-        assert!(config(&[("BUILD_ENSURE_FREE_DISK_SPACE", "1")]).ensure_free_disk_space);
     }
 
     #[test]

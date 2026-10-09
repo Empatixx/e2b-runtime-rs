@@ -10,6 +10,7 @@ use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
 use orchestrator::builder::config::BuilderConfig;
 use orchestrator::envd::{ENVD_PORT, EnvdInit};
+use orchestrator::featureflags::FeatureFlags;
 use orchestrator::network::slot::Slot;
 use orchestrator::proto::info_service_client::InfoServiceClient;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
@@ -144,7 +145,13 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
                 .status(),
         )
     });
-    let builder = BuilderConfig::from_vars(&Default::default());
+    let feature_flags = FeatureFlags::builder()
+        .override_flag("max-sandboxes-per-node", max_sandboxes)
+        .offline();
+    let builder = BuilderConfig {
+        feature_flags: feature_flags.clone(),
+        ..BuilderConfig::from_vars(&Default::default())
+    };
     let config = NodeConfig {
         grpc_port: 0,
         node_id: "grpc-node".to_owned(),
@@ -170,8 +177,9 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         local_expiry,
         envd_timeout: Duration::from_secs(10),
         labels: Vec::new(),
-        max_sandboxes,
-        max_starting: 3,
+        domain_name: String::new(),
+        instance_group_name: String::new(),
+        feature_flags,
         local: true,
         development: true,
         force_stop: false,

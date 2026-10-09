@@ -41,12 +41,12 @@ pub struct EnsureFreeDiskPhase {
 
 impl EnsureFreeDiskPhase {
     async fn cached_layer(&self, source: &LayerResult, hash: String) -> LayerResult {
-        let config = &self.build.env.config;
+        let settings = &self.build.settings;
         LayerLookup {
             index: &self.build.index,
             force: self.force,
-            kernel_version: &config.kernel_version,
-            firecracker_version: &config.firecracker_version,
+            kernel_version: &settings.kernel_version,
+            firecracker_version: &settings.firecracker_version,
         }
         .resolve(source, hash)
         .await

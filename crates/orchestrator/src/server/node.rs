@@ -14,7 +14,7 @@ use tonic::Status;
 use uuid::Uuid;
 
 pub use self::checkpoint::CheckpointRequest;
-use super::admission::{Admission, StartKind};
+use super::admission::{Admission, LIMIT_REFRESH_INTERVAL, MaxSandboxes, StartKind};
 use super::build_id;
 use super::config::NodeConfig;
 use super::config::binaries::Binaries;
@@ -32,6 +32,7 @@ use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::firecracker::version::supports_memfd;
+use crate::featureflags::FeatureFlags;
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
@@ -71,7 +72,8 @@ pub struct Node {
     pub events: EventsService,
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
     admission: Admission,
-    pub max_sandboxes: i64,
+    pub max_sandboxes: MaxSandboxes,
+    pub feature_flags: FeatureFlags,
     store: Arc<DiffStore>,
     binaries: Binaries,
     build_kernel_version: String,
@@ -150,6 +152,8 @@ impl Node {
     pub fn new(config: &NodeConfig) -> Result<Self, String> {
         let storage = config.open_template_storage()?;
         Ok(Self {
+        let admission = Admission::from_flags(&config.feature_flags)?;
+        let max_sandboxes = admission.max_sandboxes();
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
             labels: config.labels.clone(),
@@ -160,8 +164,9 @@ impl Node {
             events: EventsService::default(),
             host_stats: OnceLock::new(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
-            admission: Admission::new(config.max_sandboxes, config.max_starting),
-            max_sandboxes: config.max_sandboxes,
+            admission,
+            max_sandboxes,
+            feature_flags: config.feature_flags.clone(),
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
             registry: Registry::new(),
@@ -181,6 +186,8 @@ impl Node {
 
     pub fn start_background(&self) {
         self.network.start();
+        self.admission
+            .start_refresh(self.feature_flags.clone(), LIMIT_REFRESH_INTERVAL);
         tokio::spawn(self.templates.clone().run_eviction());
         tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }

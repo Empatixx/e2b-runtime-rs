@@ -28,6 +28,12 @@ mod serve {
     pub async fn run() -> Result<(), String> {
         tracing_subscriber::fmt().init();
         let config = NodeConfig::from_env()?;
+        let feature_flags = config
+            .feature_flags_builder(orchestrator::server::app::COMMIT)
+            .connect()
+            .await
+            .map_err(|e| format!("failed to create feature flags client: {e}"))?;
+        let config = config.with_feature_flags(feature_flags.clone());
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }
@@ -116,6 +122,7 @@ mod serve {
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
         node.close().await;
+        feature_flags.close().await;
         if let Some((events, host_stats)) = &clickhouse {
             tokio::join!(events.stop(), host_stats.stop());
         }

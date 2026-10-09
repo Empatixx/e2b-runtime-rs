@@ -48,6 +48,7 @@ tonic-prost-build = "0.14"
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
+launchdarkly-server-sdk = { version = "3.3.0", default-features = false, features = ["hyper-rustls-webpki-roots", "event-compression"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -8,6 +8,7 @@ use futures::future::BoxFuture;
 use uuid::Uuid;
 
 use super::BuildEnv;
+use crate::builder::config::BuildSettings;
 use crate::builder::hash::{BaseKey, template_source};
 use crate::builder::index::{CacheMiss, LayerIndex, MetadataError};
 use crate::builder::logs::ScopedLog;
@@ -49,6 +50,7 @@ pub struct BaseRequest {
 pub struct BasePhase {
     pub env: Arc<BuildEnv>,
     pub request: BaseRequest,
+    pub settings: Arc<BuildSettings>,
     pub index: Arc<LayerIndex>,
     pub uploads: Arc<LayerUploads>,
 }
@@ -134,6 +136,20 @@ impl BaseLayers<'_> {
     }
 }
 
+fn base_hash(settings: &BuildSettings, request: &BaseRequest, source_key: &str) -> String {
+    let provision_version = settings
+        .flags
+        .provision_version()
+        .map_or_else(provision_version, |version| version.to_string());
+    BaseKey {
+        provision_version: &provision_version,
+        disk_size_mb: request.disk_size_mb,
+        source: source_key,
+        envd_memory_protection: matches!(request.source, BaseSource::Image { .. }) && settings.envd_memory_protection,
+    }
+    .hash()
+}
+
 fn base_meta() -> PhaseMeta {
     PhaseMeta {
         phase: PREFIX,
@@ -159,13 +175,7 @@ impl Phase for BasePhase {
     }
 
     fn hash<'a>(&'a self, _source: &'a LayerResult) -> BoxFuture<'a, Result<String, BuildError>> {
-        let key = BaseKey {
-            provision_version: &provision_version(),
-            disk_size_mb: self.request.disk_size_mb,
-            source: &self.source_key(),
-            envd_memory_protection: false,
-        }
-        .hash();
+        let key = base_hash(&self.settings, &self.request, &self.source_key());
         async move { Ok(key) }.boxed()
     }
 
@@ -174,8 +184,8 @@ impl Phase for BasePhase {
             BaseLayers {
                 index: &self.index,
                 request: &self.request,
-                kernel_version: &self.env.config.kernel_version,
-                firecracker_version: &self.env.config.firecracker_version,
+                kernel_version: &self.settings.kernel_version,
+                firecracker_version: &self.settings.firecracker_version,
             }
             .resolve(hash)
             .await
@@ -229,6 +239,71 @@ mod tests {
             image: "debian:12".to_owned(),
             registry: None,
         }
+    }
+
+    fn settings_with(overrides: &[(&str, serde_json::Value)]) -> BuildSettings {
+        let flags = overrides
+            .iter()
+            .fold(crate::featureflags::FeatureFlags::builder(), |builder, (key, value)| {
+                builder.override_flag(key, value.clone())
+            })
+            .offline();
+        let config = crate::builder::config::BuilderConfig {
+            feature_flags: flags,
+            ..crate::builder::config::BuilderConfig::from_vars(&Default::default())
+        };
+        BuildSettings::resolve(&config, "template", "team")
+    }
+
+    fn template_source() -> BaseSource {
+        BaseSource::Template {
+            alias: "base".to_owned(),
+            build_id: "b1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_unset_provision_version_keeps_the_files_hash_key() {
+        let request = request(image(), false);
+        let unset = base_hash(&settings_with(&[]), &request, "debian:12");
+        let zero = base_hash(
+            &settings_with(&[("build-provision-version", 0.into())]),
+            &request,
+            "debian:12",
+        );
+        let set = base_hash(
+            &settings_with(&[("build-provision-version", 7.into())]),
+            &request,
+            "debian:12",
+        );
+
+        assert_eq!(unset, zero);
+        assert_ne!(unset, set);
+        assert_eq!(
+            set,
+            BaseKey {
+                provision_version: "7",
+                disk_size_mb: 1024,
+                source: "debian:12",
+                envd_memory_protection: false,
+            }
+            .hash()
+        );
+    }
+
+    #[test]
+    fn memory_protection_enters_the_key_only_for_a_build_from_an_image() {
+        let on = settings_with(&[("build-envd-memory-protection", true.into())]);
+        let off = settings_with(&[]);
+
+        assert_ne!(
+            base_hash(&on, &request(image(), false), "debian:12"),
+            base_hash(&off, &request(image(), false), "debian:12")
+        );
+        assert_eq!(
+            base_hash(&on, &request(template_source(), false), "template:b1"),
+            base_hash(&off, &request(template_source(), false), "template:b1")
+        );
     }
 
     async fn resolve(storage: &Storage, request: &BaseRequest, hash: &str) -> Result<LayerResult, BuildError> {

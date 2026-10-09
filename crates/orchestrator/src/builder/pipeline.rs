@@ -5,6 +5,7 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use super::builds::BuildInfo;
+use super::config::BuildSettings;
 use super::index::LayerIndex;
 use super::layer::envd_version;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
@@ -36,10 +37,12 @@ impl PhasePipeline {
         &self,
         request: &TemplateCreateRequest,
         envd_version: &str,
+        settings: &Arc<BuildSettings>,
         uploads: &Arc<LayerUploads>,
         cancel: &CancellationToken,
     ) -> Result<Vec<Box<dyn Phase>>, BuildError> {
         let config = request.template.clone().unwrap_or_default();
+
         let scope = request
             .cache_scope
             .clone()
@@ -52,11 +55,13 @@ impl PhasePipeline {
         let base = BasePhase {
             env: self.env.clone(),
             request: base_request(&config, envd_version)?,
+            settings: settings.clone(),
             index: index.clone(),
             uploads: uploads.clone(),
         };
         let steps = Arc::new(StepsBuild {
             env: self.env.clone(),
+            settings: settings.clone(),
             index,
             uploads: uploads.clone(),
             template_id: config.template_id.clone(),
@@ -73,7 +78,7 @@ impl PhasePipeline {
             phases.push(Box::new(StepPhase::default_user(steps.clone(), config.force)));
         }
         phases.extend(step_phases(&steps, &config));
-        if self.env.config.ensure_free_disk_space {
+        if settings.flags.ensure_free_disk_space() {
             phases.push(Box::new(EnsureFreeDiskPhase {
                 build: steps.clone(),
                 force: config.force.unwrap_or(false),
@@ -128,7 +133,13 @@ impl TemplateBuilder for PhasePipeline {
             let envd_version = envd_version(&env.config.envd)
                 .await
                 .map_err(|e| BuildError::Internal(format!("error getting envd version: {e}")))?;
-            let phases = pipeline.phases(&request, &envd_version, &uploads, &info.cancel)?;
+            let template = request.template.clone().unwrap_or_default();
+            let settings = Arc::new(BuildSettings::resolve(
+                &env.config,
+                &template.template_id,
+                &template.team_id,
+            ));
+            let phases = pipeline.phases(&request, &envd_version, &settings, &uploads, &info.cancel)?;
             let last = run_phases(&info.log, &phases).await?;
             uploads
                 .wait()
@@ -141,7 +152,7 @@ impl TemplateBuilder for PhasePipeline {
             }
             let rootfs_size = rootfs_size(&env, &last).await?;
             let scheduling = scheduling_metadata(&env, &last).await;
-            Ok(result_metadata(&env, rootfs_size, envd_version, scheduling))
+            Ok(result_metadata(&settings, rootfs_size, envd_version, scheduling))
         }
         .boxed()
     }
@@ -197,7 +208,7 @@ async fn scheduling_metadata(env: &BuildEnv, last: &LayerResult) -> Option<Sched
 }
 
 fn result_metadata(
-    env: &BuildEnv,
+    settings: &BuildSettings,
     rootfs_size: u64,
     envd_version: String,
     scheduling_metadata: Option<SchedulingMetadata>,
@@ -205,8 +216,8 @@ fn result_metadata(
     TemplateBuildMetadata {
         rootfs_size_key: (rootfs_size / MB) as i32,
         envd_version_key: envd_version,
-        kernel_version: env.config.kernel_version.clone(),
-        firecracker_version: env.config.firecracker_version.clone(),
+        kernel_version: settings.kernel_version.clone(),
+        firecracker_version: settings.firecracker_version.clone(),
         scheduling_metadata,
     }
 }

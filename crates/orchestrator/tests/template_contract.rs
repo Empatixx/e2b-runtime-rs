@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use orchestrator::builder::config::BuilderConfig;
 use orchestrator::envd::ENVD_PORT;
 use orchestrator::envd::process::{CommandContext, run_command};
+use orchestrator::featureflags::FeatureFlags;
 use orchestrator::network::settings::NetworkSettings;
 use orchestrator::network::slot::Slot;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
@@ -138,12 +139,18 @@ fn host() -> Option<Host> {
 
 fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
     let mut builder_vars = host.builder_vars.clone();
-    builder_vars.insert("BUILD_ENSURE_FREE_DISK_SPACE".to_owned(), ensure_free_disk.to_string());
     builder_vars.insert(
         "TEMPLATES_DIR".to_owned(),
         dir.join("build-templates").display().to_string(),
     );
-    let builder = BuilderConfig::from_vars(&builder_vars);
+    let feature_flags = FeatureFlags::builder()
+        .override_flag("max-sandboxes-per-node", 10)
+        .override_flag("build-ensure-free-disk-space", ensure_free_disk)
+        .offline();
+    let builder = BuilderConfig {
+        feature_flags: feature_flags.clone(),
+        ..BuilderConfig::from_vars(&builder_vars)
+    };
     NodeConfig {
         grpc_port: 0,
         node_id: "template-node".to_owned(),
@@ -167,8 +174,9 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         local_expiry: false,
         envd_timeout: Duration::from_secs(10),
         labels: Vec::new(),
-        max_sandboxes: 10,
-        max_starting: 3,
+        domain_name: String::new(),
+        instance_group_name: String::new(),
+        feature_flags,
         local: true,
         development: true,
         force_stop: false,

@@ -109,7 +109,7 @@ impl App {
             started: SystemTime::now(),
             labels: self.node.labels.clone(),
             roles: self.node.services.roles(),
-            max_sandboxes: self.node.max_sandboxes,
+            max_sandboxes: self.node.max_sandboxes.clone(),
             machine: machine_info(
                 &std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
                 std::env::consts::ARCH,
