@@ -312,7 +312,6 @@ mod tests {
             .rootfs("/dev/nbd3")
             .memory_mib(512)
             .build()
-            .unwrap()
     }
 
     #[tokio::test]
@@ -374,9 +373,8 @@ mod tests {
         let config = VmConfig::builder()
             .kernel("/opt/vmlinux")
             .rootfs("/fc-vm/rootfs.ext4")
-            .io_engine(Some("Sync"))
-            .build()
-            .unwrap();
+            .io_engine("Sync")
+            .build();
 
         FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
 

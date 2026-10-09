@@ -205,8 +205,8 @@ impl Sandbox {
             .namespace(&self.config.slot.namespace())
             .rootfs(rootfs)
             .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
-            .cgroup(cgroup)
-            .build()?;
+            .maybe_cgroup(cgroup)
+            .build();
         let vm = FirecrackerProcess::spawn(&launch).await?;
         if let Some(console) = self.config.console.clone() {
             forward_console(vm.console_lines(), console);
@@ -230,8 +230,8 @@ impl Sandbox {
             .vcpus(self.config.vcpus)
             .memory_mib(self.config.memory_mib)
             .boot_args(&self.config.boot.kernel_args(host_arch()))
-            .io_engine(self.config.io_engine.as_deref())
-            .build()?;
+            .maybe_io_engine(self.config.io_engine.as_deref())
+            .build();
         let metadata = self.config.mmds.then(|| self.mmds_metadata());
         client.boot(&vm_config, metadata.as_ref()).await
     }

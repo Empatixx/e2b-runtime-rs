@@ -254,8 +254,7 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
         .namespace(&slot.namespace())
         .rootfs("/dev/null")
         .kernel("/dev/null")
-        .build()
-        .unwrap();
+        .build();
     let result = FirecrackerProcess::spawn(&launch).await;
     slot.destroy().await.unwrap();
 
