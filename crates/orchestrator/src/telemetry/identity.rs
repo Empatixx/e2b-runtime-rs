@@ -3,6 +3,7 @@ use opentelemetry_sdk::Resource;
 
 use crate::server::services::{ServiceType, Services};
 
+const SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.21.0";
 const UNKNOWN_SERVICE: &str = "orch-unknown";
 
 const KERNEL_RELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
@@ -19,7 +20,9 @@ pub struct Identity {
 
 impl Identity {
     pub fn resource(&self) -> Resource {
-        Resource::builder_empty().with_attributes(self.attributes()).build()
+        Resource::builder_empty()
+            .with_schema_url(self.attributes(), SCHEMA_URL)
+            .build()
     }
 
     pub fn attributes(&self) -> Vec<KeyValue> {
@@ -29,7 +32,7 @@ impl Identity {
             KeyValue::new("service.instance.id", self.service_instance_id.clone()),
             KeyValue::new("telemetry.sdk.name", "otel"),
             KeyValue::new("host.id", self.node_id.clone()),
-            KeyValue::new("telemetry.sdk.language", "rust"),
+            KeyValue::new("telemetry.sdk.language", "go"),
         ];
         attributes.extend(
             Some(&self.service_commit)

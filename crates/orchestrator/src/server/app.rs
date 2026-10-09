@@ -21,6 +21,7 @@ use crate::builder::service::{TemplateServer, TemplateStorages};
 use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
 use crate::proto::template_service_server::TemplateServiceServer;
+use crate::telemetry::grpc::trace_grpc;
 
 const CONSUMER_STATUS_CHECK_GRACE: Duration = Duration::from_secs(15);
 
@@ -93,7 +94,7 @@ impl App {
             Some(templates) => routes.add_service(TemplateServiceServer::from_arc(templates.clone())),
             None => routes,
         };
-        let router = with_health(routes, self.status.clone(), COMMIT);
+        let router = with_health(routes, self.status.clone(), COMMIT).layer(axum::middleware::from_fn(trace_grpc));
         match &self.uploads {
             Some(uploads) => uploads.clone().route(router),
             None => router,

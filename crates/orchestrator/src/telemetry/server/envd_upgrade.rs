@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{counter, milliseconds};
+use super::{counter, millis, milliseconds};
 
 static ATTEMPTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     counter(
@@ -43,10 +43,6 @@ static PHASE_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
         "Wall-time of one resume-time envd upgrade phase (resolve|deliver|ready); resolve is absent from the combined histogram",
     )
 });
-
-fn millis(duration: Duration) -> u64 {
-    duration.as_millis() as u64
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeAttempt {

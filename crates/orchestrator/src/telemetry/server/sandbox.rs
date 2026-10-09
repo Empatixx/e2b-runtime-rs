@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{counter, milliseconds};
+use super::{counter, millis, milliseconds};
 
 static CREATE_DURATION: LazyLock<Histogram<u64>> =
     LazyLock::new(|| milliseconds("orchestrator.sandbox.create.duration", "Time taken to create a sandbox"));
@@ -70,10 +70,6 @@ static PAUSE_ADMISSION: LazyLock<Counter<u64>> = LazyLock::new(|| {
 });
 
 const UNKNOWN_KILL_REASON: &str = "unknown";
-
-fn millis(duration: Duration) -> u64 {
-    duration.as_millis() as u64
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOutcome {

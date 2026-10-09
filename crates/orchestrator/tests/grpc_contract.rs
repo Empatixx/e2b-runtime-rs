@@ -24,6 +24,7 @@ use orchestrator::sandbox::Sandbox;
 use orchestrator::server::app::{App, TemplateManagerSetup};
 use orchestrator::server::config::NodeConfig;
 use orchestrator::server::config::binaries::Binaries;
+use orchestrator::server::config::runtime::RuntimeFlags;
 use orchestrator::server::node::Node;
 use orchestrator::server::services::Services;
 use orchestrator::storage::backend::Storage;
@@ -175,16 +176,17 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         template_cache_dir: dir.path().join("templates"),
         slots: pool.indices(),
         local_expiry,
-        envd_timeout: Duration::from_secs(10),
         labels: Vec::new(),
         domain_name: String::new(),
         instance_group_name: String::new(),
+        runtime_flags: RuntimeFlags::new(
+            feature_flags.clone(),
+            Services::parse(Some("orchestrator,template-manager")),
+        ),
         feature_flags,
         local: true,
         development: true,
         force_stop: false,
-        build_cache_max_usage: 90.0,
-        use_memfd: true,
         services: Services::parse(Some("orchestrator,template-manager")),
         orchestrator_ip: "192.0.2.1".to_owned(),
         hyperloop_port: 0,

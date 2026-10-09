@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::retry::{Failure, retry};
 
+const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +42,14 @@ impl Uploads {
         let uploads = self.clone();
         self.tasks.spawn(
             async move {
-            let uploaded = uploads.upload(build_id, &parents, attempt).await;
-            if let Err(e) = &uploaded {
-                tracing::error!(build = %build_id, error = %e, "snapshot upload failed; the build stays only in this node's cache");
-            }
-            let outcome = settle(&sender, &uploaded);
-            uploads.forget_landed(build_id, outcome);
-            finished(outcome);
+                let uploaded = uploads.upload(build_id, &parents, attempt).await;
+                match &uploaded {
+                    Ok(()) => tracing::info!(build = %build_id, "snapshot finished uploading successfully"),
+                    Err(e) => tracing::error!(build = %build_id, error = %e, "snapshot upload did not durably land"),
+                }
+                let outcome = settle(&sender, &uploaded);
+                uploads.forget_landed(build_id, outcome);
+                finished(outcome);
             }
             .instrument(tracing::info_span!("upload snapshot")),
         );
@@ -99,6 +101,33 @@ impl Uploads {
 
     pub fn in_flight(&self) -> usize {
         self.tasks.len()
+    }
+
+    pub async fn drain(&self, forced: bool) {
+        let in_flight = self.in_flight();
+        if in_flight == 0 {
+            return;
+        }
+        tracing::info!(uploads = in_flight, "waiting for in-flight snapshot uploads to finish");
+        self.tasks.close();
+        let finished = self.tasks.wait();
+        tokio::pin!(finished);
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + DRAIN_LOG_INTERVAL, DRAIN_LOG_INTERVAL);
+        loop {
+            tokio::select! {
+                () = &mut finished => {
+                    tracing::info!("all in-flight snapshot uploads finished");
+                    return;
+                }
+                () = std::future::ready(()), if forced => {
+                    tracing::warn!(uploads = self.in_flight(), "shutting down with snapshot uploads still in flight");
+                    return;
+                }
+                _ = ticks.tick() => {
+                    tracing::info!(uploads = self.in_flight(), "still waiting for in-flight snapshot uploads");
+                }
+            }
+        }
     }
 
     pub async fn wait_all(&self) {
@@ -228,6 +257,35 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         assert_eq!(uploads.in_flight(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forced_drain_returns_with_uploads_still_running() {
+        let uploads = Arc::new(Uploads::default());
+        uploads.start(id(1), Vec::new(), std::future::pending, |_| {});
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        uploads.drain(true).await;
+
+        assert_eq!(uploads.in_flight(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_graceful_drain_waits_for_the_uploads_to_end() {
+        let uploads = Arc::new(Uploads::default());
+        uploads.start(
+            id(1),
+            Vec::new(),
+            || async {
+                tokio::time::sleep(Duration::from_secs(25)).await;
+                Ok(())
+            },
+            |_| {},
+        );
+
+        uploads.drain(false).await;
+
+        assert_eq!(uploads.in_flight(), 0);
     }
 
     #[tokio::test(start_paused = true)]

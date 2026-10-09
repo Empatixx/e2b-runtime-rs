@@ -5,6 +5,7 @@ pub mod sandbox;
 pub mod spans;
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
@@ -24,6 +25,10 @@ static SNAPSHOT_UPLOAD_FAILED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 pub fn count_failed_snapshot_upload(filesystem_only: bool) {
     SNAPSHOT_UPLOAD_FAILED.add(1, &[KeyValue::new("fs_only", filesystem_only)]);
+}
+
+pub(crate) fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn counter(name: &'static str, description: &'static str, unit: &'static str) -> Counter<u64> {

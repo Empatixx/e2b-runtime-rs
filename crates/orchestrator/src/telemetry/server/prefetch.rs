@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{METER, counter, milliseconds};
+use super::{METER, counter, millis, milliseconds};
 
 static ATTEMPTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     counter(
@@ -42,10 +42,6 @@ static PERSIST_WAIT_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
         "Time the prefetch harvest waited for the in-flight snapshot upload before persisting the mapping",
     )
 });
-
-fn millis(duration: Duration) -> u64 {
-    duration.as_millis() as u64
-}
 
 pub fn record_seal_wait(took: Duration) {
     SEAL_WAIT_DURATION.record(millis(took), &[]);

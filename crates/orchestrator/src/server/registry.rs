@@ -124,9 +124,13 @@ impl<T: Clone> Registry<T> {
             .collect()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub fn len(&self) -> usize {
         let entries = self.entries.lock();
-        entries.live.is_empty() && entries.reserved.is_empty() && entries.stopping.is_empty()
+        entries.live.len() + entries.reserved.len() + entries.stopping.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
