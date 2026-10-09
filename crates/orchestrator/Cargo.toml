@@ -80,3 +80,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-raw-sys = { version = "0.12", default-features = false, features = ["general", "std"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1", features = ["mm"] }

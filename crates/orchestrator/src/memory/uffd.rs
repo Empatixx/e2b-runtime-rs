@@ -1,16 +1,15 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
+use linux_raw_sys::general::{
+    UFFD_EVENT_PAGEFAULT, UFFD_EVENT_REMOVE, UFFD_PAGEFAULT_FLAG_WP, UFFD_PAGEFAULT_FLAG_WRITE, UFFDIO_COPY_MODE_WP,
+    uffd_msg, uffdio_copy, uffdio_range,
+};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
-const UFFD_MSG_SIZE: usize = 32;
+const UFFD_MSG_SIZE: usize = size_of::<uffd_msg>();
 const EVENTS_PER_READ: usize = 64;
-const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
-const UFFD_EVENT_REMOVE: u8 = 0x15;
-const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1;
-const UFFD_PAGEFAULT_FLAG_WP: u64 = 1 << 1;
-const UFFDIO_COPY_MODE_WP: u64 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -32,26 +31,11 @@ pub struct Uffd {
     fd: OwnedFd,
 }
 
-#[repr(C)]
-struct UffdioRange {
-    start: u64,
-    len: u64,
-}
-
-#[repr(C)]
-struct UffdioCopy {
-    dst: u64,
-    src: u64,
-    len: u64,
-    mode: u64,
-    copy: i64,
-}
-
 mod ioctls {
-    use super::{UffdioCopy, UffdioRange};
+    use linux_raw_sys::general::{_UFFDIO_COPY, _UFFDIO_WAKE, UFFDIO, uffdio_copy, uffdio_range};
 
-    nix::ioctl_read!(wake, 0xAA, 0x02, UffdioRange);
-    nix::ioctl_readwrite!(copy, 0xAA, 0x03, UffdioCopy);
+    nix::ioctl_read!(wake, UFFDIO, _UFFDIO_WAKE, uffdio_range);
+    nix::ioctl_readwrite!(copy, UFFDIO, _UFFDIO_COPY, uffdio_copy);
 }
 
 impl Uffd {
@@ -81,11 +65,11 @@ impl Uffd {
 
     pub fn copy(&self, dst: u64, src: &[u8], write_protect: bool) -> io::Result<CopyOutcome> {
         let len = src.len() as u64;
-        let mut request = UffdioCopy {
+        let mut request = uffdio_copy {
             dst,
             src: src.as_ptr() as u64,
             len,
-            mode: if write_protect { UFFDIO_COPY_MODE_WP } else { 0 },
+            mode: if write_protect { UFFDIO_COPY_MODE_WP.into() } else { 0 },
             copy: 0,
         };
         match unsafe { ioctls::copy(self.fd.as_raw_fd(), &mut request) } {
@@ -99,7 +83,7 @@ impl Uffd {
     }
 
     pub fn wake(&self, start: u64, len: u64) -> io::Result<()> {
-        let mut range = UffdioRange { start, len };
+        let mut range = uffdio_range { start, len };
         unsafe { ioctls::wake(self.fd.as_raw_fd(), &mut range) }
             .map(|_| ())
             .map_err(io::Error::from)
@@ -119,14 +103,14 @@ fn parse_events(bytes: &[u8]) -> io::Result<Vec<Event>> {
 
 fn parse_event(message: &[u8; UFFD_MSG_SIZE]) -> io::Result<Event> {
     let word = |index: usize| u64::from_ne_bytes(message[8 + index * 8..16 + index * 8].try_into().unwrap_or_default());
-    match message[0] {
-        UFFD_EVENT_PAGEFAULT if word(0) & UFFD_PAGEFAULT_FLAG_WP != 0 => Err(io::Error::other(format!(
+    match u32::from(message[0]) {
+        UFFD_EVENT_PAGEFAULT if word(0) & u64::from(UFFD_PAGEFAULT_FLAG_WP) != 0 => Err(io::Error::other(format!(
             "write-protect fault at {:#x}: firecracker registered memory without WP_ASYNC",
             word(1)
         ))),
         UFFD_EVENT_PAGEFAULT => Ok(Event::PageFault {
             address: word(1),
-            write: word(0) & UFFD_PAGEFAULT_FLAG_WRITE != 0,
+            write: word(0) & u64::from(UFFD_PAGEFAULT_FLAG_WRITE) != 0,
         }),
         UFFD_EVENT_REMOVE => Ok(Event::Remove {
             start: word(0),
@@ -140,37 +124,22 @@ fn parse_event(message: &[u8; UFFD_MSG_SIZE]) -> io::Result<Event> {
 pub mod testing {
     use std::io;
     use std::num::NonZeroUsize;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::ptr::NonNull;
 
+    use linux_raw_sys::general::{
+        _UFFDIO_API, _UFFDIO_REGISTER, UFFD_API, UFFD_FEATURE_EVENT_REMOVE, UFFD_FEATURE_WP_ASYNC, UFFDIO,
+        UFFDIO_REGISTER_MODE_MISSING, UFFDIO_REGISTER_MODE_WP, uffdio_api, uffdio_range, uffdio_register,
+    };
     use nix::sys::mman::{MapFlags, ProtFlags, mmap_anonymous, munmap};
+    use rustix::mm::{UserfaultfdFlags, userfaultfd};
 
     use super::Uffd;
 
-    const UFFD_API: u64 = 0xAA;
-    const UFFD_FEATURE_EVENT_REMOVE: u64 = 1 << 3;
-    const UFFD_FEATURE_WP_ASYNC: u64 = 1 << 15;
-    const UFFDIO_REGISTER_MODE_MISSING: u64 = 1;
-    const UFFDIO_REGISTER_MODE_WP: u64 = 1 << 1;
     const PAGEMAP_UFFD_WP: u64 = 1 << 57;
 
-    #[repr(C)]
-    struct UffdioApi {
-        api: u64,
-        features: u64,
-        ioctls: u64,
-    }
-
-    #[repr(C)]
-    struct UffdioRegister {
-        start: u64,
-        len: u64,
-        mode: u64,
-        ioctls: u64,
-    }
-
-    nix::ioctl_readwrite!(api, 0xAA, 0x3F, UffdioApi);
-    nix::ioctl_readwrite!(register, 0xAA, 0x00, UffdioRegister);
+    nix::ioctl_readwrite!(api, UFFDIO, _UFFDIO_API, uffdio_api);
+    nix::ioctl_readwrite!(register, UFFDIO, _UFFDIO_REGISTER, uffdio_register);
 
     pub struct Pages {
         start: NonNull<std::ffi::c_void>,
@@ -240,25 +209,23 @@ pub mod testing {
                 .is_ok_and(|()| u64::from_ne_bytes(entry) & PAGEMAP_UFFD_WP != 0)
         }
 
-        fn register_with(&self, mode: u64, features: u64) -> io::Result<Uffd> {
-            let raw = userfaultfd();
-            if raw < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-            let mut handshake = UffdioApi {
-                api: UFFD_API,
-                features,
+        fn register_with(&self, mode: u32, features: u32) -> io::Result<Uffd> {
+            let fd = unsafe { userfaultfd(UserfaultfdFlags::NONBLOCK | UserfaultfdFlags::CLOEXEC) }?;
+            let mut handshake = uffdio_api {
+                api: UFFD_API.into(),
+                features: features.into(),
                 ioctls: 0,
             };
-            unsafe { api(std::os::fd::AsRawFd::as_raw_fd(&fd), &mut handshake) }?;
-            let mut registration = UffdioRegister {
-                start: self.address(),
-                len: self.len as u64,
-                mode,
+            unsafe { api(fd.as_raw_fd(), &mut handshake) }?;
+            let mut registration = uffdio_register {
+                range: uffdio_range {
+                    start: self.address(),
+                    len: self.len as u64,
+                },
+                mode: mode.into(),
                 ioctls: 0,
             };
-            unsafe { register(std::os::fd::AsRawFd::as_raw_fd(&fd), &mut registration) }?;
+            unsafe { register(fd.as_raw_fd(), &mut registration) }?;
             Ok(Uffd::from_fd(fd))
         }
     }
@@ -267,10 +234,6 @@ pub mod testing {
         fn drop(&mut self) {
             let _ = unsafe { munmap(self.start, self.len) };
         }
-    }
-
-    fn userfaultfd() -> i32 {
-        unsafe { nix::libc::syscall(nix::libc::SYS_userfaultfd, nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC) as i32 }
     }
 
     pub fn available() -> bool {
@@ -390,8 +353,8 @@ mod tests {
     #[test]
     fn synchronous_write_protect_faults_are_errors() {
         let mut message = [0u8; UFFD_MSG_SIZE];
-        message[0] = UFFD_EVENT_PAGEFAULT;
-        message[8..16].copy_from_slice(&(UFFD_PAGEFAULT_FLAG_WP | UFFD_PAGEFAULT_FLAG_WRITE).to_ne_bytes());
+        message[0] = UFFD_EVENT_PAGEFAULT as u8;
+        message[8..16].copy_from_slice(&u64::from(UFFD_PAGEFAULT_FLAG_WP | UFFD_PAGEFAULT_FLAG_WRITE).to_ne_bytes());
         message[16..24].copy_from_slice(&0x7000u64.to_ne_bytes());
 
         assert_eq!(
