@@ -1,5 +1,6 @@
 mod checkpoint;
 pub mod layers;
+pub mod prefetch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -36,6 +37,7 @@ use crate::featureflags::FeatureFlags;
 use crate::firecracker::version::supports_memfd;
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
+use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
@@ -82,7 +84,6 @@ pub struct Node {
     work_dir: PathBuf,
     envd_timeout: Duration,
     build_cache_max_usage: f64,
-    prefetch_from_trace: bool,
     use_memfd: bool,
     orchestrator_ip: String,
 }
@@ -92,6 +93,7 @@ struct ResumeRequest<'a> {
     build: &'a Build,
     snapfile: &'a Path,
     prefetch: Option<MemoryPrefetch>,
+    prefetch_settings: PrefetchSettings,
     slot: Slot,
     init: EnvdInit,
     lifecycle: &'a Lifecycle,
@@ -103,6 +105,7 @@ struct StartRequest {
     lifetime: Lifetime,
     lifecycle: Lifecycle,
     oom_watermark: SharedWatermark,
+    throwaway: bool,
 }
 
 enum StartFailure {
@@ -179,7 +182,6 @@ impl Node {
             work_dir: config.work_dir.clone(),
             envd_timeout: config.envd_timeout,
             build_cache_max_usage: config.build_cache_max_usage,
-            prefetch_from_trace: config.prefetch_from_trace,
             use_memfd: config.use_memfd,
             orchestrator_ip: config.orchestrator_ip.clone(),
         })
@@ -400,6 +402,7 @@ impl Node {
                 lifetime,
                 lifecycle: lifecycle.clone(),
                 oom_watermark: SharedWatermark::default(),
+                throwaway: false,
             })
             .await
             .map_err(|failure| failure.create_status(&id))
@@ -496,6 +499,7 @@ impl Node {
             lifetime,
             lifecycle,
             oom_watermark,
+            throwaway,
         } = request;
         let files = async { tokio::try_join!(template.build(), template.snapfile()) };
         let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))
@@ -517,10 +521,14 @@ impl Node {
             .await
             .inspect_err(|e| tracing::warn!(build = %build.build_id, error = %e, "metadata.json is unreadable; resuming without prefetch"))
             .ok();
-        let prefetch = self
-            .prefetch_from_trace
-            .then(|| metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned())
-            .flatten();
+        if throwaway {
+            self.network
+                .deny_egress(slot)
+                .await
+                .map_err(|e| StartFailure::Failed(format!("failed to deny egress for resumed sandbox: {e}")))?;
+        }
+        let prefetch = metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned();
+        let prefetch_settings = self.prefetch_settings(&config);
         let init = EnvdInit {
             access_token: config.envd_access_token.clone(),
             env_vars: config.env_vars.clone().into_iter().collect::<BTreeMap<_, _>>(),
@@ -536,6 +544,7 @@ impl Node {
                 build: &build,
                 snapfile: &snapfile,
                 prefetch,
+                prefetch_settings,
                 slot,
                 init,
                 lifecycle: &lifecycle,
@@ -560,6 +569,7 @@ impl Node {
                 oom_watermark,
             },
             self.clone(),
+            throwaway,
         ))
     }
 
@@ -578,6 +588,7 @@ impl Node {
             build,
             snapfile,
             prefetch,
+            prefetch_settings,
             slot,
             init,
             lifecycle,
@@ -607,6 +618,7 @@ impl Node {
             .work_dir(work_dir)
             .envd_timeout(self.envd_timeout)
             .prefetch(prefetch)
+            .prefetch_settings(prefetch_settings)
             .use_memfd(self.use_memfd && supports_memfd(&config.firecracker_version))
             .hyperloop_ip(&self.orchestrator_ip)
             .envd(init)

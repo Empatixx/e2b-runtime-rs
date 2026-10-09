@@ -59,7 +59,6 @@ pub struct NodeConfig {
     pub development: bool,
     pub force_stop: bool,
     pub build_cache_max_usage: f64,
-    pub prefetch_from_trace: bool,
     pub use_memfd: bool,
     pub services: Services,
     pub orchestrator_ip: String,
@@ -142,7 +141,6 @@ impl NodeConfig {
             force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
             build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
                 .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
-            prefetch_from_trace: prefetch_source(var("RESUME_PREFETCH_SOURCE").as_deref()),
             use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
             services,
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
@@ -202,10 +200,6 @@ impl NodeConfig {
             url => url.to_owned(),
         }
     }
-}
-
-fn prefetch_source(source: Option<&str>) -> bool {
-    !matches!(source, Some("off" | "last-cycle"))
 }
 
 fn network_version(vars: &HashMap<String, String>) -> Result<u8, String> {
@@ -274,14 +268,11 @@ mod tests {
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
         assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert!(!config.local && !config.force_stop);
-        assert!(config.prefetch_from_trace);
         assert!(config.use_memfd);
         assert_eq!(
             (config.orchestrator_ip.as_str(), config.hyperloop_port),
             ("192.0.2.1", 5010)
         );
-        assert!(!prefetch_source(Some("off")));
-        assert!(prefetch_source(Some("unknown")));
         assert!(config.labels.is_empty());
         assert_eq!(config.template_storage, StorageSpec::local("/srv/builds"));
         assert_eq!(config.build_cache_storage, None);

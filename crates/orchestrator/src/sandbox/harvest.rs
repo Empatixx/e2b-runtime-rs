@@ -132,10 +132,32 @@ pub trait HarvestSlots: Send + Sync {
     async fn acquire(&self) -> Result<StartSlot, String>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataWriteError {
+    pub message: String,
+    pub committed: bool,
+}
+
+impl MetadataWriteError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            committed: false,
+        }
+    }
+
+    pub fn committed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            committed: true,
+        }
+    }
+}
+
 #[async_trait]
 pub trait HarvestTemplates: Send + Sync {
     async fn pin(&self, build_id: Uuid, max_sandbox_length_hours: i64) -> Result<Arc<Template>, String>;
-    async fn update_metadata(&self, build_id: Uuid, metadata: &TemplateMetadata) -> Result<(), String>;
+    async fn update_metadata(&self, build_id: Uuid, metadata: &TemplateMetadata) -> Result<(), MetadataWriteError>;
 }
 
 #[async_trait]

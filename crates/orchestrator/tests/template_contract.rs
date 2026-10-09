@@ -181,7 +181,6 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         development: true,
         force_stop: false,
         build_cache_max_usage: 95.0,
-        prefetch_from_trace: true,
         use_memfd: true,
         services: Services::parse(Some("orchestrator,template-manager")),
         orchestrator_ip: "192.0.2.1".to_owned(),

@@ -112,6 +112,7 @@ impl Node {
                 },
                 lifecycle: lifecycle.clone(),
                 oom_watermark: parent.oom_watermark.clone(),
+                throwaway: false,
             })
             .await
             .inspect_err(|_| drop(std::fs::remove_dir_all(self.work_dir_of(&lifecycle))))

@@ -21,6 +21,7 @@ pub trait SlotFactory: Send + Sync + 'static {
     fn create(&self, index: u32) -> impl Future<Output = Result<Slot, String>> + Send;
     fn destroy(&self, slot: Slot) -> impl Future<Output = Result<(), String>> + Send;
     fn configure(&self, slot: Slot, rules: &EgressRules) -> impl Future<Output = Result<(), String>> + Send;
+    fn deny_egress(&self, slot: Slot) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 pub struct SlotLease<F: SlotFactory> {
@@ -108,6 +109,11 @@ impl<F: SlotFactory> NetworkPool<F> {
         if let Some(slot) = lease.keep() {
             self.return_after(slot, Duration::ZERO);
         }
+    }
+
+    pub async fn deny_egress(&self, slot: Slot) -> Result<(), String> {
+        self.custom_rules.lock().insert(slot.index);
+        self.factory.deny_egress(slot).await
     }
 
     pub async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
@@ -222,6 +228,7 @@ mod tests {
         failures: Mutex<u32>,
         configured: Mutex<Vec<(u32, EgressRules)>>,
         configure_failures: Mutex<u32>,
+        denied: Mutex<Vec<u32>>,
     }
 
     impl SlotFactory for Arc<FakeSlots> {
@@ -237,6 +244,11 @@ mod tests {
 
         async fn destroy(&self, slot: Slot) -> Result<(), String> {
             self.destroyed.lock().insert(slot.index);
+            Ok(())
+        }
+
+        async fn deny_egress(&self, slot: Slot) -> Result<(), String> {
+            self.denied.lock().push(slot.index);
             Ok(())
         }
 
@@ -391,6 +403,23 @@ mod tests {
             vec![(slot.index, rules), (slot.index, EgressRules::default())]
         );
         assert_eq!(pool.get().await.unwrap(), slot);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_slot_is_reset_before_reuse() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+
+        let slot = pool.lease(None).await.unwrap().keep().unwrap();
+        pool.deny_egress(slot).await.unwrap();
+        pool.return_slot(slot);
+        tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
+
+        assert_eq!(slots.denied.lock().clone(), vec![slot.index]);
+        assert_eq!(
+            slots.configured.lock().clone(),
+            vec![(slot.index, EgressRules::default())]
+        );
     }
 
     #[tokio::test(start_paused = true)]

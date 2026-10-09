@@ -184,7 +184,6 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         development: true,
         force_stop: false,
         build_cache_max_usage: 90.0,
-        prefetch_from_trace: true,
         use_memfd: true,
         services: Services::parse(Some("orchestrator,template-manager")),
         orchestrator_ip: "192.0.2.1".to_owned(),

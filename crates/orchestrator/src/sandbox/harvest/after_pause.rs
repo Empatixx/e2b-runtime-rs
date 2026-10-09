@@ -28,21 +28,20 @@ pub struct PauseHarvest {
 
 #[derive(Clone)]
 pub struct PrefetchHarvest {
-    flags: Arc<dyn PrefetchFlags>,
     harvester: Arc<PrefetchHarvester>,
 }
 
 impl PrefetchHarvest {
-    pub fn new(flags: Arc<dyn PrefetchFlags>, harvester: Arc<PrefetchHarvester>) -> Self {
-        Self { flags, harvester }
+    pub fn new(harvester: Arc<PrefetchHarvester>) -> Self {
+        Self { harvester }
     }
 
-    pub fn after_pause(&self, pause: PauseHarvest) -> Option<JoinHandle<HarvestReport>> {
-        if !self.flags.pause_resume_prefetch_harvest() {
+    pub fn after_pause(&self, flags: &dyn PrefetchFlags, pause: PauseHarvest) -> Option<JoinHandle<HarvestReport>> {
+        if !flags.pause_resume_prefetch_harvest() {
             return None;
         }
-        let timeout = harvest_timeout(self.flags.pause_resume_prefetch_harvest_timeout_ms());
-        let consume = self.flags.pause_resume_prefetch_consume();
+        let timeout = harvest_timeout(flags.pause_resume_prefetch_harvest_timeout_ms());
+        let consume = flags.pause_resume_prefetch_consume();
         let harvester = self.harvester.clone();
         Some(tokio::spawn(harvest(harvester, pause, timeout, consume)))
     }
@@ -67,7 +66,7 @@ async fn harvest(
         Ok(()) => harvester.run(&job_of(pause, consume, deadline)).await,
         Err(e) => HarvestReport::failed(
             HarvestRun::failed(HarvestOutcome::Skipped, Duration::ZERO),
-            format!("waiting for memfile export: {e}"),
+            format!("waiting for rootfs seal: {e}"),
         ),
     };
     log_failure(&sandbox_id, build_id, &report);
@@ -104,13 +103,13 @@ mod tests {
     use crate::memory::prefetch::flags::fixed::FixedPrefetchFlags;
     use crate::template::metadata::TemplateMetadata;
 
-    fn flags(harvest: bool, consume: bool, timeout_ms: i64) -> Arc<dyn PrefetchFlags> {
-        Arc::new(FixedPrefetchFlags {
+    fn flags(harvest: bool, consume: bool, timeout_ms: i64) -> FixedPrefetchFlags {
+        FixedPrefetchFlags {
             harvest,
             consume,
             harvest_timeout_ms: timeout_ms,
             ..FixedPrefetchFlags::default()
-        })
+        }
     }
 
     fn pause(script: &Arc<Script>, memfile_ready: Ready) -> PauseHarvest {
@@ -136,16 +135,15 @@ mod tests {
         script
     }
 
-    fn harvesting(script: &Arc<Script>, flags: Arc<dyn PrefetchFlags>) -> PrefetchHarvest {
-        PrefetchHarvest::new(flags, Arc::new(harvester(script)))
+    fn harvesting(script: &Arc<Script>) -> PrefetchHarvest {
+        PrefetchHarvest::new(Arc::new(harvester(script)))
     }
 
     #[tokio::test]
     async fn the_harvest_is_off_by_default() {
         let script = scripted();
 
-        let started =
-            harvesting(&script, Arc::new(FixedPrefetchFlags::default())).after_pause(pause(&script, ready_now()));
+        let started = harvesting(&script).after_pause(&FixedPrefetchFlags::default(), pause(&script, ready_now()));
 
         assert!(started.is_none());
         assert!(script.events().is_empty());
@@ -155,8 +153,8 @@ mod tests {
     async fn an_enabled_harvest_runs_without_persisting_unless_consume_is_on() {
         let script = scripted();
 
-        let report = harvesting(&script, flags(true, false, 15_000))
-            .after_pause(pause(&script, ready_now()))
+        let report = harvesting(&script)
+            .after_pause(&flags(true, false, 15_000), pause(&script, ready_now()))
             .unwrap()
             .await
             .unwrap();
@@ -170,8 +168,8 @@ mod tests {
     async fn consume_persists_the_mapping() {
         let script = scripted();
 
-        harvesting(&script, flags(true, true, 15_000))
-            .after_pause(pause(&script, ready_now()))
+        harvesting(&script)
+            .after_pause(&flags(true, true, 15_000), pause(&script, ready_now()))
             .unwrap()
             .await
             .unwrap();
@@ -180,18 +178,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_memfile_export_skips_the_harvest() {
+    async fn a_failed_seal_skips_the_harvest() {
         let script = scripted();
         let failed = futures::future::ready(Err("disk full".to_owned())).boxed().shared();
 
-        let report = harvesting(&script, flags(true, true, 15_000))
-            .after_pause(pause(&script, failed))
+        let report = harvesting(&script)
+            .after_pause(&flags(true, true, 15_000), pause(&script, failed))
             .unwrap()
             .await
             .unwrap();
 
         assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
-        assert_eq!(report.error.as_deref(), Some("waiting for memfile export: disk full"));
+        assert_eq!(report.error.as_deref(), Some("waiting for rootfs seal: disk full"));
         assert!(script.events().is_empty());
     }
 

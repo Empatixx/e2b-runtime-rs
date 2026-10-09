@@ -246,6 +246,13 @@ impl Slot {
         })
     }
 
+    pub async fn deny_egress(&self) -> Result<(), String> {
+        let script = NetworkSettings::current().firewall().deny_egress();
+        self.nft_inside(&script)
+            .await
+            .map_err(|e| format!("failed execution in network namespace '{}': {e}", self.namespace()))
+    }
+
     async fn nft_inside(&self, script: &str) -> Result<(), String> {
         let namespace = self.namespace();
         run_with_input("ip", &["netns", "exec", &namespace, "nft", "-f", "-"], script).await
@@ -319,6 +326,10 @@ impl SlotFactory for HostSlots {
 
     async fn configure(&self, slot: Slot, rules: &EgressRules) -> Result<(), String> {
         slot.apply_egress(rules).await
+    }
+
+    async fn deny_egress(&self, slot: Slot) -> Result<(), String> {
+        slot.deny_egress().await
     }
 }
 

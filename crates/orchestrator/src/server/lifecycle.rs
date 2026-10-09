@@ -9,6 +9,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
+use super::node::prefetch::PausedBuild;
 use super::node::{Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::registry::Lifecycle;
@@ -102,7 +103,7 @@ struct Running {
     _work: Work,
 }
 
-pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -> SandboxHandle {
+pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, throwaway: bool) -> SandboxHandle {
     let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
     let handle = SandboxHandle {
         info: Arc::new(Mutex::new(info)),
@@ -113,6 +114,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>) -
     let host_stats = node
         .host_stats
         .get()
+        .filter(|_| !throwaway)
         .zip(sandbox.cgroup_stats())
         .map(|(sink, reader)| HostStatsCollector::start(reader, stats_identity(&handle.info.lock()), sink.clone()));
     let (access_token, oom_watermark) = {
@@ -184,7 +186,15 @@ impl Running {
                 .with("template_id", template_id)
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
-            self.node.upload(local.clone(), object_metadata);
+            self.node.upload(local.clone(), object_metadata.clone());
+            self.node
+                .harvest_after_pause(PausedBuild {
+                    parent: parent.clone(),
+                    build_id,
+                    object_metadata,
+                    memfile_ready: local.memfile_ready.clone(),
+                })
+                .await;
         }
         let _ = reply.send(snapshotted.map(|local| local.snapshot));
     }

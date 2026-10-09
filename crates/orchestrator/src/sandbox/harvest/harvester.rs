@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use super::{
     DEADLINE_EXCEEDED, HARVEST_REAP_TIMEOUT, HarvestFailure, HarvestInstance, HarvestOutcome, HarvestReport,
-    HarvestResumer, HarvestRun, HarvestSlots, HarvestTemplates, HarvestUpload, MetadataUploader, THROWAWAY_ID_PREFIX,
-    ThrowawayResume, UPLOAD_TOTAL_BUDGET,
+    HarvestResumer, HarvestRun, HarvestSlots, HarvestTemplates, HarvestUpload, MetadataUploader, MetadataWriteError,
+    THROWAWAY_ID_PREFIX, ThrowawayResume, UPLOAD_TOTAL_BUDGET,
 };
 use crate::proto::SandboxConfig;
 use crate::storage::backend::ObjectMetadata;
@@ -101,16 +101,38 @@ impl PrefetchHarvester {
         landed: bool,
     ) -> Result<(), String> {
         let metadata = job.metadata.with_prefetch(Some(mapping));
-        within(deadline, self.templates.update_metadata(job.build_id, &metadata))
-            .await
-            .map_err(|e| format!("update local metadata: {e}"))?;
-        if !landed {
-            return Ok(());
+        let local = self.update_local(job, &metadata, deadline).await;
+        if local.as_ref().is_err_and(|e| !e.committed) {
+            return Err(local_message(&local));
         }
+        let local_error = local.is_err().then(|| local_message(&local));
+        let remote = match landed {
+            true => self.reupload(job, &metadata, deadline).await,
+            false => Ok(()),
+        };
+        let errors: Vec<String> = local_error.into_iter().chain(remote.err()).collect();
+        match errors.is_empty() {
+            true => Ok(()),
+            false => Err(errors.join("\n")),
+        }
+    }
+
+    async fn update_local(
+        &self,
+        job: &HarvestJob,
+        metadata: &TemplateMetadata,
+        deadline: Instant,
+    ) -> Result<(), MetadataWriteError> {
+        timeout_at(deadline, self.templates.update_metadata(job.build_id, metadata))
+            .await
+            .unwrap_or_else(|_| Err(MetadataWriteError::failed(DEADLINE_EXCEEDED)))
+    }
+
+    async fn reupload(&self, job: &HarvestJob, metadata: &TemplateMetadata, deadline: Instant) -> Result<(), String> {
         within(
             deadline,
             self.uploader
-                .upload_metadata(job.build_id, &metadata, &job.object_metadata),
+                .upload_metadata(job.build_id, metadata, &job.object_metadata),
         )
         .await
         .map_err(|e| format!("re-upload metadata: {e}"))
@@ -141,6 +163,13 @@ impl PrefetchHarvester {
         reap(instance.as_ref(), &sandbox_id).await;
         collected.map(|mapping| mapping.filter(|mapping| !mapping.indices.is_empty()))
     }
+}
+
+fn local_message(local: &Result<(), MetadataWriteError>) -> String {
+    local
+        .as_ref()
+        .err()
+        .map_or_else(String::new, |e| format!("update local metadata: {}", e.message))
 }
 
 pub fn throwaway_config(config: &SandboxConfig, build_id: Uuid) -> SandboxConfig {
@@ -188,6 +217,7 @@ pub mod tests {
         pub upload_wait: Mutex<Duration>,
         pub resume_wait: Mutex<Duration>,
         pub resumed: Mutex<Vec<SandboxConfig>>,
+        pub committed: Mutex<bool>,
     }
 
     impl Script {
@@ -268,9 +298,17 @@ pub mod tests {
             Ok(Arc::new(Template::new(storage, build_id, dir)))
         }
 
-        async fn update_metadata(&self, _build_id: Uuid, metadata: &TemplateMetadata) -> Result<(), String> {
+        async fn update_metadata(
+            &self,
+            _build_id: Uuid,
+            metadata: &TemplateMetadata,
+        ) -> Result<(), MetadataWriteError> {
             let pages = metadata.memory_prefetch().map_or(0, |memory| memory.indices.len());
-            self.0.step("update metadata")?;
+            let committed = *self.0.committed.lock();
+            self.0.step("update metadata").map_err(|message| match committed {
+                true => MetadataWriteError::committed(message),
+                false => MetadataWriteError::failed(message),
+            })?;
             self.0.record(&format!("pages {pages}"));
             Ok(())
         }
@@ -401,6 +439,21 @@ pub mod tests {
             Some("update local metadata: update metadata broke")
         );
         assert!(!script.events().contains(&"upload metadata".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_committed_local_update_still_reaches_the_remote_and_reports_its_error() {
+        let script = scripted(2);
+        script.fails_at("update metadata");
+        *script.committed.lock() = true;
+
+        let report = harvester(&script).run(&job(&script, true)).await;
+
+        assert_eq!(
+            report.error.as_deref(),
+            Some("update local metadata: update metadata broke")
+        );
+        assert!(script.events().contains(&"upload metadata".to_owned()));
     }
 
     #[tokio::test]
