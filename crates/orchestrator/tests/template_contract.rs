@@ -232,6 +232,12 @@ struct Running {
 }
 
 async fn start_builder(host: &Host, dir: &Path, ensure_free_disk: bool) -> Running {
+    drop(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+            .try_init(),
+    );
     SLOTS.for_each(|index| {
         drop(
             Command::new("ip")
