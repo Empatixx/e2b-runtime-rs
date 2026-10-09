@@ -1,6 +1,6 @@
 ---
 title: Sandbox
-description: A small, isolated Linux computer that starts in a fraction of a second.
+description: A small, isolated Linux computer that starts in about 150 ms.
 ---
 
 A **sandbox** is a Linux virtual machine that the SDK creates on demand. From the inside it looks like a normal computer: it has a filesystem, a user called `user`, a shell, network access and whatever the template installed. From the outside it is a [Firecracker](https://firecracker-microvm.github.io/) **microVM**: a very small virtual machine with only the devices a sandbox needs.

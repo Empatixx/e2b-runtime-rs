@@ -1,6 +1,6 @@
 ---
 title: Sandbox
-description: Malý izolovaný linuxový počítač, který nastartuje za zlomek sekundy.
+description: Malý izolovaný linuxový počítač, který nastartuje zhruba za 150 ms.
 ---
 
 **Sandbox** je linuxový virtuální stroj, který SDK vytvoří na požádání. Zevnitř vypadá jako normální počítač: má souborový systém, uživatele `user`, shell, přístup k síti a cokoli, co nainstalovala šablona. Zvenku je to [Firecracker](https://firecracker-microvm.github.io/) **microVM**: velmi malý virtuální stroj jen s těmi zařízeními, která sandbox potřebuje.
