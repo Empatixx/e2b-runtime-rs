@@ -101,15 +101,15 @@ mod tests {
     use super::super::harvester::tests::{Fakes, Script, harvester, trace};
     use super::*;
     use crate::block::build_file::ready_now;
-    use crate::memory::prefetch::flags::EnvPrefetchFlags;
+    use crate::memory::prefetch::flags::fixed::FixedPrefetchFlags;
     use crate::template::metadata::TemplateMetadata;
 
     fn flags(harvest: bool, consume: bool, timeout_ms: i64) -> Arc<dyn PrefetchFlags> {
-        Arc::new(EnvPrefetchFlags {
+        Arc::new(FixedPrefetchFlags {
             harvest,
             consume,
             harvest_timeout_ms: timeout_ms,
-            ..EnvPrefetchFlags::default()
+            ..FixedPrefetchFlags::default()
         })
     }
 
@@ -145,7 +145,7 @@ mod tests {
         let script = scripted();
 
         let started =
-            harvesting(&script, Arc::new(EnvPrefetchFlags::default())).after_pause(pause(&script, ready_now()));
+            harvesting(&script, Arc::new(FixedPrefetchFlags::default())).after_pause(pause(&script, ready_now()));
 
         assert!(started.is_none());
         assert!(script.events().is_empty());

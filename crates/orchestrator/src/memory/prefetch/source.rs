@@ -80,9 +80,7 @@ mod tests {
     fn the_defaults_are_the_flag_defaults() {
         assert_eq!(
             PrefetchSettings::default(),
-            PrefetchSettings::from_flags(&super::super::flags::EnvPrefetchFlags::from_vars(
-                &std::collections::HashMap::new()
-            ))
+            PrefetchSettings::from_flags(&super::super::flags::fixed::FixedPrefetchFlags::default())
         );
     }
 }
