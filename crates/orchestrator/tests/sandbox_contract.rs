@@ -134,7 +134,7 @@ async fn failed_cold_boot_leaves_no_slot_cgroup_or_device() {
 
     let error = Sandbox::builder()
         .id("sbx-fail")
-        .template_id(&template_id.to_string())
+        .template_id(template_id.to_string())
         .rootfs(overlay(storage, dir.path(), template_id, size).await)
         .slot(slot)
         .firecracker(&host.firecracker)
@@ -177,7 +177,7 @@ async fn a_cancelled_cold_boot_tears_everything_down() {
 
     let boot = Sandbox::builder()
         .id("sbx-cancel")
-        .template_id(&template_id.to_string())
+        .template_id(template_id.to_string())
         .rootfs(overlay(storage, dir.path(), template_id, size).await)
         .slot(slot)
         .firecracker(&host.firecracker)
@@ -222,7 +222,7 @@ async fn a_guest_that_dies_is_reported_quickly() {
 
     let error = Sandbox::builder()
         .id("sbx-dies")
-        .template_id(&template_id.to_string())
+        .template_id(template_id.to_string())
         .rootfs(overlay(storage, dir.path(), template_id, size).await)
         .slot(slot)
         .firecracker(&host.firecracker)
@@ -254,7 +254,7 @@ async fn cold_boot_initialises_envd_with_token_and_mmds() {
 
     let sandbox = Sandbox::builder()
         .id("sbx-contract")
-        .template_id(&template_id.to_string())
+        .template_id(template_id.to_string())
         .rootfs(overlay(storage, dir.path(), template_id, size).await)
         .slot(slot)
         .firecracker(&host.firecracker)

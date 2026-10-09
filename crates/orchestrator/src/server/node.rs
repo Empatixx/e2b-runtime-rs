@@ -46,6 +46,9 @@ use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig, SchedulingMetadata
 use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
+use crate::sandbox::config::sandbox_builder::{
+    SetFirecracker, SetHyperloopIp, SetId, SetKernel, SetTemplateId, SetWorkDir,
+};
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
@@ -62,6 +65,8 @@ const TEMPLATE_DEFAULT_USER: &str = "user";
 const SANDBOX_TYPE: &str = "sandbox";
 pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
+
+pub type BaseSandbox = SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>;
 
 pub struct Node {
     pub node_id: String,
@@ -273,7 +278,7 @@ impl Node {
         async move { task.await.map_err(|e| format!("snapshot upload task failed: {e}"))? }
     }
 
-    pub fn build_sandbox(&self, sandbox_id: &str, template_id: &str) -> SandboxBuilder {
+    pub fn build_sandbox(&self, sandbox_id: &str, template_id: &str) -> SandboxBuilder<BaseSandbox> {
         Sandbox::builder()
             .id(sandbox_id)
             .template_id(template_id)
@@ -636,7 +641,7 @@ impl Node {
             .kernel(self.binaries.kernel_for(&config.kernel_version))
             .work_dir(work_dir)
             .envd_timeout(self.runtime_flags.envd_timeout())
-            .prefetch(prefetch)
+            .maybe_prefetch(prefetch)
             .prefetch_settings(prefetch_settings)
             .use_memfd(
                 supports_memfd(&config.firecracker_version)

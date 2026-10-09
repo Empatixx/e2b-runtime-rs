@@ -251,7 +251,7 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
     let launch = Launch::builder()
         .binary("/bin/false")
         .socket(&socket)
-        .namespace(&slot.namespace())
+        .namespace(slot.namespace())
         .rootfs("/dev/null")
         .kernel("/dev/null")
         .build();

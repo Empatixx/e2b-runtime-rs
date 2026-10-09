@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::Sandbox;
-use super::config::SandboxBuilder;
+use super::config::{SandboxBuilder, sandbox_builder};
 use crate::block::build_file::BuildFile;
 use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
@@ -20,9 +20,9 @@ use crate::system::all_ok;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const NO_DEVICE: &str = "/dev/null";
 
-impl SandboxBuilder {
+impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
     pub async fn resume(self, snapfile: &Path) -> Result<Sandbox, String> {
-        let mut sandbox = Sandbox::new(self.build()?);
+        let mut sandbox = Sandbox::new(self.build());
         match sandbox.start_resumed(snapfile).await {
             Ok(()) => Ok(sandbox),
             Err(e) => Err(sandbox.fail(e).await),

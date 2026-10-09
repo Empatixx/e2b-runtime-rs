@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
-use self::config::{Rootfs, SandboxBuilder, SandboxConfig};
+use self::config::{Rootfs, SandboxBuilder, SandboxConfig, sandbox_builder};
 use self::resources::Resources;
 use crate::builder::config::host_arch;
 use crate::cgroup::Cgroup;
@@ -39,9 +39,9 @@ pub struct Sandbox {
     prefetch_stats: Arc<PrefetchStats>,
 }
 
-impl SandboxBuilder {
+impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
     pub async fn cold_boot(self) -> Result<Sandbox, String> {
-        let config = self.build()?;
+        let config = self.build();
         config.kernel.as_ref().ok_or("kernel is required")?;
         let mut sandbox = Sandbox::new(config);
         match sandbox.start().await {
@@ -63,7 +63,7 @@ impl Drop for Sandbox {
 
 impl Sandbox {
     pub fn builder() -> SandboxBuilder {
-        SandboxBuilder::default()
+        SandboxConfig::builder()
     }
 
     pub fn id(&self) -> &str {
@@ -202,7 +202,7 @@ impl Sandbox {
         let launch = Launch::builder()
             .binary(&self.config.firecracker)
             .socket(self.config.work_dir.join("firecracker.sock"))
-            .namespace(&self.config.slot.namespace())
+            .namespace(self.config.slot.namespace())
             .rootfs(rootfs)
             .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
             .maybe_cgroup(cgroup)
@@ -229,7 +229,7 @@ impl Sandbox {
             .rootfs(GUEST_ROOTFS)
             .vcpus(self.config.vcpus)
             .memory_mib(self.config.memory_mib)
-            .boot_args(&self.config.boot.kernel_args(host_arch()))
+            .boot_args(self.config.boot.kernel_args(host_arch()))
             .maybe_io_engine(self.config.io_engine.as_deref())
             .build();
         let metadata = self.config.mmds.then(|| self.mmds_metadata());

@@ -11,6 +11,9 @@ use orchestrator::envd::EnvdInit;
 use orchestrator::network::slot::Slot;
 use orchestrator::sandbox::Sandbox;
 use orchestrator::sandbox::config::SandboxBuilder;
+use orchestrator::sandbox::config::sandbox_builder::{
+    SetFirecracker, SetId, SetKernel, SetSlot, SetTemplateId, SetWorkDir,
+};
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::build::Build;
 use orchestrator::storage::header::{Header, Metadata};
@@ -88,11 +91,11 @@ impl Templates {
         Arc::new(BuildFile::new(header, Artifact::Memfile, self.store.clone()))
     }
 
-    fn sandbox(&self, host: &Host, id: &str, slot: Slot) -> SandboxBuilder {
+    fn sandbox(&self, host: &Host, id: &str, slot: Slot) -> SandboxBuilder<TestSandbox> {
         std::fs::create_dir_all(&self.work).unwrap();
         Sandbox::builder()
             .id(id)
-            .template_id(&self.template.metadata.build_id.to_string())
+            .template_id(self.template.metadata.build_id.to_string())
             .slot(slot)
             .firecracker(&host.firecracker)
             .kernel(&host.kernel)
@@ -105,6 +108,8 @@ impl Templates {
             })
     }
 }
+
+type TestSandbox = SetWorkDir<SetKernel<SetFirecracker<SetSlot<SetTemplateId<SetId>>>>>;
 
 async fn fresh_slot(index: u32) -> Slot {
     let slot = Slot::new(index).unwrap();
@@ -424,7 +429,7 @@ async fn an_optimized_trace_prefetches_memory_on_resume() {
         .sandbox(&host, "sbx-opt-prefetched", fresh_slot(4044).await)
         .rootfs(templates.overlay(build.rootfs.clone(), "opt-prefetched"))
         .memfile(templates.memfile(build.memfile.clone()))
-        .prefetch(Some(mapping.clone()))
+        .prefetch(mapping.clone())
         .resume(&snapfile)
         .await
         .unwrap();
