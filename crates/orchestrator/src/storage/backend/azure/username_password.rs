@@ -1,7 +1,10 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use reqwest::Client;
 
 use super::aad::Authority;
 use super::token_source::{BearerToken, SourceError, TokenSource};
+use super::ws_trust;
 
 const CREDENTIAL: &str = "UsernamePasswordCredential";
 
@@ -13,63 +16,188 @@ pub struct UsernamePasswordCredential {
     pub client: Client,
 }
 
+impl UsernamePasswordCredential {
+    fn failed(message: String) -> SourceError {
+        SourceError::Failed(format!("{CREDENTIAL}: {message}"))
+    }
+
+    fn form(&self, grant_type: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("grant_type", grant_type.to_owned()),
+            ("username", self.username.clone()),
+            ("password", self.password.clone()),
+            ("client_id", self.client_id.clone()),
+            ("client_info", "1".to_owned()),
+        ]
+    }
+
+    async fn managed(&self, scope: &str) -> Result<BearerToken, SourceError> {
+        self.authority
+            .request_token(&self.client, CREDENTIAL, "", scope, self.form("password"))
+            .await
+    }
+
+    async fn federated(&self, realm: &ws_trust::UserRealm, scope: &str) -> Result<BearerToken, SourceError> {
+        let metadata_url = &realm.federation_metadata_url;
+        let endpoint = ws_trust::mex(&self.client, metadata_url).await.map_err(|e| {
+            Self::failed(format!(
+                "problem getting mex doc from federated url({metadata_url}): {e}"
+            ))
+        })?;
+        let saml = ws_trust::saml_token(
+            &self.client,
+            &endpoint,
+            &realm.cloud_audience_urn,
+            &self.username,
+            &self.password,
+        )
+        .await
+        .map_err(|e| Self::failed(format!("problem getting SAML token info: {e}")))?;
+        let mut form = self.form(saml.grant_type);
+        form.push(("assertion", STANDARD.encode(saml.assertion)));
+        self.authority
+            .request_token(&self.client, CREDENTIAL, "", scope, form)
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSource for UsernamePasswordCredential {
     async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
-        self.authority
-            .request_token(
-                &self.client,
-                CREDENTIAL,
-                "",
-                scope,
-                vec![
-                    ("grant_type", "password".to_owned()),
-                    ("username", self.username.clone()),
-                    ("password", self.password.clone()),
-                    ("client_id", self.client_id.clone()),
-                    ("client_info", "1".to_owned()),
-                ],
-            )
+        let realm = ws_trust::user_realm(&self.client, self.authority.base_url(), &self.username)
             .await
+            .map_err(|e| Self::failed(format!("problem getting user realm from authority: {e}")))?;
+        match realm.account_type.as_str() {
+            "Federated" => self.federated(&realm, scope).await,
+            "Managed" => self.managed(scope).await,
+            _ => Err(Self::failed("unknown account type".to_owned())),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
-
+    use super::super::testing::serve;
     use super::*;
 
-    #[tokio::test]
-    async fn the_password_grant_is_posted_with_the_user() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut connection, _) = listener.accept().await.unwrap();
-            let request = super::super::testing::read_request(&mut connection).await;
-            let body = r#"{"error":"invalid_grant"}"#;
-            let reply = format!(
-                "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            connection.write_all(reply.as_bytes()).await.unwrap();
-            request
-        });
-        let credential = UsernamePasswordCredential {
+    fn credential(base_url: &str) -> UsernamePasswordCredential {
+        UsernamePasswordCredential {
             client_id: "client".to_owned(),
             username: "me@example.com".to_owned(),
             password: "pw".to_owned(),
-            authority: Authority::with_token_endpoint(format!("http://{address}/t/oauth2/v2.0/token")),
+            authority: Authority::local(base_url),
             client: Client::new(),
-        };
+        }
+    }
 
-        let error = credential.token("s").await.unwrap_err();
-        let request = server.await.unwrap();
+    fn realm(account_type: &str, extra: &str) -> String {
+        format!(
+            r#"{{"account_type":"{account_type}","domain_name":"example.com","cloud_instance_name":"microsoftonline.com","cloud_audience_urn":"urn:federation:MicrosoftOnline"{extra}}}"#
+        )
+    }
 
-        assert!(request.contains("grant_type=password"));
-        assert!(request.contains("username=me%40example.com"));
+    #[tokio::test]
+    async fn managed_users_use_the_password_grant() {
+        let (base, handle) = serve(vec![
+            (200, "application/json", realm("Managed", "")),
+            (
+                200,
+                "application/json",
+                r#"{"access_token":"aad","expires_in":3600}"#.to_owned(),
+            ),
+        ])
+        .await;
+
+        let token = credential(&base).token("s").await.unwrap();
+        let requests = handle.await.unwrap();
+
+        assert_eq!(token.secret, "aad");
+        assert!(requests[0].starts_with("GET /common/UserRealm/me@example.com?api-version=1.0 HTTP/1.1"));
+        assert!(requests[1].contains("grant_type=password"));
+        assert!(requests[1].contains("username=me%40example.com"));
+    }
+
+    #[tokio::test]
+    async fn managed_rejections_read_like_the_sdk() {
+        let (base, _handle) = serve(vec![
+            (200, "application/json", realm("Managed", "")),
+            (400, "application/json", r#"{"error":"invalid_grant"}"#.to_owned()),
+        ])
+        .await;
+
+        let error = credential(&base).token("s").await.unwrap_err();
+
         assert!(
             matches!(&error, SourceError::Failed(text) if text.starts_with("UsernamePasswordCredential authentication failed. \nPOST http://") && text.contains("RESPONSE 400: 400 Bad Request"))
+        );
+    }
+
+    const MEX: &str = r##"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:wsu="u" xmlns:sp="s" xmlns:wsp="p" xmlns:soap12="s12">
+<wsp:Policy wsu:Id="pol"><wsp:ExactlyOne><wsp:All><sp:TransportBinding xmlns:sp="sp"/><sp:SignedSupportingTokens><wsp:Policy><sp:UsernameToken><wsp:Policy><sp:WssUsernameToken10/></wsp:Policy></sp:UsernameToken></wsp:Policy></sp:SignedSupportingTokens></wsp:All></wsp:ExactlyOne></wsp:Policy>
+<binding name="b13"><wsp:PolicyReference URI="#pol"/><soap12:binding transport="http://schemas.xmlsoap.org/soap/http"/><operation name="Issue"><soap12:operation soapAction="http://docs.oasis-open.org/ws-sx/ws-trust/200512/RST/Issue"/></operation></binding>
+<service name="S"><port name="p" binding="tns:b13"><wsa:EndpointReference xmlns:wsa="a"><wsa:Address>{BASE}/trust</wsa:Address></wsa:EndpointReference></port></service>
+</definitions>"##;
+
+    const SAML: &str = r#"<s:Envelope xmlns:s="e"><s:Body><t:RequestSecurityTokenResponseCollection xmlns:t="t"><t:RequestSecurityTokenResponse><t:RequestedSecurityToken><saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><x/></saml:Assertion></t:RequestedSecurityToken></t:RequestSecurityTokenResponse></t:RequestSecurityTokenResponseCollection></s:Body></s:Envelope>"#;
+
+    #[tokio::test]
+    async fn federated_users_trade_a_saml_assertion_from_the_ws_trust_endpoint() {
+        let (base, handle) = serve(vec![
+            (
+                200,
+                "application/json",
+                realm(
+                    "Federated",
+                    r#","federation_protocol":"WSTrust","federation_metadata_url":"{BASE}/mex""#,
+                ),
+            ),
+            (200, "application/xml", MEX.to_owned()),
+            (200, "application/soap+xml", SAML.to_owned()),
+            (
+                200,
+                "application/json",
+                r#"{"access_token":"aad","expires_in":3600}"#.to_owned(),
+            ),
+        ])
+        .await;
+
+        let token = credential(&base).token("s").await.unwrap();
+        let requests = handle.await.unwrap();
+
+        assert_eq!(token.secret, "aad");
+        assert!(requests[1].starts_with("GET /mex HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /trust HTTP/1.1"));
+        assert!(requests[2].contains("soapaction: http://docs.oasis-open.org/ws-sx/ws-trust/200512/RST/Issue"));
+        assert!(requests[2].contains("content-type: application/soap+xml; charset=utf-8"));
+        assert!(requests[2].contains("<wsse:Username>me@example.com</wsse:Username>"));
+        assert!(requests[3].contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Asaml2-bearer"));
+        let assertion = STANDARD
+            .encode(r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><x/></saml:Assertion>"#);
+        assert!(requests[3].contains(&format!("assertion={}", assertion.replace('=', "%3D"))));
+    }
+
+    #[tokio::test]
+    async fn federation_failures_name_the_failing_step() {
+        let (base, _handle) = serve(vec![
+            (
+                200,
+                "application/json",
+                realm(
+                    "Federated",
+                    r#","federation_protocol":"WSTrust","federation_metadata_url":"{BASE}/mex""#,
+                ),
+            ),
+            (404, "text/plain", "gone".to_owned()),
+        ])
+        .await;
+
+        let error = credential(&base).token("s").await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SourceError::Failed(format!(
+                "UsernamePasswordCredential: problem getting mex doc from federated url({base}/mex): http call({base}/mex)(GET) error: reply status code was 404:\ngone"
+            ))
         );
     }
 }

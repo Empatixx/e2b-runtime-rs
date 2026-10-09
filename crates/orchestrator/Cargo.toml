@@ -29,6 +29,7 @@ klickhouse = { version = "0.15", default-features = false, features = ["derive",
 fred = { version = "10", default-features = false, features = ["i-keys", "i-scripts", "i-streams", "enable-rustls-ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 prost-types = "0.14"
+quick-xml = "0.41"
 rand = "0.10"
 ring = "0.17"
 roaring = "0.11"

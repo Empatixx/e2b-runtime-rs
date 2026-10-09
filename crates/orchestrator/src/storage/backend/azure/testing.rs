@@ -29,3 +29,25 @@ fn complete(text: &str) -> bool {
         body.len() >= length
     })
 }
+
+pub async fn serve(replies: Vec<(u16, &'static str, String)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let served = base.clone();
+    let handle = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for (status, content_type, body) in replies {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            seen.push(read_request(&mut connection).await);
+            let body = body.replace("{BASE}", &served);
+            let reply = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            connection.write_all(reply.as_bytes()).await.unwrap();
+        }
+        seen
+    });
+    (base, handle)
+}

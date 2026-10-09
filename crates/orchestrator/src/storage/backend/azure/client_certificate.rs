@@ -283,7 +283,7 @@ mod tests {
             client_id: "client".to_owned(),
             certificate: ClientCertificate::parse(PEM, "").unwrap(),
             send_chain: false,
-            authority: Authority::with_token_endpoint(format!("http://{address}/t/oauth2/v2.0/token")),
+            authority: Authority::local(&format!("http://{address}")),
             client: Client::new(),
         };
 

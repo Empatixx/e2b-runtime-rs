@@ -9,6 +9,8 @@ mod sas;
 pub mod testing;
 mod token_source;
 mod username_password;
+mod ws_trust;
+mod xml;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -14,6 +14,7 @@ const TROUBLESHOOT: &str = "To troubleshoot, visit https://aka.ms/azsdk/go/ident
 
 #[derive(Clone)]
 pub struct Authority {
+    base_url: String,
     token_endpoint: String,
 }
 
@@ -44,14 +45,23 @@ impl Authority {
             .ok()
             .filter(|host| !host.is_empty())
             .unwrap_or_else(|| PUBLIC_CLOUD.to_owned());
+        let base_url = host.trim_end_matches('/').to_owned();
         Self {
-            token_endpoint: format!("{}/{tenant}/oauth2/v2.0/token", host.trim_end_matches('/')),
+            token_endpoint: format!("{base_url}/{tenant}/oauth2/v2.0/token"),
+            base_url,
         }
     }
 
     #[cfg(test)]
-    pub fn with_token_endpoint(token_endpoint: String) -> Self {
-        Self { token_endpoint }
+    pub fn local(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_owned(),
+            token_endpoint: format!("{base_url}/t/oauth2/v2.0/token"),
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     pub fn token_endpoint(&self) -> &str {
