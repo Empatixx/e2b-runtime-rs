@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use tar::{Builder, EntryType, Header};
 
 use super::{LayerFile, SYMLINKS};
+use crate::go_gzip::gzip_best_speed;
 
 const SYMLINK_MODE: u32 = 0o777;
 
@@ -20,6 +21,10 @@ pub fn files_layer(files: &BTreeMap<String, LayerFile>) -> Result<Vec<u8>, Strin
         })
         .and_then(Builder::into_inner)
         .map_err(|e| format!("error creating layer from files: {e}"))
+}
+
+pub fn gzipped(tar: &[u8]) -> Vec<u8> {
+    gzip_best_speed(tar)
 }
 
 fn zero_owner_and_time(header: &mut Header) {
@@ -60,6 +65,9 @@ pub fn symlink_layer() -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
+    use flate2::read::GzDecoder;
     use tar::Archive;
 
     use super::*;
@@ -124,5 +132,15 @@ mod tests {
             link.link_name().unwrap().unwrap().display().to_string(),
             "/etc/systemd/system/envd.service"
         );
+    }
+
+    #[test]
+    fn gzipped_layer_unpacks_to_the_tar_with_the_go_header() {
+        let tar = symlink_layer().unwrap();
+        let layer = gzipped(&tar);
+        assert_eq!(layer[..10], [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x04, 0xff]);
+        let mut unpacked = Vec::new();
+        GzDecoder::new(layer.as_slice()).read_to_end(&mut unpacked).unwrap();
+        assert_eq!(unpacked, tar);
     }
 }
