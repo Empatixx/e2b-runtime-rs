@@ -17,6 +17,7 @@ pub fn files_layer(files: &BTreeMap<String, LayerFile>) -> Result<Vec<u8>, Strin
             header.set_mode(file.mode);
             zero_owner_and_time(&mut header);
             set_name(&mut header, name)?;
+            seal(&mut header)?;
             builder.append(&header, file.bytes.as_slice()).map(|()| builder)
         })
         .and_then(Builder::into_inner)
@@ -42,7 +43,18 @@ fn set_name(header: &mut Header, name: &str) -> std::io::Result<()> {
         .get_mut(..name.len())
         .ok_or_else(|| std::io::Error::other(format!("tar name too long: {name}")))?;
     field.copy_from_slice(name.as_bytes());
+    Ok(())
+}
+
+fn seal(header: &mut Header) -> std::io::Result<()> {
+    header.set_device_major(0)?;
+    header.set_device_minor(0)?;
     header.set_cksum();
+    let checksum = header.cksum()?;
+    header
+        .as_old_mut()
+        .cksum
+        .copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
     Ok(())
 }
 
@@ -57,7 +69,10 @@ pub fn symlink_layer() -> Result<Vec<u8>, String> {
             header.set_size(0);
             header.set_mode(SYMLINK_MODE);
             zero_owner_and_time(&mut header);
-            builder.append_link(&mut header, name, target).map(|()| builder)
+            set_name(&mut header, name)?;
+            header.set_link_name(target)?;
+            seal(&mut header)?;
+            builder.append(&header, std::io::empty()).map(|()| builder)
         })
         .and_then(Builder::into_inner)
         .map_err(|e| format!("error creating layer from symlinks: {e}"))
@@ -68,6 +83,7 @@ mod tests {
     use std::io::Read;
 
     use flate2::read::GzDecoder;
+    use sha2::{Digest, Sha256};
     use tar::Archive;
 
     use super::*;
@@ -142,5 +158,58 @@ mod tests {
         let mut unpacked = Vec::new();
         GzDecoder::new(layer.as_slice()).read_to_end(&mut unpacked).unwrap();
         assert_eq!(unpacked, tar);
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn layer_file(bytes: &[u8], mode: u32) -> LayerFile {
+        LayerFile {
+            bytes: bytes.to_vec(),
+            mode,
+        }
+    }
+
+    #[test]
+    fn files_layer_digests_match_go_archive_tar_and_compress_gzip() {
+        let files = BTreeMap::from([
+            (
+                "usr/bin/init".to_owned(),
+                layer_file(b"#!/bin/sh\nexec /sbin/init\n", 0o755),
+            ),
+            ("etc/hostname".to_owned(), layer_file(b"e2b.local", 0o644)),
+            (
+                "/usr/bin/envd".to_owned(),
+                layer_file(&b"envd-binary-".repeat(5000), 0o777),
+            ),
+            ("etc/empty".to_owned(), layer_file(b"", 0o600)),
+            ("etc/inittab".to_owned(), layer_file(b"::sysinit:/bin/true\n", 0o777)),
+        ]);
+
+        let tar = files_layer(&files).unwrap();
+
+        assert_eq!(
+            sha256_hex(&tar),
+            "a40307e782b1d74cc829274fd60f9736b882aedc57dbff19497ed8f855ac4a8f"
+        );
+        assert_eq!(
+            sha256_hex(&gzipped(&tar)),
+            "260a6259ce0a6a50eb0c106e2607afd2ef2bb95eae74a6c358746f9b6383b1d5"
+        );
+    }
+
+    #[test]
+    fn symlink_layer_digests_match_go_archive_tar_and_compress_gzip() {
+        let tar = symlink_layer().unwrap();
+
+        assert_eq!(
+            sha256_hex(&tar),
+            "f4431bc39852ed35bba8a67a26171e9e10403d8c0a972dc08688f26099afd549"
+        );
+        assert_eq!(
+            sha256_hex(&gzipped(&tar)),
+            "e216621d8a0a7a4486d6a228759b29bc378eff95e6ea9469854b8624b267dd13"
+        );
     }
 }

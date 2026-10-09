@@ -1,11 +1,7 @@
 pub mod teardown;
 pub mod unpack;
 
-use std::io::Write;
 use std::path::Path;
-
-use flate2::Compression;
-use flate2::write::GzEncoder;
 
 use super::ext4::{BLOCK_SIZE, Ext4};
 use super::logs::ScopedLog;
@@ -13,7 +9,7 @@ use super::oci::export::{ImageLayer, LayerSource, remote_layers};
 use super::oci::pull::{ImageConfig, Puller};
 use super::oci::registry::digest_of;
 use super::phase::{BuildError, PhaseMeta};
-use super::template_files::layers::{files_layer, symlink_layer};
+use super::template_files::layers::{files_layer, gzipped, symlink_layer};
 use super::template_files::{InjectedFiles, InjectedSources};
 use crate::go_humanize::bytes;
 use crate::proto::{FromImageRegistry, LogLevel};
@@ -89,24 +85,16 @@ pub async fn create_ext4_filesystem(
 }
 
 fn injected_layers(injected: &InjectedFiles) -> Result<Vec<ImageLayer>, String> {
-    [files_layer(&injected.files()?)?, symlink_layer()?]
-        .into_iter()
-        .map(|tar| {
-            gzipped(&tar).map(|layer| ImageLayer {
-                digest: digest_of(&layer),
-                size: layer.len() as u64,
-                source: LayerSource::Bytes(layer),
-            })
+    let tars = [files_layer(&injected.files()?)?, symlink_layer()?];
+    Ok(tars
+        .iter()
+        .map(|tar| gzipped(tar))
+        .map(|layer| ImageLayer {
+            digest: digest_of(&layer),
+            size: layer.len() as u64,
+            source: LayerSource::Bytes(layer),
         })
-        .collect()
-}
-
-fn gzipped(tar: &[u8]) -> Result<Vec<u8>, String> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(tar)
-        .and_then(|()| encoder.finish())
-        .map_err(|e| format!("error appending layers: {e}"))
+        .collect())
 }
 
 async fn to_ext4(log: &ScopedLog<'_>, ext4: &Ext4, layers: Vec<ImageLayer>, max_size: i64) -> Result<i64, UnpackError> {
