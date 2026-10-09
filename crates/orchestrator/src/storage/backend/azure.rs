@@ -21,6 +21,7 @@ use object_store::azure::{AzureCredential, MicrosoftAzure, MicrosoftAzureBuilder
 use object_store::{CredentialProvider, Error as StoreError};
 
 use super::credential_cache::CredentialCache;
+use crate::go_url::escape::{Mode, should_escape};
 use crate::go_url::query::Query;
 use crate::storage::spec::StorageSpec;
 use connection_string::{ConnectionString, SharedKey};
@@ -285,14 +286,15 @@ impl AzureSigner {
 fn path_escape(segment: &str) -> String {
     segment
         .bytes()
-        .map(|byte| match byte {
-            byte if byte.is_ascii_alphanumeric() => (byte as char).to_string(),
-            b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@' | b'!' | b'(' | b')' | b'*' => {
-                (byte as char).to_string()
-            }
-            byte => format!("%{byte:02X}"),
+        .map(|byte| match escapes_in_segment(byte) {
+            true => format!("%{byte:02X}"),
+            false => (byte as char).to_string(),
         })
         .collect()
+}
+
+fn escapes_in_segment(byte: u8) -> bool {
+    matches!(byte, b'/' | b';' | b',') || should_escape(byte, Mode::Path)
 }
 
 #[cfg(test)]
@@ -464,6 +466,9 @@ mod tests {
     #[test]
     fn blob_names_are_escaped_like_path_escape() {
         assert_eq!(path_escape("a/b c;d,e?f"), "a%2Fb%20c%3Bd%2Ce%3Ff");
-        assert_eq!(path_escape("x-y_z.~$&+:=@!()*"), "x-y_z.~$&+:=@!()*");
+        assert_eq!(
+            path_escape("x-y_z.~$&+:=@!()*\u{e9}"),
+            "x-y_z.~$&+:=@%21%28%29%2A%C3%A9"
+        );
     }
 }
