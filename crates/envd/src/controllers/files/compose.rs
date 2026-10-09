@@ -185,7 +185,11 @@ fn concatenate(sources: &[PathBuf], temporary: &Path, uid: u32, gid: u32) -> Res
                 .build(),
             _ => ErrorResponse::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .message(format!("error composing source {}: {e}", source.display()))
+                .message(format!(
+                    "error composing source {}: {}",
+                    source.display(),
+                    os_error("copy_file_range", temporary, &e)
+                ))
                 .build(),
         })?;
     }
