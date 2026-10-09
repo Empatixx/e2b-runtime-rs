@@ -8,8 +8,8 @@ WORK=$(mktemp -d)
 CONTAINER=e2b-guest-export
 trap 'sudo rm -rf "$WORK"; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true' EXIT
 
-cargo build -q -p envd
-cp target/debug/envd docker/envd.service "$WORK/"
+cargo build -q -p envd --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/debug/envd docker/envd.service "$WORK/"
 docker build -q -f docker/guest.Dockerfile -t e2b-guest:dev "$WORK" >/dev/null
 docker create --name "$CONTAINER" e2b-guest:dev >/dev/null
 mkdir "$WORK/root"
@@ -19,7 +19,7 @@ echo "e2b" | sudo tee "$WORK/root/etc/hostname" >/dev/null
 sudo mkdir -p "$DIR"
 sudo rm -f "$DIR/rootfs.ext4"
 sudo mkfs.ext4 -q -F -d "$WORK/root" "$DIR/rootfs.ext4" "$SIZE"
-sudo cp target/debug/envd "$DIR/envd"
+sudo cp target/x86_64-unknown-linux-musl/debug/envd "$DIR/envd"
 {
   echo "E2B_ROOTFS=$DIR/rootfs.ext4"
   echo "HOST_ENVD_PATH=$DIR/envd"

@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler nftables
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler nftables musl-tools
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98"
           components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: scripts/ci/s3.sh
       - run: docker run -d --name e2b-redis -p 6379:6379 redis:7-alpine

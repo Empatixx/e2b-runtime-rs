@@ -70,11 +70,11 @@ mod tests {
     #[test]
     fn ioctl_numbers_match_upstream() {
         assert_eq!(
-            nix::request_code_readwrite!(b'X', 119, std::mem::size_of::<nix::libc::c_int>()),
+            nix::request_code_readwrite!(b'X', 119, std::mem::size_of::<nix::libc::c_int>()) as u32,
             0xC004_5877
         );
         assert_eq!(
-            nix::request_code_readwrite!(b'X', 120, std::mem::size_of::<nix::libc::c_int>()),
+            nix::request_code_readwrite!(b'X', 120, std::mem::size_of::<nix::libc::c_int>()) as u32,
             0xC004_5878
         );
     }
