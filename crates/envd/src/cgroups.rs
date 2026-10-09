@@ -248,7 +248,8 @@ fn ensure_cgroup2(root: &Path) -> Result<(), String> {
 }
 
 fn create_cgroup(path: &Path, properties: &[(&str, String)]) -> Result<Cgroup, String> {
-    std::fs::create_dir_all(path).map_err(|e| format!("failed to create cgroup root: {e}"))?;
+    std::fs::create_dir_all(path)
+        .map_err(|e| format!("failed to create cgroup root: {}", crate::util::errno::message(&e)))?;
     let failed: Vec<String> = properties
         .iter()
         .filter_map(|(name, value)| match write_property(&path.join(name), value) {
@@ -260,7 +261,10 @@ fn create_cgroup(path: &Path, properties: &[(&str, String)]) -> Result<Cgroup, S
                 );
                 None
             }
-            Err(e) => Some(format!("failed to write cgroup property {name:?}: {e}")),
+            Err(e) => Some(format!(
+                "failed to write cgroup property {name:?}: {}",
+                crate::util::errno::message(&e)
+            )),
         })
         .collect();
     if !failed.is_empty() {
@@ -273,7 +277,7 @@ fn create_cgroup(path: &Path, properties: &[(&str, String)]) -> Result<Cgroup, S
             path: path.to_path_buf(),
             procs: Arc::new(procs),
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::util::errno::message(&e))
 }
 
 fn write_property(path: &Path, value: &str) -> io::Result<()> {

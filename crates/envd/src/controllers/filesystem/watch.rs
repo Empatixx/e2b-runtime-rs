@@ -97,16 +97,24 @@ pub fn watch(
     recursive: bool,
     handler: impl notify::EventHandler,
 ) -> Result<RecommendedWatcher, ConnectError> {
-    let mut watcher = notify::recommended_watcher(handler)
-        .map_err(|e| ConnectError::internal(format!("error creating watcher: {e}")))?;
+    let mut watcher = notify::recommended_watcher(handler).map_err(|e| {
+        ConnectError::internal(format!(
+            "error creating watcher: {}",
+            crate::util::errno::notify_message(&e)
+        ))
+    })?;
     let mode = if recursive {
         RecursiveMode::Recursive
     } else {
         RecursiveMode::NonRecursive
     };
-    watcher
-        .watch(path, mode)
-        .map_err(|e| ConnectError::internal(format!("error adding path {} to watcher: {e}", path.display())))?;
+    watcher.watch(path, mode).map_err(|e| {
+        ConnectError::internal(format!(
+            "error adding path {} to watcher: {}",
+            path.display(),
+            crate::util::errno::notify_message(&e)
+        ))
+    })?;
     Ok(watcher)
 }
 
@@ -118,7 +126,7 @@ pub fn record_events(pending: &Mutex<PendingEvents>, result: notify::Result<Even
     }
     match events {
         Ok(events) => pending.events.extend(events),
-        Err(e) => pending.error = Some(format!("watcher error: {e}")),
+        Err(e) => pending.error = Some(format!("watcher error: {}", crate::util::errno::notify_message(&e))),
     }
 }
 
@@ -162,7 +170,7 @@ pub fn stream_events(
                     let event = match event {
                         Some(Ok(event)) => event,
                         Some(Err(e)) => {
-                            let _ = responses.send(Err(ConnectError::internal(format!("watcher error: {e}")))).await;
+                            let _ = responses.send(Err(ConnectError::internal(format!("watcher error: {}", crate::util::errno::notify_message(&e))))).await;
                             return;
                         }
                         None => return,

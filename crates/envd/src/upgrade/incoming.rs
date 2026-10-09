@@ -29,7 +29,7 @@ fn resume_frozen(state: &Arc<AppState>) -> Result<Option<HandoverReport>, String
     let blob = match std::fs::read(HANDOVER_PATH) {
         Ok(blob) => blob,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("read handover: {e}")),
+        Err(e) => return Err(format!("read handover: {}", crate::util::errno::message(&e))),
     };
     let handover = HandoverState::decode_from_slice(&blob).map_err(|e| format!("unmarshal handover: {e}"))?;
     if handover.schema > MAX_SCHEMA {

@@ -96,21 +96,22 @@ fn remove_cert(bundle: &Path, cert: &str) -> Result<(), String> {
     let mut temporary = tempfile::Builder::new()
         .prefix("ca-bundle-")
         .tempfile_in(directory)
-        .map_err(|e| format!("create temp file: {e}"))?;
+        .map_err(|e| format!("create temp file: {}", crate::util::errno::message(&e)))?;
     temporary
         .write_all(content.replace(cert, "").as_bytes())
-        .map_err(|e| format!("write temp file: {e}"))?;
+        .map_err(|e| format!("write temp file: {}", crate::util::errno::message(&e)))?;
     set_mode(temporary.path())?;
     temporary
         .persist(bundle)
         .map(|_| ())
-        .map_err(|e| format!("rename temp file: {}", e.error))
+        .map_err(|e| format!("rename temp file: {}", crate::util::errno::message(&e.error)))
 }
 
 fn set_mode(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).map_err(|e| format!("chmod temp file: {e}"))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+        .map_err(|e| format!("chmod temp file: {}", crate::util::errno::message(&e)))
 }
 
 #[cfg(test)]

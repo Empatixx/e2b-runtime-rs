@@ -19,7 +19,8 @@ struct Region {
 
 #[cfg(target_os = "linux")]
 pub fn collapse_self() -> Result<CollapseStats, String> {
-    let maps = std::fs::read_to_string("/proc/self/maps").map_err(|e| format!("read self maps: {e}"))?;
+    let maps = std::fs::read_to_string("/proc/self/maps")
+        .map_err(|e| format!("read self maps: {}", crate::util::errno::message(&e)))?;
     let before = anon_huge_pages_bytes();
     let mut stats = CollapseStats::default();
     let mut successes = 0;

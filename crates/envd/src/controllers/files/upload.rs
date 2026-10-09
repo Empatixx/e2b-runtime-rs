@@ -251,7 +251,7 @@ async fn write_file(upload: &Upload, path: &Path, content: Chunks) -> Result<(),
                 .build(),
             _ => ErrorResponse::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .message(format!("error writing file: {e}"))
+                .message(format!("error writing file: {}", crate::util::errno::message(&e)))
                 .build(),
         })?;
 
@@ -264,12 +264,18 @@ async fn write_file(upload: &Upload, path: &Path, content: Chunks) -> Result<(),
         Err(e) if matches!(e.kind(), io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded) => {
             Err(ErrorResponse::builder()
                 .status(StatusCode::INSUFFICIENT_STORAGE)
-                .message(format!("not enough space for file metadata: {e}"))
+                .message(format!(
+                    "not enough space for file metadata: {}",
+                    crate::util::errno::message(&e)
+                ))
                 .build())
         }
         Err(e) => Err(ErrorResponse::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .message(format!("error writing file metadata: {e}"))
+            .message(format!(
+                "error writing file metadata: {}",
+                crate::util::errno::message(&e)
+            ))
             .build()),
     }
 }

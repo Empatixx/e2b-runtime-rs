@@ -176,11 +176,11 @@ fn exec(handover: &HandoverState, new_bin: Option<&str>) -> String {
         .open(HANDOVER_PATH)
         .and_then(|mut file| std::io::Write::write_all(&mut file, &blob));
     if let Err(e) = written {
-        return format!("write handover: {e}");
+        return format!("write handover: {}", crate::util::errno::message(&e));
     }
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
-        Err(e) => return format!("resolve executable: {e}"),
+        Err(e) => return format!("resolve executable: {}", crate::util::errno::message(&e)),
     };
     let bin = new_bin.map_or(executable, std::path::PathBuf::from);
     let error = std::process::Command::new(&bin)

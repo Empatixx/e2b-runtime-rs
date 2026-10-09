@@ -15,7 +15,7 @@ pub async fn combined_output(program: &str, args: &[&str]) -> Result<String, Com
         .map_err(|e| CommandFailure {
             error: match e.kind() {
                 std::io::ErrorKind::NotFound => format!("exec: {program:?}: executable file not found in $PATH"),
-                _ => e.to_string(),
+                _ => crate::util::errno::message(&e),
             },
             output: String::new(),
         })?;

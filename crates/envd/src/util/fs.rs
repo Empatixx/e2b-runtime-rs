@@ -8,13 +8,7 @@ pub fn os_error(op: &str, path: &Path, err: &io::Error) -> String {
 }
 
 pub fn reason(err: &io::Error) -> String {
-    err.raw_os_error()
-        .map(|code| nix::errno::Errno::from_raw(code).desc())
-        .map(|desc| {
-            let first = desc.chars().take(1).flat_map(char::to_lowercase);
-            first.chain(desc.chars().skip(1)).collect()
-        })
-        .unwrap_or_else(|| err.to_string())
+    super::errno::message(err)
 }
 
 pub fn clean(path: &Path) -> PathBuf {

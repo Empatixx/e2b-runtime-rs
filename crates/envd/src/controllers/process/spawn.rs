@@ -92,7 +92,8 @@ impl Process {
 
     pub async fn resize(&self, rows: u32, cols: u32) -> Result<(), String> {
         let pty = self.pty.as_ref().ok_or("tty not assigned to process")?;
-        pty.resize(rows as u16, cols as u16).map_err(|e| e.to_string())
+        pty.resize(rows as u16, cols as u16)
+            .map_err(|e| crate::util::errno::message(&e))
     }
 
     pub fn signal(&self, signal: Signal) -> Result<(), String> {
@@ -491,7 +492,7 @@ pub fn end_event(status: io::Result<ExitStatus>) -> EndEvent {
         Err(e) => {
             return EndEvent {
                 exit_code: -1,
-                error: Some(e.to_string()),
+                error: Some(crate::util::errno::message(&e)),
                 ..Default::default()
             };
         }

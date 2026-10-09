@@ -40,6 +40,31 @@ jobs:
         env:
           E2B_SDK_DIR: ${{ runner.temp }}/e2b-sdk
 
+  envd-musl:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler musl-tools file
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          components: clippy
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo clippy -p envd --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo build --release --locked -p envd --target ${{ matrix.target }}
+      - run: file target/${{ matrix.target }}/release/envd | tee /dev/stderr | grep -q "statically linked"
+      - run: cargo test -p envd --target ${{ matrix.target }}
+
   kvm-spike:
     runs-on: ubuntu-24.04
     steps:
