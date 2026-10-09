@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use semver::Version;
+
 const MIN_FOR_SNAPSHOT: &str = "0.5.0";
 
 pub fn check_for_snapshot(envd_version: &str) -> Result<(), String> {
@@ -16,9 +18,9 @@ pub fn check_for_snapshot(envd_version: &str) -> Result<(), String> {
 pub fn is_at_least(current: &str, minimum: &str) -> Result<bool, String> {
     let current = sanitized(current);
     let minimum = sanitized(minimum);
-    let current = Version::parse(&current).ok_or_else(|| format!("invalid current version format: {current}"))?;
-    let minimum = Version::parse(&minimum).ok_or_else(|| format!("invalid minimum version format: {minimum}"))?;
-    Ok(current.compare(&minimum) != Ordering::Less)
+    let current = go_semver(&current).ok_or_else(|| format!("invalid current version format: {current}"))?;
+    let minimum = go_semver(&minimum).ok_or_else(|| format!("invalid minimum version format: {minimum}"))?;
+    Ok(current.cmp_precedence(&minimum) != Ordering::Less)
 }
 
 fn sanitized(version: &str) -> String {
@@ -28,85 +30,15 @@ fn sanitized(version: &str) -> String {
     }
 }
 
-struct Version<'a> {
-    numbers: [&'a str; 3],
-    prerelease: Option<&'a str>,
-}
-
-impl<'a> Version<'a> {
-    fn parse(text: &'a str) -> Option<Self> {
-        let rest = text.strip_prefix('v')?;
-        let (rest, build) = rest
-            .split_once('+')
-            .map_or((rest, None), |(rest, build)| (rest, Some(build)));
-        let (core, prerelease) = rest
-            .split_once('-')
-            .map_or((rest, None), |(core, prerelease)| (core, Some(prerelease)));
-        let parts: Vec<&str> = core.split('.').collect();
-        let full = parts.len() == 3;
-        let valid = (1..=3).contains(&parts.len())
-            && parts.iter().all(|part| is_number(part))
-            && (full || (prerelease.is_none() && build.is_none()))
-            && prerelease.is_none_or(|prerelease| identifiers_valid(prerelease, true))
-            && build.is_none_or(|build| identifiers_valid(build, false));
-        valid.then(|| Version {
-            numbers: [0, 1, 2].map(|index| parts.get(index).copied().unwrap_or("0")),
-            prerelease,
-        })
-    }
-
-    fn compare(&self, other: &Version) -> Ordering {
-        self.numbers
-            .iter()
-            .zip(other.numbers)
-            .map(|(left, right)| compare_numbers(left, right))
-            .find(|ordering| ordering.is_ne())
-            .unwrap_or_else(|| compare_prereleases(self.prerelease, other.prerelease))
-    }
-}
-
-fn is_number(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) && (text == "0" || !text.starts_with('0'))
-}
-
-fn identifiers_valid(text: &str, numeric_without_leading_zero: bool) -> bool {
-    text.split('.').all(|identifier| {
-        !identifier.is_empty()
-            && identifier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            && (!numeric_without_leading_zero
-                || !identifier.bytes().all(|byte| byte.is_ascii_digit())
-                || is_number(identifier))
-    })
-}
-
-fn compare_numbers(left: &str, right: &str) -> Ordering {
-    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-}
-
-fn compare_prereleases(left: Option<&str>, right: Option<&str>) -> Ordering {
-    match (left, right) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => left
-            .split('.')
-            .zip(right.split('.'))
-            .map(|(left, right)| compare_identifiers(left, right))
-            .find(|ordering| ordering.is_ne())
-            .unwrap_or_else(|| left.split('.').count().cmp(&right.split('.').count())),
-    }
-}
-
-fn compare_identifiers(left: &str, right: &str) -> Ordering {
-    let numeric = |identifier: &str| identifier.bytes().all(|byte| byte.is_ascii_digit());
-    match (numeric(left), numeric(right)) {
-        (true, true) => compare_numbers(left, right),
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => left.cmp(right),
-    }
+fn go_semver(text: &str) -> Option<Version> {
+    let rest = text.strip_prefix('v')?;
+    let padding = match rest.split('.').count() {
+        1 => ".0.0",
+        2 => ".0",
+        _ => "",
+    };
+    (padding.is_empty() || !rest.contains(['-', '+'])).then_some(())?;
+    Version::parse(&format!("{rest}{padding}")).ok()
 }
 
 #[cfg(test)]
@@ -163,16 +95,16 @@ mod tests {
             "v1.0.0",
         ];
         order.windows(2).for_each(|pair| {
-            let left = Version::parse(pair[0]).unwrap();
-            let right = Version::parse(pair[1]).unwrap();
-            assert_eq!(left.compare(&right), Ordering::Less, "{} < {}", pair[0], pair[1]);
+            let left = go_semver(pair[0]).unwrap();
+            let right = go_semver(pair[1]).unwrap();
+            assert_eq!(left.cmp_precedence(&right), Ordering::Less, "{} < {}", pair[0], pair[1]);
         });
-        let release = Version::parse("v1.2.0").unwrap();
-        assert_eq!(Version::parse("v1.2").unwrap().compare(&release), Ordering::Equal);
+        let release = go_semver("v1.2.0").unwrap();
+        assert_eq!(go_semver("v1.2").unwrap().cmp_precedence(&release), Ordering::Equal);
         assert_eq!(
-            Version::parse("v1.2.0+build").unwrap().compare(&release),
+            go_semver("v1.2.0+build").unwrap().cmp_precedence(&release),
             Ordering::Equal
         );
-        assert!(Version::parse("v1.2+build").is_none());
+        assert!(go_semver("v1.2+build").is_none());
     }
 }
