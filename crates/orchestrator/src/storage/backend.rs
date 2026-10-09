@@ -1,5 +1,6 @@
 pub mod aws;
 pub mod azure;
+mod blocking;
 mod credential_cache;
 pub mod gcs;
 pub(crate) mod pem;

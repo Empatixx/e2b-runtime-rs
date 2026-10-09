@@ -19,7 +19,6 @@ pub struct ExternalAccountFile {
     pub credential_source: Option<CredentialSource>,
     pub service_account_impersonation: Option<ImpersonationInfo>,
     pub workforce_pool_user_project: String,
-    pub universe_domain: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -94,10 +93,9 @@ impl ExternalAccountFile {
     }
 
     pub fn resolved_token_url(&self) -> String {
-        match (self.token_url.as_str(), self.universe_domain.as_str()) {
-            ("", "") => STS_URL.replacen("UNIVERSE_DOMAIN", DEFAULT_UNIVERSE, 1),
-            ("", universe) => STS_URL.replacen("UNIVERSE_DOMAIN", universe, 1),
-            (url, _) => url.to_owned(),
+        match self.token_url.as_str() {
+            "" => STS_URL.replacen("UNIVERSE_DOMAIN", DEFAULT_UNIVERSE, 1),
+            url => url.to_owned(),
         }
     }
 
@@ -154,11 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn the_sts_url_follows_the_universe_domain() {
+    fn the_sts_url_ignores_the_universe_domain() {
         assert_eq!(file("{}").resolved_token_url(), "https://sts.googleapis.com/v1/token");
         assert_eq!(
             file(r#"{"universe_domain":"example.com"}"#).resolved_token_url(),
-            "https://sts.example.com/v1/token"
+            "https://sts.googleapis.com/v1/token"
         );
         assert_eq!(file(r#"{"token_url":"http://sts"}"#).resolved_token_url(), "http://sts");
     }

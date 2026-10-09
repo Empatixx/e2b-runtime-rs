@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 const CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
-const CONFIG_DIRECTORY_ENV: &str = "CLOUDSDK_CONFIG";
 const WELL_KNOWN_FILE: &str = "application_default_credentials.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +14,7 @@ impl AdcFile {
     pub fn locate(env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         match env(CREDENTIALS_ENV).filter(|path| !path.is_empty()) {
             Some(path) => Self::read(Path::new(&path), true).map(Some),
-            None => Ok(well_known_path(env).and_then(|path| Self::read(&path, false).ok())),
+            None => Ok(Self::read(&well_known_path(env), false).ok()),
         }
     }
 
@@ -30,13 +29,19 @@ impl AdcFile {
     }
 }
 
-fn well_known_path(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    match env(CONFIG_DIRECTORY_ENV).filter(|dir| !dir.is_empty()) {
-        Some(dir) => Some(Path::new(&dir).join(WELL_KNOWN_FILE)),
-        None => env("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| Path::new(&home).join(".config/gcloud").join(WELL_KNOWN_FILE)),
-    }
+fn well_known_path(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    let home = env("HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(current_user_home)
+        .unwrap_or_default();
+    Path::new(&home).join(".config/gcloud").join(WELL_KNOWN_FILE)
+}
+
+pub fn current_user_home() -> Option<String> {
+    nix::unistd::User::from_uid(nix::unistd::Uid::current())
+        .ok()
+        .flatten()
+        .map(|user| user.dir.display().to_string())
 }
 
 #[cfg(test)]
@@ -57,11 +62,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("creds.json");
         std::fs::write(&file, b"{}").unwrap();
-        std::fs::write(dir.path().join(WELL_KNOWN_FILE), b"well-known").unwrap();
+        std::fs::create_dir_all(dir.path().join(".config/gcloud")).unwrap();
+        std::fs::write(dir.path().join(".config/gcloud").join(WELL_KNOWN_FILE), b"well-known").unwrap();
 
         let located = AdcFile::locate(&env_of(vec![
             (CREDENTIALS_ENV, file.display().to_string()),
-            (CONFIG_DIRECTORY_ENV, dir.path().display().to_string()),
+            ("HOME", dir.path().display().to_string()),
         ]))
         .unwrap()
         .unwrap();
@@ -77,11 +83,12 @@ mod tests {
     #[test]
     fn the_well_known_file_is_optional() {
         let dir = tempfile::tempdir().unwrap();
-        let empty = AdcFile::locate(&env_of(vec![(CONFIG_DIRECTORY_ENV, dir.path().display().to_string())]));
+        let empty = AdcFile::locate(&env_of(vec![("HOME", dir.path().display().to_string())]));
         assert_eq!(empty, Ok(None));
 
-        std::fs::write(dir.path().join(WELL_KNOWN_FILE), b"x").unwrap();
-        let found = AdcFile::locate(&env_of(vec![(CONFIG_DIRECTORY_ENV, dir.path().display().to_string())]))
+        std::fs::create_dir_all(dir.path().join(".config/gcloud")).unwrap();
+        std::fs::write(dir.path().join(".config/gcloud").join(WELL_KNOWN_FILE), b"x").unwrap();
+        let found = AdcFile::locate(&env_of(vec![("HOME", dir.path().display().to_string())]))
             .unwrap()
             .unwrap();
 

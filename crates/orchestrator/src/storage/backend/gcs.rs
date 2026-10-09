@@ -1,13 +1,14 @@
 pub mod adc;
 pub mod external_account;
 pub mod flows;
+mod key_errors;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ring::rand::SystemRandom;
-use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+use ring::signature::RSA_PKCS1_SHA256;
 use serde::Deserialize;
 
 use super::pem;
@@ -19,7 +20,6 @@ const SERVICE_ACCOUNT_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_BASE64";
 const EMULATOR_HOST_ENV: &str = "STORAGE_EMULATOR_HOST";
 const DEFAULT_HOST: &str = "storage.googleapis.com";
 const SERVICE_ACCOUNT_TYPE: &str = "storage.gcpServiceToken";
-const KEY_SYNTAX_ERROR: &str = "asn1: syntax error: sequence truncated";
 const MISSING_ACCESS_ID: &str = "storage: missing required GoogleAccessID";
 
 #[derive(Debug, Clone)]
@@ -57,12 +57,7 @@ impl ServiceAccountSigner {
     }
 
     fn service_account(&self) -> Result<ServiceAccount, String> {
-        let decoded = STANDARD.decode(&self.service_account_base64).map_err(|e| {
-            format!(
-                "failed to decode base64: {}",
-                base64_error(&self.service_account_base64, e)
-            )
-        })?;
+        let decoded = decode_ignoring_newlines(&self.service_account_base64)?;
         serde_json::from_slice(&decoded)
             .map_err(|e| format!("failed to parse service account JSON: {}", json_error(&e)))
     }
@@ -91,6 +86,30 @@ impl ServiceAccountSigner {
     }
 }
 
+fn decode_ignoring_newlines(encoded: &str) -> Result<Vec<u8>, String> {
+    let stripped: String = encoded.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+    STANDARD.decode(&stripped).map_err(|e| {
+        let message = base64_error(&stripped, e);
+        let offset = message
+            .rsplit(' ')
+            .next()
+            .and_then(|digits| digits.parse::<usize>().ok());
+        let original = offset.map(|offset| original_offset(encoded, offset));
+        match original {
+            Some(offset) => format!("failed to decode base64: illegal base64 data at input byte {offset}"),
+            None => format!("failed to decode base64: {message}"),
+        }
+    })
+}
+
+fn original_offset(encoded: &str, stripped_offset: usize) -> usize {
+    encoded
+        .char_indices()
+        .filter(|(_, c)| !matches!(c, '\r' | '\n'))
+        .nth(stripped_offset)
+        .map_or(encoded.len(), |(index, _)| index)
+}
+
 fn string_to_sign(expires: u64, resource: &str) -> String {
     format!("PUT\n\n\n{expires}\n{resource}")
 }
@@ -105,9 +124,7 @@ fn host() -> String {
 
 fn sign(private_key: &str, message: &str) -> Result<String, String> {
     let der = private_key_der(private_key);
-    let key = RsaKeyPair::from_pkcs8(&der)
-        .or_else(|_| RsaKeyPair::from_der(&der))
-        .map_err(|_| KEY_SYNTAX_ERROR.to_owned())?;
+    let key = key_errors::rsa_key(&der)?;
     let mut signature = vec![0; key.public().modulus_len()];
     key.sign(
         &RSA_PKCS1_SHA256,
@@ -208,7 +225,7 @@ mod tests {
             signer(&secret)
                 .upload_url("t/memfile", Duration::from_secs(60))
                 .unwrap_err(),
-            "failed to create signed URL for GCS object (t/memfile): asn1: syntax error: sequence truncated"
+            "failed to create signed URL for GCS object (t/memfile): asn1: structure error: tags don't match (16 vs {class:1 tag:14 length:111 isCompound:true}) {optional:false explicit:false application:false private:false defaultValue:<nil> tag:<nil> stringType:0 timeType:0 set:false omitEmpty:false} pkcs1PrivateKey @2"
         );
     }
 
@@ -234,7 +251,7 @@ mod tests {
 
     #[test]
     fn signatures_verify_against_the_public_key() {
-        use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
+        use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaKeyPair, UnparsedPublicKey};
         let der = private_key_der(TEST_KEY);
         let key = RsaKeyPair::from_pkcs8(&der).unwrap();
         let message = string_to_sign(1_700_000_000, "/bucket/t/memfile");

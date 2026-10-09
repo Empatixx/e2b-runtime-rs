@@ -32,7 +32,30 @@ struct FileType {
     r#type: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ClientCredentials {
+    web: Option<RedirectConfig>,
+    installed: Option<RedirectConfig>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RedirectConfig {
+    redirect_uris: Vec<String>,
+}
+
+fn is_client_credentials(json: &[u8]) -> bool {
+    serde_json::from_slice::<ClientCredentials>(json)
+        .ok()
+        .and_then(|creds| creds.web.or(creds.installed))
+        .is_some_and(|config| !config.redirect_uris.is_empty())
+}
+
 pub fn build(json: &[u8], scopes: &[&str]) -> Result<Arc<dyn TokenFlow>, String> {
+    if is_client_credentials(json) {
+        return Err("credentials: auth handler must be specified for this credential filetype".to_owned());
+    }
     let kind = serde_json::from_slice::<FileType>(json)
         .map_err(|e| e.to_string())?
         .r#type;

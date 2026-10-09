@@ -41,16 +41,7 @@ impl AwsDefaults {
     }
 
     pub fn blocking_region() -> Option<String> {
-        std::thread::spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()
-                .and_then(|runtime| runtime.block_on(async { Self::load().await.region() }))
-        })
-        .join()
-        .ok()
-        .flatten()
+        super::blocking::run(async { Self::load().await.region() }).flatten()
     }
 }
 

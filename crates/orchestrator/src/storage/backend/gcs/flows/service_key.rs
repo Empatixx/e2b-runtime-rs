@@ -5,8 +5,6 @@ use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 
 use crate::storage::backend::pem;
 
-const PARSE_ERROR: &str = "failed to parse private key. Tried PKCS8, PKCS1, and EC formats. Errors: [PKCS8: asn1: syntax error: data truncated], [PKCS1: asn1: syntax error: data truncated], [EC: asn1: syntax error: data truncated]";
-
 pub enum ServiceKey {
     Rsa(RsaKeyPair),
     P256(p256::ecdsa::SigningKey),
@@ -22,7 +20,7 @@ impl ServiceKey {
         Self::pkcs8(&der)
             .or_else(|| RsaKeyPair::from_der(&der).ok().map(Self::Rsa))
             .or_else(|| Self::sec1(&der))
-            .ok_or_else(|| PARSE_ERROR.to_owned())
+            .ok_or_else(|| super::super::key_errors::parse_key_failure(&der))
     }
 
     fn pkcs8(der: &[u8]) -> Option<Self> {
