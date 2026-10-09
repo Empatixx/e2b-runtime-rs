@@ -1,9 +1,11 @@
+mod envd_binary;
 mod flags;
 mod settings;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use envd_binary::{envd_version, resolve_build_binary};
 pub use flags::BuildFlags;
 pub use settings::BuildSettings;
 

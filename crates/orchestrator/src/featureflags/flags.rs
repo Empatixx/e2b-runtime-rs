@@ -38,6 +38,36 @@ pub fn resume_prefetch_source() -> StringFlag {
     Flag::new("resume-prefetch-source", "init".to_owned())
 }
 
+pub const USE_MEMFD: BoolFlag = Flag::new("use-memfd", true);
+pub const MEMORY_PREFETCH_MAX_FETCH_WORKERS: IntFlag = Flag::new("memory-prefetch-max-fetch-workers", 16);
+pub const MEMORY_PREFETCH_MAX_COPY_WORKERS: IntFlag = Flag::new("memory-prefetch-max-copy-workers", 8);
+pub const MEMORY_PREFETCH_COALESCE_MAX_MB: IntFlag = Flag::new("memory-prefetch-coalesce-max-mb", 0);
+pub const ENVD_INIT_REQUEST_TIMEOUT_MILLISECONDS: IntFlag = Flag::new("envd-init-request-timeout-milliseconds", 50);
+pub const BUILD_CACHE_MAX_USAGE_PERCENTAGE: IntFlag = Flag::new("build-cache-max-usage-percentage", 85);
+
+const DEFAULT_ENVD_TIMEOUT_MS: i64 = 10_000;
+const DEFAULT_ENVD_VERSION: &str = "promoted";
+
+pub fn envd_timeout_milliseconds() -> IntFlag {
+    Flag::new("envd-timeout-milliseconds", envd_timeout_fallback_ms())
+}
+
+fn envd_timeout_fallback_ms() -> i64 {
+    std::env::var("ENVD_TIMEOUT")
+        .ok()
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| crate::go_time::parse_duration(&raw).ok())
+        .map_or(DEFAULT_ENVD_TIMEOUT_MS, |nanos| nanos / 1_000_000)
+}
+
+pub fn build_envd_version() -> StringFlag {
+    let fallback = std::env::var("DEFAULT_ENVD_VERSION")
+        .ok()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| DEFAULT_ENVD_VERSION.to_owned());
+    Flag::new("build-envd-version", fallback)
+}
+
 pub fn build_kernel_version(fallback: &str) -> StringFlag {
     Flag::new("build-kernel-version", fallback.to_owned())
 }

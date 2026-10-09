@@ -5,10 +5,11 @@ use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
 
-use super::{Node, parents};
+use super::{BUILD_SANDBOX_TYPE, Node, parents};
 use crate::block::build_file::{Artifact, BuildFile};
 use crate::block::overlay::Overlay;
 use crate::envd::{EnvdDefaults, EnvdInit};
+use crate::featureflags::FlagContext;
 use crate::firecracker::version::supports_memfd;
 use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::snapshot::filesystem::FilesystemSnapshot;
@@ -121,7 +122,17 @@ impl Node {
             .build_sandbox(layer.sandbox_id, layer.template_id)
             .rootfs(self.layer_overlay(&layer.source.build, &work_dir)?)
             .memfile(memfile)
-            .use_memfd(self.use_memfd && supports_memfd(layer.firecracker_version))
+            .use_memfd(
+                supports_memfd(layer.firecracker_version)
+                    && self.runtime_flags.use_memfd(FlagContext::sandbox_runtime(
+                        layer.sandbox_id,
+                        layer.template_id,
+                        &layer.source.metadata.template.kernel_version,
+                        layer.firecracker_version,
+                        "",
+                        BUILD_SANDBOX_TYPE,
+                    )),
+            )
             .envd(self.build_envd(EnvdDefaults {
                 user: super::default_user(Some(&layer.source.metadata)),
                 workdir: None,
@@ -134,6 +145,7 @@ impl Node {
             default_workdir: defaults.workdir,
             lifecycle_id: Some(Uuid::new_v4().to_string()),
             hyperloop_ip: Some(self.orchestrator_ip.clone()),
+            request_timeout: Some(self.runtime_flags.envd_init_request_timeout()),
             ..EnvdInit::default()
         }
     }

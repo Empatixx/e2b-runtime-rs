@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::FutureExt;
 use uuid::Uuid;
 
-use super::config::BuildSettings;
+use super::config::{BuildSettings, envd_version};
 use super::ext4::{BLOCK_SIZE, Ext4};
 use super::index::LayerIndex;
 use super::logs::ScopedLog;
@@ -21,7 +21,6 @@ use crate::envd::EnvdDefaults;
 use crate::envd::files::copy_file;
 use crate::envd::process::CommandContext;
 use crate::envd::version::is_at_least;
-use crate::go_exec::GoCommand;
 use crate::network::pool::SlotLease;
 use crate::network::slot::{HostSlots, Slot};
 use crate::proto::LogLevel;
@@ -49,15 +48,6 @@ const RESTART_ENVD: &str = "if command -v systemctl >/dev/null 2>&1; then
 else
     kill -TERM \"$(pidof envd)\"
 fi";
-
-pub async fn envd_version(envd: &Path) -> Result<String, String> {
-    GoCommand::new(envd)
-        .args(["-version"])
-        .run()
-        .await
-        .map(|output| String::from_utf8_lossy(&output).trim().to_owned())
-        .map_err(|e| format!("error while getting envd version: {}", e.message))
-}
 
 pub async fn update_envd(log: &ScopedLog<'_>, sandbox: &mut Sandbox, host_envd: &Path) -> Result<(), String> {
     let version = envd_version(host_envd)
@@ -163,7 +153,7 @@ impl LayerExecutor<'_> {
             .map_err(snapshot_error)?;
         let mut sandbox = self.create_sandbox(&build, &source).await?;
         if build.update_envd
-            && let Err(e) = update_envd(self.log, &mut sandbox, &self.env.config.envd).await
+            && let Err(e) = update_envd(self.log, &mut sandbox, &self.settings.envd).await
         {
             tracing::error!(error = %e, "error updating envd");
             return Err(fail(sandbox, BuildError::Internal(format!("update envd: {e}"))).await);

@@ -51,10 +51,14 @@ mod serve {
         }
         let node = Arc::new(Node::new(&config)?);
         let _gauges = NodeGauges::register(NodeSource {
-            running: Arc::new({
+            sandboxes: {
                 let node = node.clone();
-                move || node.running_configs()
-            }),
+                Arc::new(move || node.registry.len())
+            },
+            allocated: {
+                let node = node.clone();
+                Arc::new(move || node.allocated())
+            },
             max_sandboxes: node.max_sandboxes.clone(),
             status: node.status.clone(),
             version: orchestrator::version().to_owned(),
@@ -138,7 +142,7 @@ mod serve {
                 sandbox_count = node.registry.running().len(),
                 "Starting sandbox drain phase"
             );
-            drain(|| node.registry.is_empty(), std::future::pending()).await;
+            drain(|| node.registry.len(), std::future::pending()).await;
             node.shutdown().await;
         }
         let _ = stop.send(());
@@ -150,9 +154,6 @@ mod serve {
         feature_flags.close().await;
         if let Some((events, host_stats)) = &clickhouse {
             tokio::join!(events.stop(), host_stats.stop());
-        }
-        if let Err(e) = telemetry.shutdown() {
-            tracing::error!(error = %e, "error while shutting down telemetry");
         }
         served
     }

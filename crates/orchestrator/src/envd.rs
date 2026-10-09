@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 pub const ENVD_PORT: u16 = 49983;
 const RETRY_DELAY: Duration = Duration::from_millis(5);
-const ATTEMPT_TIMEOUT: Duration = Duration::from_millis(50);
+const DEFAULT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Default)]
 pub struct EnvdDefaults {
@@ -37,6 +37,7 @@ pub struct EnvdInit {
     pub lifecycle_id: Option<String>,
     pub hyperloop_ip: Option<String>,
     pub volume_mounts: Vec<VolumeMount>,
+    pub request_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -95,7 +96,10 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
 }
 
 async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<u16, String> {
-    let budget = ATTEMPT_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+    let budget = settings
+        .request_timeout
+        .unwrap_or(DEFAULT_ATTEMPT_TIMEOUT)
+        .min(deadline.saturating_duration_since(Instant::now()));
     tokio::time::timeout(budget, post_init(address, settings))
         .await
         .unwrap_or_else(|_| Err(format!("attempt timed out after {budget:?}")))

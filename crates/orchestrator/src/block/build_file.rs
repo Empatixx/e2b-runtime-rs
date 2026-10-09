@@ -210,9 +210,9 @@ impl DiffStore {
         self.evict(usage.is_some_and(|usage| usage > max_usage_percent))
     }
 
-    pub async fn run_eviction(self: Arc<Self>, max_usage_percent: f64) {
+    pub async fn run_eviction(self: Arc<Self>, max_usage_percent: impl Fn() -> f64) {
         loop {
-            let doomed = self.evict_under_pressure(max_usage_percent);
+            let doomed = self.evict_under_pressure(max_usage_percent());
             tokio::time::sleep(if doomed { EVICTION_FAST_TICK } else { EVICTION_TICK }).await;
         }
     }

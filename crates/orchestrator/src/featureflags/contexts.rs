@@ -101,6 +101,25 @@ impl FlagContext {
             .build()
     }
 
+    pub fn sandbox_runtime(
+        sandbox_id: &str,
+        template_id: &str,
+        kernel_version: &str,
+        firecracker_version: &str,
+        envd_version: &str,
+        sandbox_type: &str,
+    ) -> Self {
+        Self::builder()
+            .kind("sandbox")
+            .key(sandbox_id)
+            .attribute("template-id", template_id)
+            .attribute("kernel-version", kernel_version)
+            .attribute("firecracker-version", firecracker_version)
+            .attribute("envd-version", envd_version)
+            .attribute("sandbox-type", sandbox_type)
+            .build()
+    }
+
     pub fn kind(&self) -> &str {
         &self.kind
     }

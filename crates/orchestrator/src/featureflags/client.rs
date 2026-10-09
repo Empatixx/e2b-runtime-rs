@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use launchdarkly_server_sdk::{Client, ConfigBuilder, Context};
+use launchdarkly_server_sdk::{Client, ConfigBuilder, Context, Detail, Reason};
 use serde_json::Value;
 
 use super::contexts::{FlagContext, merge_contexts};
@@ -12,13 +12,13 @@ pub const LAUNCH_DARKLY_API_KEY: &str = "LAUNCH_DARKLY_API_KEY";
 pub const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait FlagValue: Clone {
-    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Self;
+    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Detail<Self>;
     fn from_json(value: &Value) -> Option<Self>;
 }
 
 impl FlagValue for bool {
-    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Self {
-        client.bool_variation(context, key, fallback)
+    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Detail<Self> {
+        client.bool_variation_detail(context, key, fallback)
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -27,8 +27,8 @@ impl FlagValue for bool {
 }
 
 impl FlagValue for i64 {
-    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Self {
-        client.int_variation(context, key, fallback)
+    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Detail<Self> {
+        client.int_variation_detail(context, key, fallback)
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -37,8 +37,8 @@ impl FlagValue for i64 {
 }
 
 impl FlagValue for String {
-    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Self {
-        client.str_variation(context, key, fallback)
+    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Detail<Self> {
+        client.str_variation_detail(context, key, fallback)
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -47,8 +47,8 @@ impl FlagValue for String {
 }
 
 impl FlagValue for Value {
-    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Self {
-        client.json_variation(context, key, fallback)
+    fn evaluate(client: &Client, context: &Context, key: &str, fallback: Self) -> Detail<Self> {
+        client.json_variation_detail(context, key, fallback)
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -67,13 +67,25 @@ pub struct FeatureFlags {
     connection: Arc<Connection>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct FeatureFlagsBuilder {
     api_key: String,
     deployment_name: String,
     service_name: String,
     context_providers: Vec<FlagContext>,
     overrides: HashMap<String, Value>,
+}
+
+impl std::fmt::Debug for FeatureFlagsBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeatureFlagsBuilder")
+            .field("api_key", &(!self.api_key.is_empty()).then_some("<redacted>"))
+            .field("deployment_name", &self.deployment_name)
+            .field("service_name", &self.service_name)
+            .field("context_providers", &self.context_providers)
+            .field("overrides", &self.overrides)
+            .finish()
+    }
 }
 
 impl FeatureFlagsBuilder {
@@ -107,17 +119,16 @@ impl FeatureFlagsBuilder {
     }
 
     pub async fn connect(self) -> Result<FeatureFlags, String> {
-        let launch_darkly = match self.api_key.as_str() {
-            "" => None,
-            api_key => Some(start(api_key).await?),
-        };
-        Ok(FeatureFlags {
-            connection: Arc::new(Connection {
-                launch_darkly,
-                overrides: HashMap::new(),
-                extra_contexts: self.extra_contexts(),
+        match self.api_key.as_str() {
+            "" => Ok(self.offline()),
+            api_key => Ok(FeatureFlags {
+                connection: Arc::new(Connection {
+                    launch_darkly: Some(start(api_key).await?),
+                    overrides: HashMap::new(),
+                    extra_contexts: self.extra_contexts(),
+                }),
             }),
-        })
+        }
     }
 
     pub fn offline(self) -> FeatureFlags {
@@ -172,7 +183,13 @@ impl FeatureFlags {
     pub fn get<T: FlagValue>(&self, flag: &Flag<T>, contexts: &[FlagContext]) -> T {
         match &self.connection.launch_darkly {
             None => self.override_of(flag).unwrap_or_else(|| flag.fallback.clone()),
-            Some(client) => T::evaluate(client, &self.context_for(contexts), flag.key, flag.fallback.clone()),
+            Some(client) => {
+                let detail = T::evaluate(client, &self.context_for(contexts), flag.key, flag.fallback.clone());
+                if let Reason::Error { error } = &detail.reason {
+                    tracing::warn!(error = ?error, flag = flag.key, "error evaluating flag");
+                }
+                detail.value.unwrap_or_else(|| flag.fallback.clone())
+            }
         }
     }
 

@@ -241,7 +241,7 @@ mod tests {
         }
     }
 
-    fn settings_with(overrides: &[(&str, serde_json::Value)]) -> BuildSettings {
+    async fn settings_with(overrides: &[(&str, serde_json::Value)]) -> BuildSettings {
         let flags = overrides
             .iter()
             .fold(crate::featureflags::FeatureFlags::builder(), |builder, (key, value)| {
@@ -252,7 +252,7 @@ mod tests {
             feature_flags: flags,
             ..crate::builder::config::BuilderConfig::from_vars(&Default::default())
         };
-        BuildSettings::resolve(&config, "template", "team")
+        BuildSettings::resolve(&config, "template", "team").await.unwrap()
     }
 
     fn template_source() -> BaseSource {
@@ -262,17 +262,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_unset_provision_version_keeps_the_files_hash_key() {
+    #[tokio::test]
+    async fn an_unset_provision_version_keeps_the_files_hash_key() {
         let request = request(image(), false);
-        let unset = base_hash(&settings_with(&[]), &request, "debian:12");
+        let unset = base_hash(&settings_with(&[]).await, &request, "debian:12");
         let zero = base_hash(
-            &settings_with(&[("build-provision-version", 0.into())]),
+            &settings_with(&[("build-provision-version", 0.into())]).await,
             &request,
             "debian:12",
         );
         let set = base_hash(
-            &settings_with(&[("build-provision-version", 7.into())]),
+            &settings_with(&[("build-provision-version", 7.into())]).await,
             &request,
             "debian:12",
         );
@@ -291,10 +291,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn memory_protection_enters_the_key_only_for_a_build_from_an_image() {
-        let on = settings_with(&[("build-envd-memory-protection", true.into())]);
-        let off = settings_with(&[]);
+    #[tokio::test]
+    async fn memory_protection_enters_the_key_only_for_a_build_from_an_image() {
+        let on = settings_with(&[("build-envd-memory-protection", true.into())]).await;
+        let off = settings_with(&[]).await;
 
         assert_ne!(
             base_hash(&on, &request(image(), false), "debian:12"),

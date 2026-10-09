@@ -110,7 +110,7 @@ impl BaseBuild<'_> {
     fn injected_sources(&self, provision_script: String) -> InjectedSources {
         let config = &self.phase.env.config;
         InjectedSources {
-            envd: config.envd.clone(),
+            envd: self.phase.settings.envd.clone(),
             busybox: config.busybox.clone(),
             provision_script,
             memory_mb: self.phase.request.memory_mb,

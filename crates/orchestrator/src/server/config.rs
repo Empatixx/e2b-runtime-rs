@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub mod binaries;
+pub mod runtime;
 mod storage;
 
 use super::services::Services;
@@ -18,12 +18,11 @@ use crate::storage::backend::Storage;
 use crate::storage::local_upload::UploadSigner;
 use crate::storage::spec::{Provider, StorageSpec};
 use binaries::Binaries;
+use runtime::RuntimeFlags;
 use storage::StorageEnv;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
-const DEFAULT_ENVD_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_BUILD_CACHE_MAX_USAGE: f64 = 85.0;
 const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
 const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
 
@@ -50,16 +49,14 @@ pub struct NodeConfig {
     pub template_cache_dir: PathBuf,
     pub slots: RangeInclusive<u32>,
     pub local_expiry: bool,
-    pub envd_timeout: Duration,
     pub labels: Vec<String>,
     pub domain_name: String,
     pub instance_group_name: String,
     pub feature_flags: FeatureFlags,
+    pub runtime_flags: RuntimeFlags,
     pub local: bool,
     pub development: bool,
     pub force_stop: bool,
-    pub build_cache_max_usage: f64,
-    pub use_memfd: bool,
     pub services: Services,
     pub orchestrator_ip: String,
     pub hyperloop_port: u16,
@@ -120,10 +117,6 @@ impl NodeConfig {
             cache_dir,
             slots: 1..=MAX_SLOT,
             local_expiry: var("E2B_LOCAL_EXPIRY").is_some_and(|value| value == "1" || value == "true"),
-            envd_timeout: var("ENVD_TIMEOUT_MS")
-                .map(|ms| ms.parse().map_err(|_| format!("ENVD_TIMEOUT_MS is not a number: {ms}")))
-                .transpose()?
-                .map_or(Duration::from_millis(DEFAULT_ENVD_TIMEOUT_MS), Duration::from_millis),
             labels: var("NODE_LABELS")
                 .map(|labels| {
                     labels
@@ -136,12 +129,10 @@ impl NodeConfig {
             domain_name: var("DOMAIN_NAME").unwrap_or_default(),
             instance_group_name: var("INSTANCE_GROUP_NAME").unwrap_or_default(),
             feature_flags: FeatureFlags::offline(),
+            runtime_flags: RuntimeFlags::new(FeatureFlags::offline(), services.clone()),
             local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
             development: var("ENVIRONMENT").is_some_and(|environment| environment == "local" || environment == "dev"),
             force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
-            build_cache_max_usage: number(vars, "BUILD_CACHE_MAX_USAGE_PERCENTAGE")?
-                .unwrap_or(DEFAULT_BUILD_CACHE_MAX_USAGE),
-            use_memfd: var("USE_MEMFD").is_none_or(|value| value != "0" && value != "false"),
             services,
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
             hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
@@ -163,6 +154,7 @@ impl NodeConfig {
 
     pub fn with_feature_flags(mut self, feature_flags: FeatureFlags) -> Self {
         self.builder.feature_flags = feature_flags.clone();
+        self.runtime_flags = RuntimeFlags::new(feature_flags.clone(), self.services.clone());
         self.feature_flags = feature_flags;
         self
     }
@@ -266,9 +258,7 @@ mod tests {
         assert_eq!(config.node_id, "local");
         assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
         assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
-        assert_eq!(config.envd_timeout, Duration::from_secs(10));
         assert!(!config.local && !config.force_stop);
-        assert!(config.use_memfd);
         assert_eq!(
             (config.orchestrator_ip.as_str(), config.hyperloop_port),
             ("192.0.2.1", 5010)

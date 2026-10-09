@@ -19,6 +19,7 @@ use super::admission::{Admission, LIMIT_REFRESH_INTERVAL, MaxSandboxes, StartKin
 use super::build_id;
 use super::config::NodeConfig;
 use super::config::binaries::Binaries;
+use super::config::runtime::RuntimeFlags;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
@@ -33,7 +34,7 @@ use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
-use crate::featureflags::FeatureFlags;
+use crate::featureflags::{FeatureFlags, FlagContext};
 use crate::firecracker::version::supports_memfd;
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
@@ -49,6 +50,7 @@ use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::tcpfirewall::proxy::FirewallSandbox;
+use crate::telemetry::server::gauges::Allocated;
 use crate::template::cache::TemplateCache;
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
 use crate::template::{Template, TemplateError};
@@ -57,6 +59,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
 const TEMPLATE_DEFAULT_USER: &str = "user";
+const SANDBOX_TYPE: &str = "sandbox";
+pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub struct Node {
@@ -82,9 +86,7 @@ pub struct Node {
     build_kernel_version: String,
     build_firecracker_version: String,
     work_dir: PathBuf,
-    envd_timeout: Duration,
-    build_cache_max_usage: f64,
-    use_memfd: bool,
+    runtime_flags: RuntimeFlags,
     orchestrator_ip: String,
 }
 
@@ -180,11 +182,16 @@ impl Node {
             build_kernel_version: config.builder.kernel_version.clone(),
             build_firecracker_version: config.builder.firecracker_version.clone(),
             work_dir: config.work_dir.clone(),
-            envd_timeout: config.envd_timeout,
-            build_cache_max_usage: config.build_cache_max_usage,
-            use_memfd: config.use_memfd,
+            runtime_flags: config.runtime_flags.clone(),
             orchestrator_ip: config.orchestrator_ip.clone(),
         })
+    }
+
+    pub(super) fn with_init_request_timeout(&self, init: EnvdInit) -> EnvdInit {
+        EnvdInit {
+            request_timeout: Some(self.runtime_flags.envd_init_request_timeout()),
+            ..init
+        }
     }
 
     pub fn start_background(&self) {
@@ -192,7 +199,12 @@ impl Node {
             .start_refresh(self.feature_flags.clone(), LIMIT_REFRESH_INTERVAL);
         self.network.start();
         tokio::spawn(self.templates.clone().run_eviction());
-        tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
+        let runtime_flags = self.runtime_flags.clone();
+        tokio::spawn(
+            self.store
+                .clone()
+                .run_eviction(move || runtime_flags.eviction_threshold() as f64),
+        );
     }
 
     pub async fn snapshot_locally(
@@ -357,16 +369,23 @@ impl Node {
             .collect()
     }
 
+    pub fn allocated(&self) -> Allocated {
+        self.registry
+            .running()
+            .iter()
+            .fold(Allocated::default(), |sum, handle| {
+                let info = handle.info.lock();
+                sum.with(info.config.vcpu, info.config.ram_mb, info.config.total_disk_size_mb)
+            })
+    }
+
     pub async fn close(&self) {
-        self.uploads.wait_all().await;
+        self.uploads.drain(false).await;
         self.network.close().await;
     }
 
     pub async fn close_forced(&self) {
-        tracing::warn!(
-            uploads = self.uploads.in_flight(),
-            "shutting down with snapshot uploads still in flight"
-        );
+        self.uploads.drain(true).await;
         self.network.close().await;
     }
 
@@ -616,12 +635,22 @@ impl Node {
             .firecracker(self.binaries.firecracker_for(&config.firecracker_version))
             .kernel(self.binaries.kernel_for(&config.kernel_version))
             .work_dir(work_dir)
-            .envd_timeout(self.envd_timeout)
+            .envd_timeout(self.runtime_flags.envd_timeout())
             .prefetch(prefetch)
             .prefetch_settings(prefetch_settings)
-            .use_memfd(self.use_memfd && supports_memfd(&config.firecracker_version))
+            .use_memfd(
+                supports_memfd(&config.firecracker_version)
+                    && self.runtime_flags.use_memfd(FlagContext::sandbox_runtime(
+                        &config.sandbox_id,
+                        &config.template_id,
+                        &config.kernel_version,
+                        &config.firecracker_version,
+                        &config.envd_version,
+                        SANDBOX_TYPE,
+                    )),
+            )
             .hyperloop_ip(&self.orchestrator_ip)
-            .envd(init)
+            .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await
     }

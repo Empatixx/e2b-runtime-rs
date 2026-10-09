@@ -1,4 +1,8 @@
+mod parse;
+
 use std::time::{Duration, SystemTime};
+
+pub use parse::parse_duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 

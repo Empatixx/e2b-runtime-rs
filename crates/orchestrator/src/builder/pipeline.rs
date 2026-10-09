@@ -5,9 +5,8 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use super::builds::BuildInfo;
-use super::config::BuildSettings;
+use super::config::{BuildSettings, envd_version};
 use super::index::LayerIndex;
-use super::layer::envd_version;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
 use super::phases::base::{BasePhase, BaseRequest, BaseSource};
@@ -130,15 +129,14 @@ impl TemplateBuilder for PhasePipeline {
         let env = self.env.clone();
         let pipeline = PhasePipeline { env: env.clone() };
         async move {
-            let envd_version = envd_version(&env.config.envd)
+            let template = request.template.clone().unwrap_or_default();
+            let settings = BuildSettings::resolve(&env.config, &template.template_id, &template.team_id)
+                .await
+                .map(Arc::new)
+                .map_err(BuildError::Internal)?;
+            let envd_version = envd_version(&settings.envd)
                 .await
                 .map_err(|e| BuildError::Internal(format!("error getting envd version: {e}")))?;
-            let template = request.template.clone().unwrap_or_default();
-            let settings = Arc::new(BuildSettings::resolve(
-                &env.config,
-                &template.template_id,
-                &template.team_id,
-            ));
             let phases = pipeline.phases(&request, &envd_version, &settings, &uploads, &info.cancel)?;
             let last = run_phases(&info.log, &phases).await?;
             uploads
