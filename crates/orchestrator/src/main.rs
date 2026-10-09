@@ -24,20 +24,13 @@ mod serve {
     use orchestrator::server::shutdown::drain;
     use orchestrator::telemetry::Telemetry;
     use orchestrator::telemetry::identity::{Identity, service_name};
-    use orchestrator::telemetry::server::{NodeGauges, NodeSource};
+    use orchestrator::telemetry::server::gauges::{NodeGauges, NodeSource};
 
     const CONSUMER_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
     use tokio::signal::unix::{Signal, SignalKind, signal};
 
     pub async fn run() -> Result<(), String> {
-        tracing_subscriber::fmt().init();
         let config = NodeConfig::from_env()?;
-        let feature_flags = config
-            .feature_flags_builder(orchestrator::server::app::COMMIT)
-            .connect()
-            .await
-            .map_err(|e| format!("failed to create feature flags client: {e}"))?;
-        let config = config.with_feature_flags(feature_flags.clone());
         let telemetry = Telemetry::start(&Identity {
             node_id: config.node_id.clone(),
             service_name: service_name(&config.services),
@@ -46,6 +39,13 @@ mod serve {
             service_instance_id: service_instance_id(),
             node_labels: config.labels.clone(),
         })?;
+        telemetry.install_subscriber();
+        let feature_flags = config
+            .feature_flags_builder(orchestrator::server::app::COMMIT)
+            .connect()
+            .await
+            .map_err(|e| format!("failed to create feature flags client: {e}"))?;
+        let config = config.with_feature_flags(feature_flags.clone());
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }

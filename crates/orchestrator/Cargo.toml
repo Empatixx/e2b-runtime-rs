@@ -46,13 +46,15 @@ flate2 = "1"
 zstd = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "io", "io-util"] }
-opentelemetry = { version = "0.31", features = ["metrics"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "metrics"] }
-opentelemetry_sdk = { version = "0.31", features = ["metrics", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime", "spec_unstable_metrics_views"] }
+opentelemetry = { version = "0.31", features = ["metrics", "trace", "logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "gzip-tonic", "metrics", "trace", "logs"] }
+opentelemetry-appender-tracing = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "trace", "logs", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_logs_batch_log_processor_with_async_runtime", "spec_unstable_metrics_views"] }
 tonic = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
 tracing = "0.1"
+tracing-opentelemetry = { version = "0.32", default-features = false }
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["serde", "v4"] }
 launchdarkly-server-sdk = { version = "3.3.0", default-features = false, features = ["hyper-rustls-webpki-roots", "event-compression"] }
