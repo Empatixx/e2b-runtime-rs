@@ -7,11 +7,14 @@ use reqwest::Client;
 use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RSA_PSS_SHA256, RsaEncoding, RsaKeyPair};
+use tokio::sync::Mutex;
 
 use super::super::pem::{self, PemBlock};
-use super::aad::Authority;
+use super::aad::{Authority, Exchange};
 use super::der;
-use super::token_source::{BearerToken, SourceError, TokenSource};
+use super::msal::{self, CacheKey, TokenCache};
+use super::tenant::TenantPolicy;
+use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource};
 
 const CREDENTIAL: &str = "ClientCertificateCredential";
 const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
@@ -28,7 +31,9 @@ pub struct ClientCertificateCredential {
     pub certificate: ClientCertificate,
     pub send_chain: bool,
     pub authority: Authority,
+    pub tenants: TenantPolicy,
     pub client: Client,
+    pub cache: Mutex<TokenCache>,
 }
 
 #[derive(Clone, Copy)]
@@ -230,12 +235,10 @@ fn pkcs12_blocks(data: &[u8], password: &str) -> Result<Vec<PemBlock>, String> {
         .collect())
 }
 
-#[async_trait::async_trait]
-impl TokenSource for ClientCertificateCredential {
-    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
-        let authority = self
-            .authority
-            .resolved(&self.client)
+impl ClientCertificateCredential {
+    async fn acquire(&self, authority: &Authority, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
+        let endpoints = authority
+            .resolve(&self.client)
             .await
             .map_err(|e| e.failed(CREDENTIAL, |message| message))?;
         let now = std::time::SystemTime::now()
@@ -244,34 +247,47 @@ impl TokenSource for ClientCertificateCredential {
         let assertion = self
             .certificate
             .assertion(
-                authority.token_endpoint(),
+                &endpoints.token_endpoint,
                 &self.client_id,
                 self.send_chain,
                 now,
-                Signing::of(&authority),
+                Signing::of(authority),
             )
             .map_err(|e| SourceError::Failed(format!("{CREDENTIAL}: {e}")))?;
-        authority
-            .request_token(
+        endpoints
+            .exchange(
                 &self.client,
-                CREDENTIAL,
-                scope,
-                vec![
-                    ("grant_type", "client_credentials".to_owned()),
-                    ("client_assertion_type", ASSERTION_TYPE.to_owned()),
-                    ("client_assertion", assertion),
-                    ("client_id", self.client_id.clone()),
-                    ("client_info", "1".to_owned()),
-                ],
+                Exchange {
+                    credential: CREDENTIAL,
+                    scope: request.scope,
+                    cae: request.cae,
+                    form: vec![
+                        ("grant_type", "client_credentials".to_owned()),
+                        ("client_assertion_type", ASSERTION_TYPE.to_owned()),
+                        ("client_assertion", assertion),
+                        ("client_id", self.client_id.clone()),
+                        ("client_info", "1".to_owned()),
+                    ],
+                },
             )
             .await
+            .map(|grant| grant.token)
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenSource for ClientCertificateCredential {
+    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
+        let authority = self.authority.for_request(&self.tenants, CREDENTIAL, request.tenant)?;
+        let key = CacheKey::of(request, authority.tenant());
+        let mut cache = self.cache.lock().await;
+        msal::confidential_token(&mut cache, key, || self.acquire(&authority, request)).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256, UnparsedPublicKey};
-    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -419,6 +435,26 @@ mod tests {
             .unwrap();
     }
 
+    fn credential(authority: Authority, default_tenant: &str, send_chain: bool) -> ClientCertificateCredential {
+        ClientCertificateCredential {
+            client_id: "client".to_owned(),
+            certificate: ClientCertificate::parse(PEM, "").unwrap(),
+            send_chain,
+            authority,
+            tenants: TenantPolicy::new(default_tenant, &[]),
+            client: Client::new(),
+            cache: Mutex::default(),
+        }
+    }
+
+    fn token_reply() -> (u16, &'static str, String) {
+        (
+            200,
+            "application/json",
+            r#"{"access_token":"aad","expires_in":3600}"#.to_owned(),
+        )
+    }
+
     #[tokio::test]
     async fn adfs_authorities_sign_for_the_discovered_endpoint() {
         let (base, handle) = super::super::testing::serve(vec![
@@ -427,16 +463,10 @@ mod tests {
                 "application/json",
                 r#"{"authorization_endpoint":"{BASE}/adfs/oauth2/authorize","token_endpoint":"{BASE}/adfs/oauth2/token","issuer":"{BASE}/adfs"}"#.to_owned(),
             ),
-            (200, "application/json", r#"{"access_token":"aad","expires_in":3600}"#.to_owned()),
+            token_reply(),
         ])
         .await;
-        let credential = ClientCertificateCredential {
-            client_id: "client".to_owned(),
-            certificate: ClientCertificate::parse(PEM, "").unwrap(),
-            send_chain: false,
-            authority: Authority::local_adfs(&base),
-            client: Client::new(),
-        };
+        let credential = credential(Authority::local_adfs(&base), "adfs", false);
 
         let token = credential.token("s").await.unwrap();
         let requests = handle.await.unwrap();
@@ -456,29 +486,19 @@ mod tests {
 
     #[tokio::test]
     async fn the_credential_posts_the_assertion_to_the_token_endpoint() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut connection, _) = listener.accept().await.unwrap();
-            let request = super::super::testing::read_request(&mut connection).await;
-            let body = r#"{"access_token":"aad","expires_in":3600}"#;
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            connection.write_all(reply.as_bytes()).await.unwrap();
-            request
-        });
-        let credential = ClientCertificateCredential {
-            client_id: "client".to_owned(),
-            certificate: ClientCertificate::parse(PEM, "").unwrap(),
-            send_chain: false,
-            authority: Authority::local(&format!("http://{address}")),
-            client: Client::new(),
-        };
+        let (base, handle) = super::super::testing::serve(vec![
+            (
+                200,
+                "application/json",
+                r#"{"authorization_endpoint":"{BASE}/t/authorize","token_endpoint":"{BASE}/t/oauth2/v2.0/token","issuer":"{BASE}/t/v2.0"}"#.to_owned(),
+            ),
+            token_reply(),
+        ])
+        .await;
+        let credential = credential(Authority::local(&base), "t", false);
 
         let token = credential.token("https://storage.azure.com/.default").await.unwrap();
-        let request = server.await.unwrap();
+        let request = handle.await.unwrap().remove(1);
 
         assert_eq!(token.secret, "aad");
         assert!(request.starts_with("POST /t/oauth2/v2.0/token HTTP/1.1"));

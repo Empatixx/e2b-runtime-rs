@@ -8,7 +8,7 @@ use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions
 use reqwest::StatusCode;
 
 use super::azcore::{self, AuthenticationFailure};
-use super::token_source::{BearerToken, SourceError, TokenSource, expiry};
+use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource, expiry};
 
 const CREDENTIAL: &str = "ManagedIdentityCredential";
 const IMDS_ENDPOINT: &str = "http://169.254.169.254/metadata/identity/oauth2/token";
@@ -144,14 +144,16 @@ fn endpoint(imds: bool, env: &dyn Fn(&str) -> Option<String>) -> String {
 
 #[async_trait::async_trait]
 impl TokenSource for ManagedIdentitySource {
-    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
         self.probe_imds().await?;
         self.credential
-            .get_token(&[scope], None)
+            .get_token(&[request.scope], None)
             .await
-            .map(|token| BearerToken {
-                secret: token.token.secret().to_owned(),
-                expires_at: expiry(token.expires_on.unix_timestamp()),
+            .map(|token| {
+                BearerToken::without_refresh(
+                    token.token.secret().to_owned(),
+                    expiry(token.expires_on.unix_timestamp()),
+                )
             })
             .map_err(|e| self.classify(&e))
     }

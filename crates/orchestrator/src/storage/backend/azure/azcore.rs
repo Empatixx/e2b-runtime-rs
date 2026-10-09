@@ -128,6 +128,7 @@ fn printed_url(url: &str) -> String {
     }
 }
 
+#[derive(Debug)]
 pub struct HttpFailure {
     pub method: String,
     pub url: String,
@@ -135,6 +136,7 @@ pub struct HttpFailure {
     pub body: String,
 }
 
+#[derive(Debug)]
 pub enum CallError {
     Http(HttpFailure),
     Message(String),

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use super::token_source::{BearerToken, SourceError, TokenSource, expiry};
+use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource, expiry};
 
 const CREDENTIAL: &str = "AzurePowerShellCredential";
 const MODULE_NOT_FOUND: &str = "Az.Accounts module not found";
@@ -114,7 +114,8 @@ fn unavailable(message: impl std::fmt::Display) -> SourceError {
 
 #[async_trait::async_trait]
 impl TokenSource for PowerShellCredential {
-    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
+        let scope = request.scope;
         if !valid_scope(scope) {
             return Err(SourceError::Failed(format!(
                 "{CREDENTIAL}.GetToken(): invalid scope {}",
@@ -124,10 +125,7 @@ impl TokenSource for PowerShellCredential {
         let _serial = self.lock.lock().await;
         let stdout = self.run(&command_for(scope)).await.map_err(unavailable)?;
         serde_json::from_slice::<PowerShellToken>(&stdout)
-            .map(|token| BearerToken {
-                secret: token.token,
-                expires_at: expiry(token.expires_on),
-            })
+            .map(|token| BearerToken::without_refresh(token.token, expiry(token.expires_on)))
             .map_err(unavailable)
     }
 }

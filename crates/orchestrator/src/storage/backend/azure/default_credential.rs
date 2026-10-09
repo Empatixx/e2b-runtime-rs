@@ -2,19 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use azure_core::credentials::{Secret, TokenCredential};
-use azure_identity::{
-    AzureCliCredential, AzureDeveloperCliCredential, ClientSecretCredential, WorkloadIdentityCredential,
-};
+use azure_core::credentials::TokenCredential;
+use azure_identity::{AzureCliCredential, AzureDeveloperCliCredential, WorkloadIdentityCredential};
 use tokio::sync::Mutex;
 
-use super::aad::Authority;
+use super::aad::{Authority, ClientKind};
 use super::azcore;
 use super::client_certificate::{ClientCertificate, ClientCertificateCredential};
+use super::client_secret::ClientSecretCredential;
 use super::managed_identity::{ManagedIdentitySettings, ManagedIdentitySource};
+use super::msal::CacheKey;
 use super::powershell::PowerShellCredential;
+use super::tenant::TenantPolicy;
 pub use super::token_source::BearerToken;
-use super::token_source::{SdkSource, SourceError, TokenSource};
+use super::token_source::{SdkSource, SourceError, TokenRequest, TokenSource};
 use super::username_password::UsernamePasswordCredential;
 
 const CHAIN_NAME: &str = "DefaultAzureCredential";
@@ -27,7 +28,7 @@ const CERTIFICATE_PASSWORD_ENV: &str = "AZURE_CLIENT_CERTIFICATE_PASSWORD";
 const SEND_CHAIN_ENV: &str = "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN";
 const USERNAME_ENV: &str = "AZURE_USERNAME";
 const PASSWORD_ENV: &str = "AZURE_PASSWORD";
-const CACHE_MARGIN: Duration = Duration::from_secs(5 * 60);
+const EAGER_BACKOFF: Duration = Duration::from_secs(30);
 
 struct Source {
     name: &'static str,
@@ -37,7 +38,28 @@ struct Source {
 pub struct DefaultAzureCredential {
     sources: Vec<Source>,
     selected: Mutex<Option<usize>>,
-    cache: std::sync::Mutex<HashMap<String, BearerToken>>,
+    resources: std::sync::Mutex<HashMap<CacheKey, Resource>>,
+    renewing: Mutex<()>,
+}
+
+#[derive(Clone)]
+struct Resource {
+    token: BearerToken,
+    attempted_at: SystemTime,
+}
+
+impl Resource {
+    fn attempted_now(token: BearerToken) -> Self {
+        Self {
+            token,
+            attempted_at: SystemTime::now(),
+        }
+    }
+
+    fn wants_refresh(&self) -> bool {
+        let now = SystemTime::now();
+        self.token.refresh_instant() < now && self.attempted_at + EAGER_BACKOFF <= now
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,12 +99,14 @@ impl Kind {
         match self {
             Kind::Environment => environment_credential(),
             Kind::WorkloadIdentity => WorkloadIdentityCredential::new(None)
-                .map(sdk_source)
+                .map(|credential| sdk_source(self.name(), credential))
                 .map_err(|e| e.to_string()),
             Kind::ManagedIdentity => managed_identity_credential(chained),
-            Kind::AzureCli => AzureCliCredential::new(None).map(sdk_source).map_err(|e| e.to_string()),
+            Kind::AzureCli => AzureCliCredential::new(None)
+                .map(|credential| sdk_source(self.name(), credential))
+                .map_err(|e| e.to_string()),
             Kind::AzureDeveloperCli => AzureDeveloperCliCredential::new(None)
-                .map(sdk_source)
+                .map(|credential| sdk_source(self.name(), credential))
                 .map_err(|e| e.to_string()),
             Kind::AzurePowerShell => Ok(Arc::new(PowerShellCredential::default())),
         }
@@ -111,8 +135,8 @@ fn variable(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn sdk_source<T: TokenCredential + 'static>(credential: Arc<T>) -> Arc<dyn TokenSource> {
-    Arc::new(SdkSource::new(credential))
+fn sdk_source<T: TokenCredential + 'static>(name: &'static str, credential: Arc<T>) -> Arc<dyn TokenSource> {
+    Arc::new(SdkSource::new(name, credential))
 }
 
 fn environment_credential() -> Result<Arc<dyn TokenSource>, String> {
@@ -122,26 +146,31 @@ fn environment_credential() -> Result<Arc<dyn TokenSource>, String> {
 fn environment_credential_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Arc<dyn TokenSource>, String> {
     let tenant = env(TENANT_ENV).ok_or_else(|| format!("missing environment variable {TENANT_ENV}"))?;
     let client = env(CLIENT_ENV).ok_or_else(|| format!("missing environment variable {CLIENT_ENV}"))?;
+    let tenants = TenantPolicy::from_environment(&tenant, env);
     match (env(SECRET_ENV), env(CERTIFICATE_ENV), env(USERNAME_ENV)) {
-        (Some(secret), _, _) => secret_credential(&tenant, client, secret),
-        (None, Some(path), _) => certificate_credential(env, &tenant, client, &path),
-        (None, None, Some(username)) => password_credential(env, &tenant, client, username),
+        (Some(secret), _, _) => secret_credential(tenants, client, secret),
+        (None, Some(path), _) => certificate_credential(env, tenants, client, &path),
+        (None, None, Some(username)) => password_credential(env, tenants, client, username),
         (None, None, None) => Err(format!(
             "incomplete environment variable configuration. Only {TENANT_ENV} and {CLIENT_ENV} are set"
         )),
     }
 }
 
-fn secret_credential(tenant: &str, client_id: String, secret: String) -> Result<Arc<dyn TokenSource>, String> {
-    Authority::for_tenant(tenant)?;
-    ClientSecretCredential::new(tenant, client_id, Secret::new(secret), None)
-        .map(sdk_source)
-        .map_err(|e| e.to_string())
+fn secret_credential(tenants: TenantPolicy, client_id: String, secret: String) -> Result<Arc<dyn TokenSource>, String> {
+    Ok(Arc::new(ClientSecretCredential {
+        client_id,
+        secret,
+        authority: Authority::for_tenant(tenants.default_tenant(), ClientKind::Confidential)?,
+        tenants,
+        client: azcore::msal_client(),
+        cache: tokio::sync::Mutex::default(),
+    }))
 }
 
 fn certificate_credential(
     env: &dyn Fn(&str) -> Option<String>,
-    tenant: &str,
+    tenants: TenantPolicy,
     client_id: String,
     path: &str,
 ) -> Result<Arc<dyn TokenSource>, String> {
@@ -151,14 +180,16 @@ fn certificate_credential(
         client_id,
         certificate: ClientCertificate::load(path, &password)?,
         send_chain,
-        authority: Authority::for_tenant(tenant)?,
+        authority: Authority::for_tenant(tenants.default_tenant(), ClientKind::Confidential)?,
+        tenants,
         client: azcore::msal_client(),
+        cache: tokio::sync::Mutex::default(),
     }))
 }
 
 fn password_credential(
     env: &dyn Fn(&str) -> Option<String>,
-    tenant: &str,
+    tenants: TenantPolicy,
     client_id: String,
     username: String,
 ) -> Result<Arc<dyn TokenSource>, String> {
@@ -167,8 +198,10 @@ fn password_credential(
         client_id,
         username,
         password,
-        authority: Authority::for_tenant(tenant)?,
+        authority: Authority::for_tenant(tenants.default_tenant(), ClientKind::Public)?,
+        tenants,
         client: azcore::msal_client(),
+        cache: tokio::sync::Mutex::default(),
     }))
 }
 
@@ -210,11 +243,11 @@ impl DefaultAzureCredential {
 
         #[async_trait::async_trait]
         impl TokenSource for Fixed {
-            async fn token(&self, _scope: &str) -> Result<BearerToken, SourceError> {
-                Ok(BearerToken {
-                    secret: self.0.clone(),
-                    expires_at: super::token_source::expiry(4_000_000_000),
-                })
+            async fn token_for(&self, _request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
+                Ok(BearerToken::without_refresh(
+                    self.0.clone(),
+                    super::token_source::expiry(4_000_000_000),
+                ))
             }
         }
 
@@ -224,52 +257,110 @@ impl DefaultAzureCredential {
         }])
     }
 
+    #[cfg(test)]
+    fn age_attempts(&self) {
+        for resource in self
+            .resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values_mut()
+        {
+            resource.attempted_at = SystemTime::now() - EAGER_BACKOFF * 2;
+        }
+    }
+
     fn from_sources(sources: Vec<Source>) -> Self {
         Self {
             sources,
             selected: Mutex::new(None),
-            cache: std::sync::Mutex::default(),
+            resources: std::sync::Mutex::default(),
+            renewing: Mutex::new(()),
         }
     }
 
     pub async fn token(&self, scope: &str) -> Result<BearerToken, String> {
-        if let Some(token) = self.cached(scope) {
-            return Ok(token);
+        self.token_for(&TokenRequest::new(scope)).await
+    }
+
+    pub async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, String> {
+        let key = CacheKey::of(request, request.tenant);
+        match self.resource(&key) {
+            Some(held) if held.token.expires_at > SystemTime::now() => self.eager_refresh(request, key, held).await,
+            _ => self.renew_expired(request, key).await,
         }
-        let token = self.acquire(scope).await?;
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(scope.to_owned(), token.clone());
+    }
+
+    async fn eager_refresh(
+        &self,
+        request: &TokenRequest<'_>,
+        key: CacheKey,
+        held: Resource,
+    ) -> Result<BearerToken, String> {
+        if !held.wants_refresh() {
+            return Ok(held.token);
+        }
+        let Ok(_attempt) = self.renewing.try_lock() else {
+            return Ok(held.token);
+        };
+        self.record_attempt(&key);
+        Ok(self.fetch(request, &key).await.unwrap_or(held.token))
+    }
+
+    async fn renew_expired(&self, request: &TokenRequest<'_>, key: CacheKey) -> Result<BearerToken, String> {
+        let _single = self.renewing.lock().await;
+        match self
+            .resource(&key)
+            .filter(|held| held.token.expires_at > SystemTime::now())
+        {
+            Some(held) => Ok(held.token),
+            None => self.fetch(request, &key).await,
+        }
+    }
+
+    async fn fetch(&self, request: &TokenRequest<'_>, key: &CacheKey) -> Result<BearerToken, String> {
+        let token = self.acquire(request).await?;
+        self.insert(key, Resource::attempted_now(token.clone()));
         Ok(token)
     }
 
-    async fn acquire(&self, scope: &str) -> Result<BearerToken, String> {
+    fn resource(&self, key: &CacheKey) -> Option<Resource> {
+        self.resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn record_attempt(&self, key: &CacheKey) {
+        if let Some(held) = self.resource(key) {
+            self.insert(key, Resource::attempted_now(held.token));
+        }
+    }
+
+    fn insert(&self, key: &CacheKey, resource: Resource) {
+        self.resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), resource);
+    }
+
+    async fn acquire(&self, request: &TokenRequest<'_>) -> Result<BearerToken, String> {
         let mut selected = self.selected.lock().await;
         match *selected {
             Some(index) => {
                 drop(selected);
-                self.source_token(index, scope)
+                self.source_token(index, request)
                     .await
                     .map_err(|e| e.message().to_owned())
             }
-            None => self.probe(scope, &mut selected).await,
+            None => self.probe(request, &mut selected).await,
         }
     }
 
-    fn cached(&self, scope: &str) -> Option<BearerToken> {
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(scope)
-            .filter(|token| token.expires_at > SystemTime::now() + CACHE_MARGIN)
-            .cloned()
-    }
-
-    async fn probe(&self, scope: &str, selected: &mut Option<usize>) -> Result<BearerToken, String> {
+    async fn probe(&self, request: &TokenRequest<'_>, selected: &mut Option<usize>) -> Result<BearerToken, String> {
         let mut failures = Vec::new();
         for index in 0..self.sources.len() {
-            match self.source_token(index, scope).await {
+            match self.source_token(index, request).await {
                 Ok(token) => {
                     *selected = Some(index);
                     return Ok(token);
@@ -284,14 +375,11 @@ impl DefaultAzureCredential {
         Err(chain_error(&failures))
     }
 
-    async fn source_token(&self, index: usize, scope: &str) -> Result<BearerToken, SourceError> {
+    async fn source_token(&self, index: usize, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
         let source = &self.sources[index];
         match &source.credential {
             Err(e) => Err(SourceError::Unavailable(format!("{}: {e}", source.name))),
-            Ok(credential) => credential.token(scope).await.map_err(|e| match e {
-                SourceError::Unavailable(message) => SourceError::Unavailable(format!("{}: {message}", source.name)),
-                failed @ SourceError::Failed(_) => failed,
-            }),
+            Ok(credential) => credential.token_for(request).await,
         }
     }
 }
@@ -313,7 +401,7 @@ mod tests {
 
     enum Outcome {
         Token(&'static str),
-        Unavailable,
+        Unavailable(&'static str),
         Failed,
     }
 
@@ -324,14 +412,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TokenSource for Scripted {
-        async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+        async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.outcome {
-                Outcome::Token(token) => Ok(BearerToken {
-                    secret: format!("{token}@{scope}"),
-                    expires_at: expiry(4_000_000_000),
-                }),
-                Outcome::Unavailable => Err(SourceError::Unavailable("nothing here".to_owned())),
+                Outcome::Token(token) => Ok(BearerToken::without_refresh(
+                    format!("{token}@{}", request.scope),
+                    expiry(4_000_000_000),
+                )),
+                Outcome::Unavailable(message) => Err(SourceError::Unavailable(message.to_owned())),
                 Outcome::Failed => Err(SourceError::Failed(
                     "ClientSecretCredential authentication failed. denied".to_owned(),
                 )),
@@ -357,7 +445,11 @@ mod tests {
     async fn the_first_source_that_answers_wins_and_is_remembered() {
         let (first, second) = (counter(), counter());
         let chain = DefaultAzureCredential::from_sources(vec![
-            scripted("EnvironmentCredential", Outcome::Unavailable, &first),
+            scripted(
+                "EnvironmentCredential",
+                Outcome::Unavailable("EnvironmentCredential: nothing"),
+                &first,
+            ),
             scripted("ManagedIdentityCredential", Outcome::Token("mi"), &second),
         ]);
 
@@ -404,12 +496,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TokenSource for Flaky {
-        async fn token(&self, _scope: &str) -> Result<BearerToken, SourceError> {
+        async fn token_for(&self, _request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => Ok(BearerToken {
-                    secret: "first".to_owned(),
-                    expires_at: expiry(4_000_000_000),
-                }),
+                0 => Ok(BearerToken::without_refresh("first".to_owned(), expiry(4_000_000_000))),
                 _ => Err(SourceError::Failed(
                     "ManagedIdentityCredential authentication failed. denied".to_owned(),
                 )),
@@ -436,7 +525,11 @@ mod tests {
     async fn concurrent_first_calls_probe_the_chain_once() {
         let (first, second) = (counter(), counter());
         let chain = Arc::new(DefaultAzureCredential::from_sources(vec![
-            scripted("EnvironmentCredential", Outcome::Unavailable, &first),
+            scripted(
+                "EnvironmentCredential",
+                Outcome::Unavailable("EnvironmentCredential: nothing"),
+                &first,
+            ),
             scripted("ManagedIdentityCredential", Outcome::Token("mi"), &second),
         ]));
 
@@ -454,6 +547,108 @@ mod tests {
         assert_eq!(second.load(Ordering::SeqCst), 8);
     }
 
+    struct Sequence {
+        replies: std::sync::Mutex<std::collections::VecDeque<Result<BearerToken, SourceError>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TokenSource for Sequence {
+        async fn token_for(&self, _request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(SourceError::Failed("script exhausted".to_owned())))
+        }
+    }
+
+    fn sequence(replies: Vec<Result<BearerToken, SourceError>>, calls: &Arc<AtomicUsize>) -> DefaultAzureCredential {
+        DefaultAzureCredential::from_sources(vec![Source {
+            name: "S",
+            credential: Ok(Arc::new(Sequence {
+                replies: std::sync::Mutex::new(replies.into()),
+                calls: calls.clone(),
+            })),
+        }])
+    }
+
+    fn token_at(secret: &str, expires_in: i64, refresh_in: Option<i64>) -> BearerToken {
+        let at = |seconds: i64| match u64::try_from(seconds) {
+            Ok(seconds) => SystemTime::now() + Duration::from_secs(seconds),
+            Err(_) => SystemTime::now() - Duration::from_secs(seconds.unsigned_abs()),
+        };
+        BearerToken {
+            secret: secret.to_owned(),
+            expires_at: at(expires_in),
+            refresh_on: refresh_in.map(at),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_past_its_refresh_instant_is_renewed_eagerly() {
+        let calls = counter();
+        let chain = sequence(
+            vec![Ok(token_at("old", 3600, Some(-1))), Ok(token_at("new", 3600, None))],
+            &calls,
+        );
+
+        let first = chain.token("s").await.unwrap();
+        chain.age_attempts();
+        let second = chain.token("s").await.unwrap();
+
+        assert_eq!((first.secret.as_str(), second.secret.as_str()), ("old", "new"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_eager_renewal_keeps_the_held_token_and_backs_off() {
+        let calls = counter();
+        let chain = sequence(vec![Ok(token_at("old", 120, None))], &calls);
+
+        let first = chain.token("s").await.unwrap();
+        chain.age_attempts();
+        let second = chain.token("s").await.unwrap();
+        let third = chain.token("s").await.unwrap();
+
+        assert_eq!(
+            (first.secret.as_str(), second.secret.as_str(), third.secret.as_str()),
+            ("old", "old", "old")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_makes_renewal_errors_visible() {
+        let calls = counter();
+        let chain = sequence(vec![Ok(token_at("old", -1, None))], &calls);
+
+        chain.token("s").await.unwrap();
+        let error = chain.token("s").await.unwrap_err();
+
+        assert_eq!(error, "script exhausted");
+    }
+
+    #[tokio::test]
+    async fn tenants_and_cae_get_their_own_cache_entries() {
+        let calls = counter();
+        let chain = DefaultAzureCredential::from_sources(vec![scripted("S", Outcome::Token("t"), &calls)]);
+
+        chain.token_for(&TokenRequest::new("a")).await.unwrap();
+        chain.token_for(&TokenRequest::new("a").with_cae()).await.unwrap();
+        chain
+            .token_for(&TokenRequest::new("a").with_tenant("other"))
+            .await
+            .unwrap();
+        chain
+            .token_for(&TokenRequest::new("a").with_tenant("other"))
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn a_chain_without_an_answer_lists_every_attempt() {
         let calls = counter();
@@ -462,7 +657,11 @@ mod tests {
                 name: "EnvironmentCredential",
                 credential: Err("missing environment variable AZURE_TENANT_ID".to_owned()),
             },
-            scripted("ManagedIdentityCredential", Outcome::Unavailable, &calls),
+            scripted(
+                "ManagedIdentityCredential",
+                Outcome::Unavailable("ManagedIdentityCredential: nothing here"),
+                &calls,
+            ),
         ]);
 
         let error = chain.token("s").await.unwrap_err();

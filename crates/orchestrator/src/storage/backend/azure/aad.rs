@@ -1,173 +1,123 @@
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+mod endpoints;
+mod region;
+mod token_response;
 
 use reqwest::Client;
-use serde::Deserialize;
-use tokio::sync::OnceCell;
 
 use super::azcore::{CallError, HttpFailure};
-use super::token_source::{BearerToken, SourceError};
+use super::tenant::{TenantPolicy, valid_tenant};
+use super::token_source::SourceError;
 use crate::go_url::GoUrl;
+pub use endpoints::Endpoints;
+use endpoints::Resolver;
+use region::Region;
+pub use token_response::Grant;
 
 const AUTHORITY_HOST_ENV: &str = "AZURE_AUTHORITY_HOST";
+const REGIONAL_AUTHORITY_ENV: &str = "AZURE_REGIONAL_AUTHORITY_NAME";
+const FORCE_REGION_ENV: &str = "MSAL_FORCE_REGION";
 const PUBLIC_CLOUD: &str = "https://login.microsoftonline.com";
 const DEFAULT_SCOPES: [&str; 3] = ["openid", "offline_access", "profile"];
-const INVALID_TENANT: &str = "invalid tenantID. You can locate your tenantID by following the instructions listed here: https://learn.microsoft.com/partner-center/find-ids-and-domain-names";
+const CLIENT_CAPABILITIES: &str = r#"{"access_token":{"xms_cc":{"values":["CP1"]}}}"#;
+const NON_SPECIFIC_TENANTS: [&str; 3] = ["common", "consumers", "organizations"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientKind {
+    Confidential,
+    Public,
+}
 
 #[derive(Clone)]
 pub struct Authority {
-    adfs: bool,
-    base_url: String,
-    token_endpoint: String,
-    discovered: Arc<OnceCell<String>>,
+    resolver: Resolver,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Discovery {
-    authorization_endpoint: String,
-    token_endpoint: String,
-    issuer: String,
-}
-
-impl Discovery {
-    fn validate(&self) -> Result<(), String> {
-        let missing = [
-            (&self.authorization_endpoint, "authorize endpoint"),
-            (&self.token_endpoint, "token endpoint"),
-            (&self.issuer, "issuer"),
-        ]
-        .into_iter()
-        .find(|(value, _)| value.is_empty());
-        match missing {
-            Some((_, name)) => Err(format!(
-                "TenantDiscoveryResponse: {name} was not found in the openid configuration"
-            )),
-            None => Ok(()),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    #[serde(default)]
-    access_token: String,
-    #[serde(default)]
-    error: String,
-    #[serde(default)]
-    error_description: String,
-    #[serde(default, deserialize_with = "seconds")]
-    expires_in: u64,
-}
-
-fn seconds<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Number {
-        Integer(u64),
-        Text(String),
-    }
-    Ok(match Number::deserialize(deserializer)? {
-        Number::Integer(value) => value,
-        Number::Text(text) => text.parse().unwrap_or(0),
-    })
+pub struct Exchange<'a> {
+    pub credential: &'a str,
+    pub scope: &'a str,
+    pub cae: bool,
+    pub form: Vec<(&'static str, String)>,
 }
 
 impl Authority {
-    pub fn for_tenant(tenant: &str) -> Result<Self, String> {
+    pub fn for_tenant(tenant: &str, kind: ClientKind) -> Result<Self, String> {
         valid_tenant(tenant)?;
-        let base_url = authority_host()?.trim_end_matches('/').to_owned();
-        Ok(Self {
-            adfs: tenant == "adfs",
-            token_endpoint: format!("{base_url}/{tenant}/oauth2/v2.0/token"),
-            base_url,
-            discovered: Arc::default(),
-        })
+        let origin = authority_host()?.trim_end_matches('/').to_owned();
+        Resolver::new(&origin, tenant, region_for(kind)).map(|resolver| Self { resolver })
     }
 
     #[cfg(test)]
     pub fn local(base_url: &str) -> Self {
-        Self {
-            adfs: false,
-            base_url: base_url.to_owned(),
-            token_endpoint: format!("{base_url}/t/oauth2/v2.0/token"),
-            discovered: Arc::default(),
-        }
+        let mut resolver = Resolver::new(base_url, "t", Region::Global).unwrap_or_else(|e| panic!("{e}"));
+        resolver.validate = false;
+        Self { resolver }
     }
 
     #[cfg(test)]
     pub fn local_adfs(base_url: &str) -> Self {
-        Self {
-            adfs: true,
-            ..Self::local(base_url)
-        }
+        let mut resolver = Resolver::new(base_url, "adfs", Region::Global).unwrap_or_else(|e| panic!("{e}"));
+        resolver.validate = false;
+        Self { resolver }
     }
 
     pub fn is_adfs(&self) -> bool {
-        self.adfs
+        self.resolver.adfs
     }
 
-    pub async fn resolved(&self, client: &Client) -> Result<Self, CallError> {
-        match self.adfs {
-            false => Ok(self.clone()),
-            true => self
-                .discovered
-                .get_or_try_init(|| self.discover_token_endpoint(client))
-                .await
-                .map(|token_endpoint| Self {
-                    token_endpoint: token_endpoint.clone(),
-                    ..self.clone()
-                }),
+    pub fn tenant(&self) -> &str {
+        &self.resolver.tenant
+    }
+
+    pub fn for_request(&self, tenants: &TenantPolicy, credential: &str, specified: &str) -> Result<Self, SourceError> {
+        let tenant = tenants.resolve(credential, specified).map_err(SourceError::Failed)?;
+        self.with_tenant(&tenant)
+            .map_err(|e| SourceError::Failed(format!("{credential}: {e}")))
+    }
+
+    pub fn with_tenant(&self, tenant: &str) -> Result<Self, String> {
+        if tenant.is_empty() || tenant == self.resolver.tenant {
+            return Ok(self.clone());
         }
-    }
-
-    async fn discover_token_endpoint(&self, client: &Client) -> Result<String, CallError> {
-        let wrap = |e: String| CallError::Message(format!("unable to resolve an endpoint: {e}"));
-        let url = format!("{}/adfs/.well-known/openid-configuration", self.base_url);
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| wrap(format!("server response error:\n {e}")))?;
-        let status = response.status();
-        let body = response.text().await.map_err(|e| wrap(e.to_string()))?;
-        if !matches!(status.as_u16(), 200 | 201) {
-            return Err(CallError::Http(HttpFailure {
-                method: "GET".to_owned(),
-                url,
-                status,
-                body,
-            }));
+        if self.resolver.adfs {
+            return Err("ADFS authority doesn't support tenants".to_owned());
         }
-        let discovery: Discovery = serde_json::from_str(&body)
-            .map_err(|e| wrap(format!("json decode error: {e}\njson message bytes were: {body}")))?;
-        discovery
-            .validate()
-            .map_err(|e| wrap(format!("ResolveEndpoints(): {e}")))?;
-        Ok(discovery.token_endpoint)
+        if NON_SPECIFIC_TENANTS.contains(&tenant) {
+            return Err(format!("tenant ID must be a specific tenant, not \"{tenant}\""));
+        }
+        if self.resolver.tenant.eq_ignore_ascii_case("consumers") {
+            return Err(
+                "client is configured to authenticate only personal Microsoft accounts, via the \"consumers\" endpoint"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            resolver: self.resolver.for_tenant(tenant),
+        })
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    pub async fn resolve(&self, client: &Client) -> Result<Endpoints, CallError> {
+        self.resolver.resolve(client).await
     }
+}
 
-    pub fn token_endpoint(&self) -> &str {
-        &self.token_endpoint
+fn region_for(kind: ClientKind) -> Region {
+    match kind {
+        ClientKind::Public => Region::Global,
+        ClientKind::Confidential => Region::configured(
+            &std::env::var(REGIONAL_AUTHORITY_ENV).unwrap_or_default(),
+            &std::env::var(FORCE_REGION_ENV).unwrap_or_default(),
+        ),
     }
+}
 
-    pub async fn request_token(
-        &self,
-        client: &Client,
-        credential: &str,
-        scope: &str,
-        mut form: Vec<(&str, String)>,
-    ) -> Result<BearerToken, SourceError> {
-        form.push(("scope", scopes(scope)));
+impl Endpoints {
+    pub async fn exchange(&self, client: &Client, exchange: Exchange<'_>) -> Result<Grant, SourceError> {
+        let credential = exchange.credential;
         let failure = |message: String| SourceError::Failed(format!("{credential}: {message}"));
         let response = client
             .post(&self.token_endpoint)
             .header("Accept", "application/json")
-            .form(&form)
+            .form(&form_of(&exchange))
             .send()
             .await
             .map_err(|e| failure(format!("server response error:\n {e}")))?;
@@ -177,7 +127,7 @@ impl Authority {
             .await
             .map_err(|e| failure(format!("could not read the body of an HTTP Response: {e}")))?;
         match status.as_u16() {
-            200 | 201 => parse(&body).map_err(failure),
+            200 | 201 => token_response::parse(&body, exchange.scope).map_err(failure),
             _ => Err(CallError::Http(HttpFailure {
                 method: "POST".to_owned(),
                 url: self.token_endpoint.clone(),
@@ -189,15 +139,14 @@ impl Authority {
     }
 }
 
-fn valid_tenant(tenant: &str) -> Result<(), String> {
-    match !tenant.is_empty()
-        && tenant
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-    {
-        true => Ok(()),
-        false => Err(INVALID_TENANT.to_owned()),
+fn form_of(exchange: &Exchange<'_>) -> Vec<(&'static str, String)> {
+    let mut form = exchange.form.clone();
+    form.push(("scope", scopes(exchange.scope)));
+    if exchange.cae {
+        form.push(("claims", CLIENT_CAPABILITIES.to_owned()));
     }
+    form.sort_by_key(|(key, _)| *key);
+    form
 }
 
 fn authority_host() -> Result<String, String> {
@@ -222,19 +171,6 @@ fn scopes(scope: &str) -> String {
         .chain(DEFAULT_SCOPES)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn parse(body: &str) -> Result<BearerToken, String> {
-    let response: TokenResponse =
-        serde_json::from_str(body).map_err(|e| format!("json decode error: {e}\nraw message was: {body}"))?;
-    match (response.error.is_empty(), response.access_token.is_empty()) {
-        (false, _) => Err(format!("{}: {}", response.error, response.error_description)),
-        (true, true) => Err("response is missing access_token".to_owned()),
-        (true, false) => Ok(BearerToken {
-            secret: response.access_token,
-            expires_at: SystemTime::now() + Duration::from_secs(response.expires_in),
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -273,26 +209,10 @@ mod tests {
     }
 
     #[test]
-    fn token_responses_accept_numeric_and_textual_lifetimes() {
-        assert!(parse(r#"{"access_token":"a","expires_in":"3600"}"#).unwrap().expires_at > SystemTime::now());
-        assert_eq!(parse("{}").unwrap_err(), "response is missing access_token");
-    }
-
-    #[test]
-    fn an_error_field_in_a_successful_response_is_the_failure() {
-        assert_eq!(
-            parse(r#"{"error":"invalid_grant","error_description":"expired"}"#).unwrap_err(),
-            "invalid_grant: expired"
-        );
-    }
-
-    #[test]
     fn tenants_are_validated_like_the_sdk() {
         assert!(valid_tenant("contoso.onmicrosoft.com").is_ok());
-        assert!(valid_tenant("0000-aaaa").is_ok());
-        assert_eq!(valid_tenant("").unwrap_err(), INVALID_TENANT);
-        assert_eq!(valid_tenant("a/b").unwrap_err(), INVALID_TENANT);
-        assert_eq!(valid_tenant("a b").unwrap_err(), INVALID_TENANT);
+        assert_eq!(valid_tenant("a/b").unwrap_err(), super::super::tenant::INVALID_TENANT);
+        assert!(Authority::for_tenant("a/b", ClientKind::Public).is_err());
     }
 
     #[test]
@@ -306,5 +226,77 @@ mod tests {
             "https://login.example"
         );
         assert_eq!(resolve_host(None).unwrap(), PUBLIC_CLOUD);
+    }
+
+    #[test]
+    fn other_tenants_are_scoped_through_the_policy() {
+        let authority = Authority::for_tenant("home", ClientKind::Confidential).unwrap();
+        let policy = TenantPolicy::new("home", &["other".to_owned()]);
+
+        assert_eq!(authority.for_request(&policy, "C", "").unwrap().tenant(), "home");
+        assert_eq!(authority.for_request(&policy, "C", "other").unwrap().tenant(), "other");
+        assert_eq!(
+            authority.for_request(&policy, "C", "third").err().unwrap(),
+            SourceError::Failed("C isn't configured to acquire tokens for tenant \"third\". To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant".to_owned())
+        );
+        let wildcard = TenantPolicy::new("home", &["*".to_owned()]);
+        assert_eq!(
+            authority.for_request(&wildcard, "C", "common").err().unwrap(),
+            SourceError::Failed("C: tenant ID must be a specific tenant, not \"common\"".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn exchanges_send_sorted_forms_with_the_cae_capability() {
+        let (base, handle) = super::super::testing::serve(vec![
+            (
+                200,
+                "application/json",
+                r#"{"access_token":"a","expires_in":3600}"#.to_owned(),
+            ),
+            (
+                200,
+                "application/json",
+                r#"{"access_token":"b","expires_in":3600}"#.to_owned(),
+            ),
+        ])
+        .await;
+        let endpoints = Endpoints {
+            authorization_endpoint: String::new(),
+            token_endpoint: format!("{base}/token"),
+            origin: String::new(),
+        };
+        let form = || vec![("grant_type", "g".to_owned()), ("client_id", "c".to_owned())];
+
+        endpoints
+            .exchange(
+                &Client::new(),
+                Exchange {
+                    credential: "C",
+                    scope: "s",
+                    cae: true,
+                    form: form(),
+                },
+            )
+            .await
+            .unwrap();
+        endpoints
+            .exchange(
+                &Client::new(),
+                Exchange {
+                    credential: "C",
+                    scope: "s",
+                    cae: false,
+                    form: form(),
+                },
+            )
+            .await
+            .unwrap();
+        let requests = handle.await.unwrap();
+
+        assert!(requests[0].ends_with(
+            "claims=%7B%22access_token%22%3A%7B%22xms_cc%22%3A%7B%22values%22%3A%5B%22CP1%22%5D%7D%7D%7D&client_id=c&grant_type=g&scope=s+openid+offline_access+profile"
+        ));
+        assert!(!requests[1].contains("claims="));
     }
 }

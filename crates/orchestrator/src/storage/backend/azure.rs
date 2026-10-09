@@ -1,13 +1,16 @@
 mod aad;
 pub mod azcore;
 mod client_certificate;
+mod client_secret;
 mod connection_string;
 pub mod default_credential;
 mod delegation;
 mod der;
 mod managed_identity;
+mod msal;
 mod powershell;
 mod sas;
+mod tenant;
 #[cfg(test)]
 pub mod testing;
 mod token_source;
@@ -31,8 +34,10 @@ use connection_string::{ConnectionString, SharedKey};
 use default_credential::DefaultAzureCredential;
 use delegation::DelegationRequest;
 use sas::{BlobSas, SasKey};
+use token_source::TokenRequest;
 
 const STORAGE_SCOPE: &str = "https://storage.azure.com/.default";
+const CACHE_MARGIN: Duration = Duration::from_secs(60);
 const STORE: &str = "MicrosoftAzure";
 const SIGNING_UNSUPPORTED: &str = "signed upload URLs are not supported by this storage provider";
 
@@ -79,9 +84,12 @@ impl CredentialProvider for StorageTokens {
         self.cache
             .get_or_fetch(|| async {
                 self.credential
-                    .token(STORAGE_SCOPE)
+                    .token_for(&storage_request())
                     .await
-                    .map(|token| (AzureCredential::BearerToken(token.secret), Some(token.expires_at)))
+                    .map(|token| {
+                        let fresh_until = token.refresh_instant() + CACHE_MARGIN;
+                        (AzureCredential::BearerToken(token.secret), Some(fresh_until))
+                    })
                     .map_err(|source| StoreError::Generic {
                         store: STORE,
                         source: source.into(),
@@ -89,6 +97,10 @@ impl CredentialProvider for StorageTokens {
             })
             .await
     }
+}
+
+fn storage_request() -> TokenRequest<'static> {
+    TokenRequest::new(STORAGE_SCOPE).with_cae()
 }
 
 pub fn open(spec: &StorageSpec, env: AzureEnv) -> Result<AzureBackend, String> {
@@ -250,7 +262,7 @@ impl AzureSigner {
         credential: &DefaultAzureCredential,
         client: &reqwest::Client,
     ) -> Result<delegation::UserDelegationKey, String> {
-        let token = credential.token(STORAGE_SCOPE).await?;
+        let token = credential.token_for(&storage_request()).await?;
         DelegationRequest {
             service_url: &self.service_url,
             bearer: &token.secret,

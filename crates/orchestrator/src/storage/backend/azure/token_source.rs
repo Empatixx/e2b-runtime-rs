@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const EARLY_REFRESH: Duration = Duration::from_secs(5 * 60);
+
 use azure_core::credentials::TokenCredential;
 use azure_core::error::ErrorKind;
 
@@ -8,12 +10,53 @@ use azure_core::error::ErrorKind;
 pub struct BearerToken {
     pub secret: String,
     pub expires_at: SystemTime,
+    pub refresh_on: Option<SystemTime>,
+}
+
+impl BearerToken {
+    pub fn without_refresh(secret: String, expires_at: SystemTime) -> Self {
+        Self {
+            secret,
+            expires_at,
+            refresh_on: None,
+        }
+    }
+
+    pub fn refresh_instant(&self) -> SystemTime {
+        self.refresh_on
+            .unwrap_or_else(|| self.expires_at.checked_sub(EARLY_REFRESH).unwrap_or(UNIX_EPOCH))
+    }
+}
+
+pub struct TokenRequest<'a> {
+    pub scope: &'a str,
+    pub tenant: &'a str,
+    pub cae: bool,
+}
+
+impl<'a> TokenRequest<'a> {
+    pub fn new(scope: &'a str) -> Self {
+        Self {
+            scope,
+            tenant: "",
+            cae: false,
+        }
+    }
+
+    pub fn with_tenant(self, tenant: &'a str) -> Self {
+        Self { tenant, ..self }
+    }
+
+    pub fn with_cae(self) -> Self {
+        Self { cae: true, ..self }
+    }
 }
 
 impl std::fmt::Debug for BearerToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BearerToken")
             .field("expires_at", &self.expires_at)
+            .field("refresh_on", &self.refresh_on)
             .finish_non_exhaustive()
     }
 }
@@ -34,32 +77,40 @@ impl SourceError {
 
 #[async_trait::async_trait]
 pub trait TokenSource: Send + Sync {
-    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError>;
+    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError>;
+
+    #[cfg(test)]
+    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+        self.token_for(&TokenRequest::new(scope)).await
+    }
 }
 
 pub struct SdkSource {
+    name: &'static str,
     credential: Arc<dyn TokenCredential>,
 }
 
 impl SdkSource {
-    pub fn new(credential: Arc<dyn TokenCredential>) -> Self {
-        Self { credential }
+    pub fn new(name: &'static str, credential: Arc<dyn TokenCredential>) -> Self {
+        Self { name, credential }
     }
 }
 
 #[async_trait::async_trait]
 impl TokenSource for SdkSource {
-    async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
         self.credential
-            .get_token(&[scope], None)
+            .get_token(&[request.scope], None)
             .await
-            .map(|token| BearerToken {
-                secret: token.token.secret().to_owned(),
-                expires_at: expiry(token.expires_on.unix_timestamp()),
+            .map(|token| {
+                BearerToken::without_refresh(
+                    token.token.secret().to_owned(),
+                    expiry(token.expires_on.unix_timestamp()),
+                )
             })
             .map_err(|e| match e.kind() {
                 ErrorKind::HttpResponse { .. } => SourceError::Failed(e.to_string()),
-                _ => SourceError::Unavailable(e.to_string()),
+                _ => SourceError::Unavailable(format!("{}: {e}", self.name)),
             })
     }
 }
