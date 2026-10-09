@@ -18,7 +18,6 @@ use futures::{StreamExt, TryStreamExt};
 use hyper::Method;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::buffered::BufWriter;
-use object_store::gcp::GoogleCloudStorage;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
@@ -149,7 +148,7 @@ impl Storage {
     }
 
     #[cfg(test)]
-    pub fn gcs_for_test(store: GoogleCloudStorage) -> Self {
+    pub fn gcs_for_test(store: impl ObjectStore) -> Self {
         let spec = StorageSpec {
             provider: Provider::Gcp,
             bucket: "bucket".to_owned(),
@@ -158,7 +157,7 @@ impl Storage {
         Self::gcs(&spec, store)
     }
 
-    fn gcs(spec: &StorageSpec, store: GoogleCloudStorage) -> Self {
+    fn gcs(spec: &StorageSpec, store: impl ObjectStore) -> Self {
         let signer = ServiceAccountSigner::from_env(&spec.bucket);
         Self::with_signing(store, Signing::Gcs(signer))
     }

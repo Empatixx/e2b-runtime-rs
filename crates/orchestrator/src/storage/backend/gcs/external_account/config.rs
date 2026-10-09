@@ -19,6 +19,7 @@ pub struct ExternalAccountFile {
     pub credential_source: Option<CredentialSource>,
     pub service_account_impersonation: Option<ImpersonationInfo>,
     pub workforce_pool_user_project: String,
+    pub universe_domain: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

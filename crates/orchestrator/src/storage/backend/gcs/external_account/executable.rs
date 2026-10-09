@@ -4,7 +4,11 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use super::config::{CredentialSource, ExternalAccountFile};
+use super::exit_status::{exit_code, exit_text, start_failure};
 
+const EMAIL_PREFIX: &str = "https://iamcredentials";
+const EMAIL_PATH: &str = "/v1/projects/-/serviceAccounts/";
+const EMAIL_MARKER: &str = ":generateAccessToken";
 const ALLOW_ENV: &str = "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES";
 const SUPPORTED_MAX_VERSION: i64 = 1;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -133,11 +137,12 @@ impl ExecutableSubject {
         let output = command
             .output()
             .await
-            .map_err(|e| format!("credentials: executable command failed: {e}"))?;
+            .map_err(|e| format!("credentials: executable command failed: {}", start_failure(program, &e)))?;
         if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
             return Err(format!(
-                "credentials: executable command failed with exit code {code}: exit status {code}"
+                "credentials: executable command failed with exit code {}: {}",
+                exit_code(output.status),
+                exit_text(output.status)
             ));
         }
         let stdout = output.stdout.trim_ascii();
@@ -216,10 +221,35 @@ fn now_unix() -> i64 {
 }
 
 fn impersonated_email(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("https://iamcredentials.")?;
-    let (_, tail) = rest.split_once("/v1/projects/-/serviceAccounts/")?;
-    let email = tail.strip_suffix(":generateAccessToken")?;
-    email.contains('@').then(|| email.to_owned())
+    url.match_indices(EMAIL_PREFIX)
+        .find_map(|(start, _)| email_after(&url[start + EMAIL_PREFIX.len()..]))
+}
+
+fn email_after(rest: &str) -> Option<String> {
+    let mut literals: Vec<usize> = rest.match_indices(EMAIL_PATH).map(|(index, _)| index).collect();
+    literals.reverse();
+    literals.into_iter().find_map(|index| {
+        let host = &rest[..index];
+        let account = &rest[index + EMAIL_PATH.len()..];
+        (host.chars().count() >= 2 && !host.contains('\n'))
+            .then(|| email_before_marker(account))
+            .flatten()
+    })
+}
+
+fn email_before_marker(account: &str) -> Option<String> {
+    let first_at = account.find('@')?;
+    let markers: Vec<usize> = account
+        .match_indices(EMAIL_MARKER)
+        .map(|(index, _)| index)
+        .filter(|index| *index > first_at)
+        .collect();
+    markers
+        .into_iter()
+        .rev()
+        .map(|index| &account[..index])
+        .find(|email| !email.contains('\n'))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -414,5 +444,94 @@ mod tests {
             subject.run().await.unwrap_err(),
             "credentials: executable command failed with exit code 3: exit status 3"
         );
+    }
+
+    #[test]
+    fn the_impersonated_email_is_found_like_the_unanchored_go_regexp() {
+        let email = |url: &str| impersonated_email(url);
+        let base = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/";
+
+        assert_eq!(
+            email(&format!("{base}sa@p.iam.gserviceaccount.com:generateAccessToken")).as_deref(),
+            Some("sa@p.iam.gserviceaccount.com")
+        );
+        assert_eq!(
+            email(&format!(
+                "{base}sa@p.iam.gserviceaccount.com:generateAccessToken?alt=json"
+            ))
+            .as_deref(),
+            Some("sa@p.iam.gserviceaccount.com")
+        );
+        assert_eq!(
+            email("prefix https://iamcredentials-x.example.com/v1/projects/-/serviceAccounts/a@b:generateAccessToken")
+                .as_deref(),
+            Some("a@b")
+        );
+        assert_eq!(
+            email(&format!(
+                "{base}a@b:generateAccessToken{}c@d:generateAccessToken",
+                EMAIL_PATH
+            ))
+            .as_deref(),
+            Some("c@d")
+        );
+        assert_eq!(email(&format!("{base}nomail:generateAccessToken")), None);
+        assert_eq!(
+            email("https://iamcredentials./v1/projects/-/serviceAccounts/a@b:generateAccessToken"),
+            None
+        );
+        assert_eq!(
+            email("https://iamcredentials.a/v1/projects/-/serviceAccounts/a@b:generateAccessToken").as_deref(),
+            Some("a@b")
+        );
+        assert_eq!(
+            email(&format!("{base}a@b:generateAccessToken:generateAccessToken")).as_deref(),
+            Some("a@b:generateAccessToken")
+        );
+        assert_eq!(
+            email(&format!("{base}a:generateAccessToken@b:generateAccessToken")).as_deref(),
+            Some("a:generateAccessToken@b")
+        );
+    }
+
+    fn script_subject(body: &str) -> (ExecutableSubject, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut subject = subject("");
+        subject.command = path.display().to_string();
+        (subject, dir)
+    }
+
+    #[tokio::test]
+    async fn failing_commands_read_like_go_exec_errors() {
+        let (exits, _keep_exits) = script_subject("exit 3");
+        let (killed, _keep_killed) = script_subject("kill -9 $$");
+        let mut missing = subject("");
+        missing.command = "no-such-binary-e2b --flag".to_owned();
+
+        assert_eq!(
+            exits.run().await.unwrap_err(),
+            "credentials: executable command failed with exit code 3: exit status 3"
+        );
+        assert_eq!(
+            killed.run().await.unwrap_err(),
+            "credentials: executable command failed with exit code -1: signal: killed"
+        );
+        assert_eq!(
+            missing.run().await.unwrap_err(),
+            "credentials: executable command failed: exec: \"no-such-binary-e2b\": executable file not found in $PATH"
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_answers_when_stdout_is_empty() {
+        let (silent, _keep) = script_subject("echo '  from-stderr  ' >&2");
+        let (loud, _keep_loud) = script_subject("echo ' from-stdout '; echo ignored >&2");
+
+        assert_eq!(silent.run().await.unwrap(), b"from-stderr");
+        assert_eq!(loud.run().await.unwrap(), b"from-stdout");
     }
 }

@@ -6,6 +6,8 @@ use chrono::DateTime;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use super::super::form::UrlEncodedForm;
+
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 const DEFAULT_LIFETIME: &str = "3600s";
@@ -78,7 +80,7 @@ impl Exchange<'_> {
                     self.source, self.impersonating, self.lifetime_configured
                 ),
             )
-            .form(&form);
+            .url_encoded_form(form);
         if !self.client_id.is_empty() && !self.client_secret.is_empty() {
             let basic = STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret));
             request = request.header("Authorization", format!("Basic {basic}"));
@@ -128,7 +130,7 @@ pub async fn refresh(
     let request = client
         .post(endpoint)
         .header("Authorization", format!("Basic {basic}"))
-        .form(&[("grant_type", "refresh_token"), ("refresh_token", refresh_token)]);
+        .url_encoded_form([("grant_type", "refresh_token"), ("refresh_token", refresh_token)]);
     let parsed = send(request).await?;
     match u64::try_from(parsed.expires_in) {
         Err(_) => Err("credentials: invalid expiry from security token service".to_owned()),

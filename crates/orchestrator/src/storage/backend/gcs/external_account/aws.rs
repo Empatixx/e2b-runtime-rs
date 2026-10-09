@@ -128,11 +128,7 @@ impl AwsSubject {
             return Err("credentials: unable to determine AWS region".to_owned());
         }
         match self.get(&self.region_url, session_token).await? {
-            (200, body) => {
-                let mut zone = body;
-                zone.pop();
-                Ok(zone)
-            }
+            (200, body) => Ok(without_last_byte(body)),
             (_, body) => Err(format!("credentials: unable to retrieve AWS region - {body}")),
         }
     }
@@ -166,6 +162,11 @@ impl AwsSubject {
             _ => Ok(keys),
         }
     }
+}
+
+fn without_last_byte(body: String) -> String {
+    let bytes = body.into_bytes();
+    String::from_utf8_lossy(&bytes[..bytes.len().saturating_sub(1)]).into_owned()
 }
 
 fn environment(name: &str) -> Option<String> {
@@ -447,5 +448,12 @@ mod tests {
                 session_token: "t".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn the_region_drops_the_availability_zone_byte() {
+        assert_eq!(without_last_byte("us-east-2b".to_owned()), "us-east-2");
+        assert_eq!(without_last_byte(String::new()), "");
+        assert_eq!(without_last_byte("é".to_owned()), "\u{fffd}");
     }
 }

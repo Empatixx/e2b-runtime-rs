@@ -1,7 +1,12 @@
 pub mod adc;
+pub mod detect;
 pub mod external_account;
 pub mod flows;
+mod form;
 mod key_errors;
+pub mod oauth2;
+pub mod store;
+pub mod universe;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,10 +27,18 @@ const DEFAULT_HOST: &str = "storage.googleapis.com";
 const SERVICE_ACCOUNT_TYPE: &str = "storage.gcpServiceToken";
 const MISSING_ACCESS_ID: &str = "storage: missing required GoogleAccessID";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceAccountSigner {
     pub bucket: String,
     pub service_account_base64: String,
+}
+
+impl std::fmt::Debug for ServiceAccountSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccountSigner")
+            .field("bucket", &self.bucket)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize)]
@@ -261,6 +274,14 @@ mod tests {
         UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key.public().as_ref())
             .verify(message.as_bytes(), &signature)
             .unwrap();
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_service_account_secret() {
+        let printed = format!("{:?}", signer("super-secret-value"));
+
+        assert!(printed.contains("bucket"));
+        assert!(!printed.contains("super-secret-value"));
     }
 
     const TEST_KEY: &str = include_str!("gcs/test_key.pem");

@@ -1,10 +1,8 @@
-use std::sync::Arc;
-use std::time::SystemTime;
-
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 
-use super::{CLOUD_PLATFORM_SCOPE, TokenFlow, build};
+use super::{CLOUD_PLATFORM_SCOPE, FlowProfile, FlowToken, TokenFlow, build, default_client};
 use crate::storage::backend::gcs::external_account::impersonate;
 
 const MISSING: &str = "missing 'source_credentials' field or 'service_account_impersonation_url' in credentials";
@@ -16,18 +14,20 @@ struct ImpersonatedFile {
     delegates: Vec<String>,
     scopes: Vec<String>,
     source_credentials: Option<serde_json::Value>,
+    universe_domain: String,
 }
 
 pub struct ImpersonatedFlow {
     url: String,
     delegates: Vec<String>,
     scopes: Vec<String>,
+    universe_domain: String,
     source: Arc<dyn TokenFlow>,
     client: Client,
 }
 
 impl ImpersonatedFlow {
-    pub fn from_json(json: &[u8], scopes: &[&str]) -> Result<Arc<Self>, String> {
+    pub fn from_json(json: &[u8], profile: &FlowProfile) -> Result<Arc<Self>, String> {
         let file: ImpersonatedFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
         let source_json = match (
             &file.source_credentials,
@@ -36,17 +36,18 @@ impl ImpersonatedFlow {
             (Some(source), false) => source.to_string(),
             _ => return Err(MISSING.to_owned()),
         };
-        let source = build(source_json.as_bytes(), &[CLOUD_PLATFORM_SCOPE])?;
-        let scopes = match scopes.is_empty() {
+        let source = build(source_json.as_bytes(), &profile.with_scopes(&[CLOUD_PLATFORM_SCOPE]))?;
+        let scopes = match profile.scopes.is_empty() {
             true => file.scopes,
-            false => scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            false => profile.scopes.clone(),
         };
         Ok(Arc::new(Self {
             url: file.service_account_impersonation_url,
             delegates: file.delegates,
             scopes,
+            universe_domain: file.universe_domain,
             source,
-            client: Client::new(),
+            client: default_client()?,
         }))
     }
 
@@ -56,6 +57,7 @@ impl ImpersonatedFlow {
             url: url.to_owned(),
             delegates: delegates.iter().map(|d| (*d).to_owned()).collect(),
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            universe_domain: String::new(),
             source,
             client: Client::new(),
         }
@@ -64,11 +66,18 @@ impl ImpersonatedFlow {
 
 #[async_trait::async_trait]
 impl TokenFlow for ImpersonatedFlow {
-    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
-        let (source_token, _) = self.source.token().await?;
-        impersonate(&self.client, &self.url, &source_token, &self.scopes, &self.delegates, 0)
+    async fn token(&self) -> Result<FlowToken, String> {
+        let source = self.source.token().await?;
+        impersonate(&self.client, &self.url, &source.value, &self.scopes, &self.delegates, 0)
             .await
-            .map(|(token, expiry)| (token, Some(expiry)))
+            .map(|(value, expiry)| FlowToken {
+                value,
+                expiry: Some(expiry),
+            })
+    }
+
+    fn universe_domain(&self) -> String {
+        self.universe_domain.clone()
     }
 }
 
@@ -79,20 +88,30 @@ mod tests {
     use super::*;
     use crate::storage::backend::azure::testing::read_request;
 
+    fn profile(scopes: &[&str]) -> FlowProfile {
+        FlowProfile::new(scopes, false)
+    }
+
     struct Fixed;
 
     #[async_trait::async_trait]
     impl TokenFlow for Fixed {
-        async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
-            Ok(("source-token".to_owned(), None))
+        async fn token(&self) -> Result<FlowToken, String> {
+            Ok(FlowToken {
+                value: "source-token".to_owned(),
+                expiry: None,
+            })
         }
     }
 
     #[test]
     fn the_file_needs_a_source_and_an_impersonation_url() {
-        assert_eq!(ImpersonatedFlow::from_json(b"{}", &[]).err().unwrap(), MISSING);
         assert_eq!(
-            ImpersonatedFlow::from_json(br#"{"service_account_impersonation_url":"u"}"#, &[])
+            ImpersonatedFlow::from_json(b"{}", &profile(&[])).err().unwrap(),
+            MISSING
+        );
+        assert_eq!(
+            ImpersonatedFlow::from_json(br#"{"service_account_impersonation_url":"u"}"#, &profile(&[]))
                 .err()
                 .unwrap(),
             MISSING
@@ -100,7 +119,7 @@ mod tests {
         assert_eq!(
             ImpersonatedFlow::from_json(
                 br#"{"service_account_impersonation_url":"u","source_credentials":{"type":"nope"}}"#,
-                &[]
+                &profile(&[])
             )
             .err()
             .unwrap(),
@@ -112,8 +131,14 @@ mod tests {
     fn user_scopes_win_over_the_file_scopes() {
         let json = br#"{"service_account_impersonation_url":"u","scopes":["file"],"source_credentials":{"type":"authorized_user","client_id":"a","client_secret":"b","refresh_token":"c"}}"#;
 
-        assert_eq!(ImpersonatedFlow::from_json(json, &[]).unwrap().scopes, ["file"]);
-        assert_eq!(ImpersonatedFlow::from_json(json, &["user"]).unwrap().scopes, ["user"]);
+        assert_eq!(
+            ImpersonatedFlow::from_json(json, &profile(&[])).unwrap().scopes,
+            ["file"]
+        );
+        assert_eq!(
+            ImpersonatedFlow::from_json(json, &profile(&["user"])).unwrap().scopes,
+            ["user"]
+        );
     }
 
     #[tokio::test]
@@ -133,12 +158,38 @@ mod tests {
         });
         let flow = ImpersonatedFlow::with_source(&format!("http://{address}/gen"), &["d@x"], &["s1"], Arc::new(Fixed));
 
-        let (token, expiry) = flow.token().await.unwrap();
+        let token = flow.token().await.unwrap();
         let request = server.await.unwrap();
 
-        assert_eq!(token, "sa-token");
-        assert!(expiry.is_some());
+        assert_eq!(token.value, "sa-token");
+        assert!(token.expiry.is_some());
         assert!(request.contains("authorization: Bearer source-token"));
         assert!(request.ends_with(r#"{"delegates":["d@x"],"lifetime":"3600s","scope":["s1"]}"#));
+    }
+
+    #[test]
+    fn the_source_credentials_get_the_cloud_platform_scope_and_inherit_the_self_signed_choice() {
+        let json = serde_json::json!({
+            "service_account_impersonation_url": "u",
+            "source_credentials": {"type": "service_account", "client_email": "a@b", "private_key": "nope"}
+        });
+
+        let error = ImpersonatedFlow::from_json(json.to_string().as_bytes(), &FlowProfile::new(&[], true))
+            .err()
+            .unwrap();
+
+        assert!(error.starts_with("credentials: could not parse key: "), "{error}");
+    }
+
+    #[test]
+    fn the_universe_domain_comes_from_the_impersonation_file() {
+        let json = br#"{"service_account_impersonation_url":"u","universe_domain":"example.com","source_credentials":{"type":"authorized_user","client_id":"a","client_secret":"b","refresh_token":"c"}}"#;
+
+        assert_eq!(
+            ImpersonatedFlow::from_json(json, &profile(&[]))
+                .unwrap()
+                .universe_domain(),
+            "example.com"
+        );
     }
 }

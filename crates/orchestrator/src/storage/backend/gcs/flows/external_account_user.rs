@@ -1,11 +1,9 @@
-use std::sync::Arc;
-use std::time::SystemTime;
-
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::TokenFlow;
+use super::{FlowToken, TokenFlow, default_client};
 use crate::storage::backend::gcs::external_account::refresh;
 
 const INVALID: &str = "credentials: invalid external_account_authorized_user configuration";
@@ -17,12 +15,14 @@ struct UserFile {
     client_secret: String,
     refresh_token: String,
     token_url: String,
+    universe_domain: String,
 }
 
 pub struct ExternalAccountUserFlow {
     client_id: String,
     client_secret: String,
     token_url: String,
+    universe_domain: String,
     refresh_token: Mutex<String>,
     client: Client,
 }
@@ -44,8 +44,9 @@ impl ExternalAccountUserFlow {
                 client_id: file.client_id,
                 client_secret: file.client_secret,
                 token_url: file.token_url,
+                universe_domain: file.universe_domain,
                 refresh_token: Mutex::new(file.refresh_token),
-                client: Client::new(),
+                client: default_client()?,
             })),
         }
     }
@@ -53,7 +54,7 @@ impl ExternalAccountUserFlow {
 
 #[async_trait::async_trait]
 impl TokenFlow for ExternalAccountUserFlow {
-    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
+    async fn token(&self) -> Result<FlowToken, String> {
         let mut refresh_token = self.refresh_token.lock().await;
         let refreshed = refresh(
             &self.client,
@@ -66,7 +67,14 @@ impl TokenFlow for ExternalAccountUserFlow {
         if !refreshed.refresh_token.is_empty() {
             *refresh_token = refreshed.refresh_token;
         }
-        Ok((refreshed.access_token, Some(refreshed.expiry)))
+        Ok(FlowToken {
+            value: refreshed.access_token,
+            expiry: Some(refreshed.expiry),
+        })
+    }
+
+    fn universe_domain(&self) -> String {
+        self.universe_domain.clone()
     }
 }
 
@@ -112,11 +120,11 @@ mod tests {
         let flow =
             ExternalAccountUserFlow::from_json(json(&format!("http://{address}/v1/oauthtoken")).as_bytes()).unwrap();
 
-        let (token, expiry) = flow.token().await.unwrap();
+        let token = flow.token().await.unwrap();
         let request = server.await.unwrap();
 
-        assert_eq!(token, "at");
-        assert!(expiry.is_some());
+        assert_eq!(token.value, "at");
+        assert!(token.expiry.is_some());
         assert!(request.starts_with("POST /v1/oauthtoken HTTP/1.1"));
         assert!(request.contains("authorization: Basic aWQ6c2VjcmV0"));
         assert!(request.ends_with("grant_type=refresh_token&refresh_token=rt"));

@@ -6,9 +6,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::Client;
 use serde::Deserialize;
 
-use super::TokenFlow;
+use super::super::form::UrlEncodedForm;
 use super::response::read_two_legged;
 use super::service_key::ServiceKey;
+use super::{FlowProfile, FlowToken, TokenFlow, default_client, request_error};
 
 const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_UNIVERSE_DOMAIN: &str = "googleapis.com";
@@ -38,11 +39,11 @@ pub struct ServiceAccountFlow {
 }
 
 impl ServiceAccountFlow {
-    pub fn from_json(json: &[u8], scopes: &[&str]) -> Result<Arc<Self>, String> {
+    pub fn from_json(json: &[u8], profile: &FlowProfile) -> Result<Arc<Self>, String> {
         let file: ServiceAccountFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
-        let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_owned()).collect();
-        let self_signed = !file.universe_domain.is_empty() && file.universe_domain != DEFAULT_UNIVERSE_DOMAIN;
-        let mode = match self_signed {
+        let scopes = profile.scopes.clone();
+        let non_default_universe = !file.universe_domain.is_empty() && file.universe_domain != DEFAULT_UNIVERSE_DOMAIN;
+        let mode = match profile.self_signed_jwt || non_default_universe {
             true => Self::self_signed(&file, &scopes)?,
             false => Self::token_exchange(&file)?,
         };
@@ -71,7 +72,7 @@ impl ServiceAccountFlow {
         };
         Ok(Mode::TokenExchange {
             token_url,
-            client: Client::new(),
+            client: default_client()?,
         })
     }
 
@@ -98,7 +99,7 @@ impl ServiceAccountFlow {
         self.jwt(&key, &claims)
     }
 
-    fn self_signed_token(&self, key: &ServiceKey, now_unix: u64) -> Result<(String, Option<SystemTime>), String> {
+    fn self_signed_token(&self, key: &ServiceKey, now_unix: u64) -> Result<FlowToken, String> {
         let claims = format!(
             r#"{{"iss":{email},"scope":{},"exp":{},"iat":{now_unix},"aud":"","sub":{email}}}"#,
             json(&self.scopes.join(" ")),
@@ -107,7 +108,10 @@ impl ServiceAccountFlow {
         );
         let expiry = UNIX_EPOCH + Duration::from_secs(now_unix + LIFETIME_SECONDS);
         self.jwt(key, &claims)
-            .map(|token| (token, Some(expiry)))
+            .map(|value| FlowToken {
+                value,
+                expiry: Some(expiry),
+            })
             .map_err(|e| format!("credentials: could not encode JWT: {e}"))
     }
 }
@@ -124,22 +128,27 @@ fn now_unix() -> u64 {
 
 #[async_trait::async_trait]
 impl TokenFlow for ServiceAccountFlow {
-    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
+    async fn token(&self) -> Result<FlowToken, String> {
         match &self.mode {
             Mode::SelfSigned { key } => self.self_signed_token(key, now_unix()),
             Mode::TokenExchange { token_url, client } => {
                 let assertion = self.assertion(token_url, now_unix())?;
                 let response = client
                     .post(token_url)
-                    .form(&[("grant_type", GRANT_TYPE), ("assertion", assertion.as_str())])
+                    .url_encoded_form([("grant_type", GRANT_TYPE), ("assertion", assertion.as_str())])
                     .send()
                     .await
-                    .map_err(|e| format!("auth: cannot fetch token: {e}"))?;
-                read_two_legged(response)
-                    .await
-                    .map(|token| (token.access_token, token.expiry))
+                    .map_err(|e| format!("auth: cannot fetch token: {}", request_error("Post", token_url, &e)))?;
+                read_two_legged(response).await.map(|token| FlowToken {
+                    value: token.access_token,
+                    expiry: token.expiry,
+                })
             }
         }
+    }
+
+    fn universe_domain(&self) -> String {
+        self.file.universe_domain.clone()
     }
 }
 
@@ -153,18 +162,22 @@ mod tests {
 
     const KEY: &str = include_str!("../test_key.pem");
 
+    fn profile(scopes: &[&str]) -> FlowProfile {
+        FlowProfile::new(scopes, false)
+    }
+
     fn flow(json: &str) -> Arc<ServiceAccountFlow> {
-        ServiceAccountFlow::from_json(json.as_bytes(), &["scope-a", "scope-b"]).unwrap()
+        ServiceAccountFlow::from_json(json.as_bytes(), &profile(&["scope-a", "scope-b"])).unwrap()
     }
 
     #[test]
     fn required_fields_are_validated_with_the_sdk_texts() {
         assert_eq!(
-            ServiceAccountFlow::from_json(b"{}", &[]).err().unwrap(),
+            ServiceAccountFlow::from_json(b"{}", &profile(&[])).err().unwrap(),
             "auth: email must be provided"
         );
         assert_eq!(
-            ServiceAccountFlow::from_json(br#"{"client_email":"a@b"}"#, &[])
+            ServiceAccountFlow::from_json(br#"{"client_email":"a@b"}"#, &profile(&[]))
                 .err()
                 .unwrap(),
             "auth: private key must be provided"
@@ -201,7 +214,7 @@ mod tests {
         let json = serde_json::json!({"client_email": "sa@p.iam", "private_key": KEY, "private_key_id": "kid1", "universe_domain": "example.com"});
         let flow = flow(&json.to_string());
 
-        let (token, expiry) = flow
+        let FlowToken { value: token, expiry } = flow
             .self_signed_token(
                 match &flow.mode {
                     Mode::SelfSigned { key } => key,
@@ -225,18 +238,44 @@ mod tests {
             serde_json::json!({"client_email": "a@b", "private_key": "nope", "universe_domain": "example.com"});
 
         assert_eq!(
-            ServiceAccountFlow::from_json(bad_key.to_string().as_bytes(), &[])
+            ServiceAccountFlow::from_json(bad_key.to_string().as_bytes(), &profile(&[]))
                 .err()
                 .unwrap(),
             "credentials: both scopes and audience are empty"
         );
         assert!(
-            ServiceAccountFlow::from_json(bad_key.to_string().as_bytes(), &["s"])
+            ServiceAccountFlow::from_json(bad_key.to_string().as_bytes(), &profile(&["s"]))
                 .err()
                 .unwrap()
                 .starts_with(
                     "credentials: could not parse key: failed to parse private key. Tried PKCS8, PKCS1, and EC formats."
                 )
         );
+    }
+
+    #[test]
+    fn a_self_signed_profile_skips_the_token_exchange_for_the_default_universe_too() {
+        let json = serde_json::json!({"client_email": "sa@p.iam", "private_key": KEY, "private_key_id": "kid1"});
+
+        let flow = ServiceAccountFlow::from_json(json.to_string().as_bytes(), &FlowProfile::new(&["s"], true)).unwrap();
+
+        assert!(matches!(flow.mode, Mode::SelfSigned { .. }));
+        assert_eq!(flow.universe_domain(), "");
+        assert_eq!(
+            ServiceAccountFlow::from_json(json.to_string().as_bytes(), &FlowProfile::new(&[], true))
+                .err()
+                .unwrap(),
+            "credentials: both scopes and audience are empty"
+        );
+    }
+
+    #[test]
+    fn the_universe_domain_comes_from_the_file() {
+        let json =
+            serde_json::json!({"client_email": "sa@p.iam", "private_key": KEY, "universe_domain": "example.com"});
+
+        let flow = flow(&json.to_string());
+
+        assert_eq!(flow.universe_domain(), "example.com");
     }
 }

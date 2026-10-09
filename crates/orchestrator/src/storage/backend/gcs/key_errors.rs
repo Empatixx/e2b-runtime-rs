@@ -149,6 +149,23 @@ pub fn parse_key_failure(der: &[u8]) -> String {
     )
 }
 
+pub fn oauth2_rsa_key(der: &[u8]) -> Result<RsaKeyPair, String> {
+    RsaKeyPair::from_pkcs8(der)
+        .or_else(|_| RsaKeyPair::from_der(der))
+        .map_err(|_| match is_non_rsa_pkcs8(der) {
+            true => "private key is invalid".to_owned(),
+            false => format!(
+                "private key should be a PEM or plain PKCS1 or PKCS8; parse error: {}",
+                pkcs1_error(der)
+            ),
+        })
+}
+
+fn is_non_rsa_pkcs8(der: &[u8]) -> bool {
+    use p256::pkcs8::DecodePrivateKey;
+    p256::SecretKey::from_pkcs8_der(der).is_ok() || p384::SecretKey::from_pkcs8_der(der).is_ok()
+}
+
 pub fn rsa_key(der: &[u8]) -> Result<RsaKeyPair, String> {
     RsaKeyPair::from_pkcs8(der)
         .or_else(|_| RsaKeyPair::from_der(der))
@@ -185,6 +202,30 @@ mod tests {
         assert_eq!(
             pkcs1_error(&[0x30, 0x03, 0x01, 0x02]),
             "asn1: syntax error: data truncated"
+        );
+    }
+
+    #[test]
+    fn the_oauth2_parser_words_its_failures_like_x_oauth2() {
+        let ec = crate::storage::backend::pem::blocks(include_str!("test_ec_pkcs8.pem"))
+            .remove(0)
+            .der;
+
+        assert_eq!(oauth2_rsa_key(&ec).err().unwrap(), "private key is invalid");
+        assert_eq!(
+            oauth2_rsa_key(b"nope").err().unwrap(),
+            format!(
+                "private key should be a PEM or plain PKCS1 or PKCS8; parse error: {}",
+                pkcs1_error(b"nope")
+            )
+        );
+        assert!(
+            oauth2_rsa_key(
+                &crate::storage::backend::pem::blocks(include_str!("test_key.pem"))
+                    .remove(0)
+                    .der
+            )
+            .is_ok()
         );
     }
 

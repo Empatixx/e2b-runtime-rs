@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use reqwest::Response;
+use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 
 use crate::go_url::query::Query;
@@ -22,11 +22,38 @@ struct TokenJson {
     error_uri: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialect {
+    Auth,
+    Oauth2,
+}
+
+impl Dialect {
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Oauth2 => "oauth2",
+        }
+    }
+
+    pub fn cannot_fetch(self, status: StatusCode, body: &str) -> String {
+        match self {
+            Self::Auth => format!("auth: cannot fetch token: {}\nResponse: {body}", status.as_u16()),
+            Self::Oauth2 => format!(
+                "oauth2: cannot fetch token: {} {}\nResponse: {body}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or_default()
+            ),
+        }
+    }
+}
+
 struct OAuthError {
+    dialect: Dialect,
     code: String,
     description: String,
     uri: String,
-    status: u16,
+    status: StatusCode,
     body: String,
 }
 
@@ -35,7 +62,7 @@ impl OAuthError {
         match self.code.is_empty() {
             false => {
                 let quote = crate::go_strconv::quote;
-                let mut text = format!("auth: {}", quote(&self.code));
+                let mut text = format!("{}: {}", self.dialect.prefix(), quote(&self.code));
                 if !self.description.is_empty() {
                     text.push_str(&format!(" {}", quote(&self.description)));
                 }
@@ -44,13 +71,9 @@ impl OAuthError {
                 }
                 text
             }
-            true => cannot_fetch(self.status, &self.body),
+            true => self.dialect.cannot_fetch(self.status, &self.body),
         }
     }
-}
-
-pub fn cannot_fetch(status: u16, body: &str) -> String {
-    format!("auth: cannot fetch token: {status}\nResponse: {body}")
 }
 
 fn expiry_in(seconds: i64) -> Option<SystemTime> {
@@ -61,13 +84,13 @@ fn expiry_in(seconds: i64) -> Option<SystemTime> {
 }
 
 pub async fn read_two_legged(response: Response) -> Result<OAuthToken, String> {
-    let status = response.status().as_u16();
+    let status = response.status();
     let body = response
         .text()
         .await
         .map_err(|e| format!("auth: cannot fetch token: {e}"))?;
-    if !(200..300).contains(&status) {
-        return Err(cannot_fetch(status, &body));
+    if !status.is_success() {
+        return Err(Dialect::Auth.cannot_fetch(status, &body));
     }
     let parsed: TokenJson = serde_json::from_str(&body).map_err(|e| format!("auth: cannot fetch token: {e}"))?;
     Ok(OAuthToken {
@@ -77,8 +100,8 @@ pub async fn read_two_legged(response: Response) -> Result<OAuthToken, String> {
     })
 }
 
-pub async fn read_three_legged(response: Response) -> Result<OAuthToken, String> {
-    let status = response.status().as_u16();
+pub async fn read_three_legged(response: Response, dialect: Dialect) -> Result<OAuthToken, String> {
+    let status = response.status();
     let content_type = response
         .headers()
         .get("content-type")
@@ -86,8 +109,9 @@ pub async fn read_three_legged(response: Response) -> Result<OAuthToken, String>
         .map(|value| value.split(';').next().unwrap_or_default().trim().to_owned())
         .unwrap_or_default();
     let body = response.text().await.map_err(|e| e.to_string())?;
-    let failure = !(200..300).contains(&status);
+    let failure = !status.is_success();
     let mut error = OAuthError {
+        dialect,
         code: String::new(),
         description: String::new(),
         uri: String::new(),
@@ -126,14 +150,14 @@ pub async fn read_three_legged(response: Response) -> Result<OAuthToken, String>
                 }
             }
             Err(_) if failure => return Err(error.text()),
-            Err(e) => return Err(format!("auth: cannot parse json: {e}")),
+            Err(e) => return Err(format!("{}: cannot parse json: {e}", dialect.prefix())),
         },
     };
     if failure || !error.code.is_empty() {
         return Err(error.text());
     }
     match token.access_token.is_empty() {
-        true => Err("auth: server response missing access_token".to_owned()),
+        true => Err(format!("{}: server response missing access_token", dialect.prefix())),
         false => Ok(token),
     }
 }

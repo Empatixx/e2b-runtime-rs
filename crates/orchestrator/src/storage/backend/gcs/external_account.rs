@@ -1,23 +1,21 @@
 mod aws;
 mod config;
 mod executable;
+mod exit_status;
 mod sts;
 mod subject;
 mod x509;
 
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use reqwest::Client;
 
 pub use sts::{Refreshed, impersonate, refresh};
 
-use super::flows::TokenFlow;
+use super::flows::{CLOUD_PLATFORM_SCOPE, FlowProfile, FlowToken, TokenFlow, default_client};
 use config::ExternalAccountFile;
 use subject::Subject;
-
-use super::flows::CLOUD_PLATFORM_SCOPE;
-
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct ExternalAccount {
     file: ExternalAccountFile,
@@ -35,24 +33,21 @@ impl std::fmt::Debug for ExternalAccount {
 }
 
 impl ExternalAccount {
-    pub fn from_json(json: &[u8], scopes: &[&str]) -> Result<Self, String> {
+    pub fn from_json(json: &[u8], profile: &FlowProfile) -> Result<Arc<Self>, String> {
         let file = ExternalAccountFile::parse(json)?;
         file.validate()?;
-        let plain = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let plain = default_client()?;
         let subject = Subject::from_file(&file, &plain)?;
         let client = match &subject {
             Subject::X509(x509) => x509.client()?,
             _ => plain,
         };
-        Ok(Self {
+        Ok(Arc::new(Self {
             file,
             subject,
             client,
-            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+            scopes: profile.scopes.clone(),
+        }))
     }
 
     async fn exchange(&self) -> Result<(String, SystemTime), String> {
@@ -97,8 +92,15 @@ impl ExternalAccount {
 
 #[async_trait::async_trait]
 impl TokenFlow for ExternalAccount {
-    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
-        self.exchange().await.map(|(token, expiry)| (token, Some(expiry)))
+    async fn token(&self) -> Result<FlowToken, String> {
+        self.exchange().await.map(|(value, expiry)| FlowToken {
+            value,
+            expiry: Some(expiry),
+        })
+    }
+
+    fn universe_domain(&self) -> String {
+        self.file.universe_domain.clone()
     }
 }
 
@@ -110,6 +112,10 @@ mod tests {
     use super::super::flows::FlowCredentials;
     use super::*;
     use crate::storage::backend::azure::testing::read_request;
+
+    fn profile(scopes: &[&str]) -> FlowProfile {
+        FlowProfile::new(scopes, false)
+    }
 
     async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -147,7 +153,7 @@ mod tests {
         )])
         .await;
         let json = account_json(token_file.to_str().unwrap(), &sts, "");
-        let credentials = FlowCredentials::from_json(json.as_bytes(), &["scope-a", "scope-b"]).unwrap();
+        let credentials = FlowCredentials::from_json(json.as_bytes(), &profile(&["scope-a", "scope-b"])).unwrap();
 
         let credential = credentials.get_credential().await.unwrap();
         credentials.get_credential().await.unwrap();
@@ -179,7 +185,7 @@ mod tests {
             r#","service_account_impersonation_url":"{server}/impersonate","service_account_impersonation":{{"token_lifetime_seconds":600}}"#
         );
         let json = account_json(token_file.to_str().unwrap(), &server, &extra);
-        let account = ExternalAccount::from_json(json.as_bytes(), &["scope-a"]).unwrap();
+        let account = ExternalAccount::from_json(json.as_bytes(), &profile(&["scope-a"])).unwrap();
 
         let (token, _) = account.exchange().await.unwrap();
         let requests = handle.await.unwrap();
@@ -199,7 +205,7 @@ mod tests {
         std::fs::write(&token_file, "jwt").unwrap();
         let (sts, _handle) = serve(vec![(400, r#"{"error":"invalid_grant"}"#.to_owned())]).await;
         let json = account_json(token_file.to_str().unwrap(), &sts, "");
-        let account = ExternalAccount::from_json(json.as_bytes(), &["s"]).unwrap();
+        let account = ExternalAccount::from_json(json.as_bytes(), &profile(&["s"])).unwrap();
 
         assert_eq!(
             account.exchange().await.unwrap_err(),
@@ -210,7 +216,7 @@ mod tests {
     #[test]
     fn configuration_errors_surface_at_construction() {
         assert_eq!(
-            ExternalAccount::from_json(br#"{"type":"external_account"}"#, &[])
+            ExternalAccount::from_json(br#"{"type":"external_account"}"#, &profile(&[]))
                 .err()
                 .unwrap(),
             "externalaccount: Audience must be set"

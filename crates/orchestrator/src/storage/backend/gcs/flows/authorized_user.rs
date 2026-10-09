@@ -1,12 +1,11 @@
-use std::sync::Arc;
-use std::time::SystemTime;
-
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::TokenFlow;
-use super::response::read_three_legged;
+use super::super::form::UrlEncodedForm;
+use super::response::{Dialect, read_three_legged};
+use super::{FlowToken, TokenFlow, default_client, request_error};
 
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
@@ -16,6 +15,7 @@ struct UserFile {
     client_id: String,
     client_secret: String,
     refresh_token: String,
+    universe_domain: String,
 }
 
 pub struct AuthorizedUserFlow {
@@ -23,6 +23,7 @@ pub struct AuthorizedUserFlow {
     client_secret: String,
     refresh_token: Mutex<String>,
     token_url: String,
+    universe_domain: String,
     client: Client,
 }
 
@@ -47,19 +48,20 @@ impl AuthorizedUserFlow {
             client_secret: file.client_secret,
             refresh_token: Mutex::new(file.refresh_token),
             token_url: token_url.to_owned(),
-            client: Client::new(),
+            universe_domain: file.universe_domain,
+            client: default_client()?,
         }))
     }
 }
 
 #[async_trait::async_trait]
 impl TokenFlow for AuthorizedUserFlow {
-    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
+    async fn token(&self) -> Result<FlowToken, String> {
         let mut refresh_token = self.refresh_token.lock().await;
         let response = self
             .client
             .post(&self.token_url)
-            .form(&[
+            .url_encoded_form([
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token.as_str()),
                 ("client_id", self.client_id.as_str()),
@@ -67,12 +69,19 @@ impl TokenFlow for AuthorizedUserFlow {
             ])
             .send()
             .await
-            .map_err(|e| e.to_string())?;
-        let token = read_three_legged(response).await?;
+            .map_err(|e| request_error("Post", &self.token_url, &e))?;
+        let token = read_three_legged(response, Dialect::Auth).await?;
         if !token.refresh_token.is_empty() {
             *refresh_token = token.refresh_token;
         }
-        Ok((token.access_token, token.expiry))
+        Ok(FlowToken {
+            value: token.access_token,
+            expiry: token.expiry,
+        })
+    }
+
+    fn universe_domain(&self) -> String {
+        self.universe_domain.clone()
     }
 }
 
@@ -133,12 +142,12 @@ mod tests {
         .await;
         let flow = AuthorizedUserFlow::with_token_url(FILE, &url).unwrap();
 
-        let (token, expiry) = flow.token().await.unwrap();
+        let token = flow.token().await.unwrap();
         let request = handle.await.unwrap();
 
-        assert_eq!(token, "at");
-        assert!(expiry.is_some());
-        assert!(request.ends_with("grant_type=refresh_token&refresh_token=rt&client_id=id&client_secret=secret"));
+        assert_eq!(token.value, "at");
+        assert!(token.expiry.is_some());
+        assert!(request.ends_with("client_id=id&client_secret=secret&grant_type=refresh_token&refresh_token=rt"));
         assert_eq!(*flow.refresh_token.lock().await, "rt2");
     }
 
