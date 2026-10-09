@@ -1,0 +1,154 @@
+---
+title: 'envd in Rust vs Go: same API, lower tail latency'
+description: We rewrote E2B's in-sandbox daemon in Rust as a drop-in replacement. Here is how we proved it behaves the same, and how it performs against the Go original.
+author: Jiří Krokviak
+date: '2026-10-09'
+---
+
+Every E2B sandbox runs **envd**, a small daemon the SDK talks to whenever it runs a command, uploads a file or watches a folder. Upstream envd is written in Go. We rewrote it in Rust as an exact drop-in replacement: same routes, same Connect RPC services, same JSON, same error texts, same flags, same version string.
+
+This post covers two questions: **does it really behave the same**, and **is it any faster**?
+
+## TL;DR
+
+- The official **E2B JS SDK test suite** passes against Rust envd: 105 tests passed, 9 skipped by the SDK itself in debug mode.
+- On 8 CPUs, Rust envd has **higher or equal throughput in all seven benchmarks** and **lower p99 latency in all seven**, often several times lower.
+- It idles at **~6 MB RSS** (Go ~11 MB), and the binary is **6.3 MB** (Go 10.3 MB).
+
+## Part 1: proving it behaves the same
+
+"Drop-in replacement" is a strong claim. A client must not notice the swap, not even in an error message. We test that in four layers, from fast to realistic.
+
+<Mermaid chart={`
+flowchart LR
+  U[unit tests<br/>every helper vs Go texts] --> C[contract tests<br/>real HTTP server]
+  C --> L[Linux tests in Docker<br/>PTY, inotify, setuid, cgroups]
+  L --> S[official E2B SDK tests<br/>against envd in Docker]
+  S --> V[CI with KVM<br/>SDK against a real microVM]
+`} />
+
+### 1. Unit tests next to the code
+
+Every module has its tests at the bottom of the same file. The interesting ones pin **exact Go output**: Go's errno texts (`no such file or directory`), Go's `exit status 1` and `signal: killed`, Go's JSON encoder escaping, Go's `filepath` cleaning, Go's flag parser errors (`flag provided but not defined: -x`). When we were unsure what Go prints, we ran a tiny Go program and pasted its output into the test.
+
+### 2. Contract tests against a running server
+
+`crates/envd/tests/*_contract.rs` start a real envd on a random port and talk to it over HTTP, the way a client would: status codes, headers, bodies and streamed Connect messages are asserted byte for byte. They cover init, files, filesystem, processes, PTYs, watchers, signing and upgrade.
+
+### 3. Linux-only behaviour in Docker
+
+PTYs, inotify, `setuid`, cgroups and `copy_file_range` only exist on Linux, and most of us develop on macOS. `scripts/test-linux.sh` runs the whole suite in a privileged Linux container. CI also builds the static musl binary for x86_64 and arm64 and runs the tests there as root, as envd runs in a real sandbox.
+
+### 4. The official SDK, unchanged
+
+The strongest evidence is the SDK itself. `scripts/sdk-tests.sh`:
+
+1. builds the envd image and starts it on `localhost:49983`;
+2. calls `POST /init` with the default user and workdir, exactly as the orchestrator would;
+3. clones `e2b-dev/E2B` at a pinned commit and runs its vitest suites for commands, files and PTY, with `E2B_DEBUG=true` so the SDK talks to envd directly.
+
+Result at SDK commit `3221e8ec`: **25 test files, 105 tests passed, 9 skipped**. The skipped ones are marked `skipIf(isDebug)` by the SDK (signed URLs, global env vars, a killed sandbox); we cover signing in our own contract tests.
+
+Finally, CI on a KVM-enabled runner boots a real Firecracker microVM with Rust envd under systemd, and runs the same SDK tests against a cold-booted and a resumed sandbox.
+
+## Part 2: performance
+
+### Method
+
+| | |
+|---|---|
+| Versions | Go envd from `e2b-dev/infra` commit `92197909` (`packages/envd`); Rust envd from this repository |
+| Builds | Go like upstream `make build`: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"`. Rust: `cargo build --release` with LTO, `codegen-units = 1`, stripped |
+| Image | Both in the same Debian trixie image, started with `envd -isnotfc -verbose`, then `POST /init {"defaultUser":"user"}` |
+| Load | [oha](https://github.com/hatoo/oha) in a separate container on the same Docker network, 15 s per test, a fresh envd container per test |
+| Memory | Peak RSS of envd (`VmHWM` of PID 1) |
+| CPU | Container cgroup `cpu.stat` divided by the number of requests |
+| Host | Docker Desktop on Apple Silicon; numbers move by ±10 % between runs, so smaller differences are a tie |
+
+The seven tests:
+
+| Test | Request |
+|---|---|
+| health | `GET /health` |
+| stat | `POST /filesystem.Filesystem/Stat` on `/home/user` (Connect JSON) |
+| listdir | `POST /filesystem.Filesystem/ListDir` on `/usr/bin`, depth 1 (~625 entries) |
+| download | `GET /files` of a 1 MiB file |
+| upload multipart | `POST /files`, 1 MiB `multipart/form-data`, 1000 rotating paths on tmpfs |
+| upload raw | `POST /files`, 1 MiB `application/octet-stream`, 1000 rotating paths on tmpfs |
+| process start | `POST /process.Process/Start` running `/bin/true` (Connect server stream) |
+
+A single run looks like this:
+
+```bash
+docker run -d --name envd --network bench --cpus=8 --memory=2g envd:bench
+docker run --rm --network bench --cpus=4 ghcr.io/hatoo/oha:latest \
+  --no-tui -z 15s -c 100 http://envd:49983/health
+```
+
+### 8 CPUs, 100 connections
+
+| Test | Rust req/s | Go req/s | Rust p99 | Go p99 | Rust CPU/req | Go CPU/req | Rust RSS | Go RSS |
+|---|---|---|---|---|---|---|---|---|
+| health | **361 285** | 257 347 | **0.72 ms** | 2.34 ms | **15 µs** | 21 µs | **9 MB** | 20 MB |
+| stat | **101 106** | 50 669 | **2.3 ms** | 15.7 ms | **74 µs** | 123 µs | **10 MB** | 60 MB |
+| listdir | **1 012** | 466 | **417 ms** | 785 ms | **8.0 ms** | 16.2 ms | **105 MB** | 130 MB |
+| download | 492 | 501 | **515 ms** | 1 016 ms | 16.4 ms | **15.7 ms** | **116 MB** | 141 MB |
+| upload multipart | **10 409** | 7 080 | **25 ms** | 103 ms | **733 µs** | 908 µs | 59 MB | **23 MB** |
+| upload raw | **13 687** | 9 076 | **19 ms** | 67 ms | **554 µs** | 622 µs | 32 MB | **24 MB** |
+| process start | **6 057** | 5 450 | **47 ms** | 59 ms | **1.32 ms** | 1.47 ms | **51 MB** | 126 MB |
+
+health and stat are limited by the load generator (4 CPUs): both servers used only about 5.5 of their 8 cores, so their real ceiling is higher. On the same CPU, Rust serves 40–100 % more of these requests.
+
+### 2 CPUs, 50 connections
+
+| Test | Rust req/s | Go req/s | Rust p99 | Go p99 | Rust RSS | Go RSS |
+|---|---|---|---|---|---|---|
+| health | **233 460** | 193 503 | **0.45 ms** | 0.87 ms | **6.7 MB** | 17 MB |
+| stat | **49 892** | 25 371 | **2.1 ms** | 5.8 ms | **7.5 MB** | 25 MB |
+| listdir | 233 | 253 | **587 ms** | 664 ms | **56 MB** | 67 MB |
+| download | 172 | **195** | **506 ms** | 778 ms | **58 MB** | 64 MB |
+| upload multipart | **5 084** | 3 643 | **17 ms** | 36 ms | 30 MB | **16 MB** |
+| upload raw | 6 358 | **6 736** | **13 ms** | 20 ms | 17 MB | 17 MB |
+| process start | ~1 700 | ~1 430–1 880 | 83–87 ms | 82–93 ms | **18 MB** | 42–50 MB |
+
+On 2 CPUs, listdir and process start are a tie within noise, and Go keeps a small edge in download and raw upload. p99 is still equal or lower in Rust everywhere.
+
+### Idle
+
+| | Rust | Go |
+|---|---|---|
+| Binary size | **6.3 MB** | 10.3 MB |
+| RSS after `/init` | **~6 MB** | ~11 MB |
+| Threads | 3 | 5 |
+
+Idle memory matters more than it looks: envd runs in **every** sandbox, so every megabyte is multiplied by the number of sandboxes on a node.
+
+## What made the difference
+
+The first Rust version was not faster. Profiling and fixing, one change at a time:
+
+| Change | Effect |
+|---|---|
+| `TCP_NODELAY` on every connection (Go sets it by default) | Streamed responses stopped waiting 40 ms for a delayed ACK; process start p50 was a flat 41 ms before |
+| Uploads write chunks straight into a `std::fs::File` | No thread-pool hop per 8 KiB write; multipart upload 713 → 3 489 req/s on 2 CPUs |
+| Request bodies as `Bytes` streams | Fewer copies; multipart upload 3 489 → 4 728 req/s |
+| hyper `max_buf_size` 64 KiB (custom serve loop) | Upload RSS 137 MB → 30 MB, higher throughput |
+| Cache of uid/gid names within one ListDir | One `/etc/passwd` lookup per owner instead of per entry; ListDir 82 → 239 req/s |
+| Spawn under per-thread credentials instead of `pre_exec` | std can use `posix_spawn` (vfork); one process start 0.83 → 0.59 ms (Go 0.71 ms) |
+| Exited processes in a pid map plus an expiry queue | Each start and exit used to scan ~120 000 retained exits under one lock; process start on 8 CPUs 4 341 → 6 057 req/s |
+
+The last one is a good example of why we profile instead of guessing: our first theory (a blocking spawn) was wrong, and `perf` showed 31 % of CPU in a linear scan of the exited-process registry.
+
+## Tried and dropped
+
+- **mimalloc**: 5–10 % more throughput, but ListDir RSS grew to 454 MB.
+- **jemalloc**: slower overall; download fell to 41 req/s.
+- **`spawn_blocking` around process spawn**: slower (1 971 → 1 365 req/s on 2 CPUs); the thread hop costs more than the vfork pause.
+
+## Known gaps
+
+- **Download**: Go serves a file with one `sendfile` call; hyper copies through user space. Equal on 8 CPUs, about 12 % behind on 2 CPUs.
+- **Upload memory under load**: with 50–100 concurrent 1 MiB uploads, Rust peaks higher than Go because hyper buffers up to 64 KiB per connection.
+- **Header size**: the 64 KiB buffer also caps request headers at 64 KiB; Go allows 1 MiB. E2B tokens are far smaller, but it is a documented difference.
+
+The full numbers live in [`docs/performance.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance.md) in the repository.

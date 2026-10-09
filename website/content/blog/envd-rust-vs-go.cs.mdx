@@ -1,0 +1,154 @@
+---
+title: 'envd v Rustu vs Go: stejné API, nižší latence ve špičkách'
+description: Přepsali jsme daemon, který běží v každém E2B sandboxu, do Rustu jako přímou náhradu. Jak jsme ověřili, že se chová stejně, a jak si vede proti původní verzi v Go.
+author: Jiří Krokviak
+date: '2026-10-09'
+---
+
+V každém E2B sandboxu běží **envd**, malý daemon, se kterým SDK mluví pokaždé, když spouští příkaz, nahrává soubor nebo sleduje složku. Původní envd je napsaný v Go. Přepsali jsme ho do Rustu jako přesnou přímou náhradu: stejné routy, stejné Connect RPC služby, stejný JSON, stejné texty chyb, stejné přepínače i stejný řetězec verze.
+
+Článek odpovídá na dvě otázky: **chová se opravdu stejně** a **je vůbec rychlejší**?
+
+## Ve zkratce
+
+- Oficiální **testy E2B JS SDK** proti envd v Rustu procházejí: 105 testů prošlo, 9 přeskočilo samotné SDK v debug režimu.
+- Na 8 CPU má envd v Rustu **vyšší nebo stejnou propustnost ve všech sedmi benchmarcích** a **nižší p99 latenci ve všech sedmi**, často několikanásobně.
+- V klidu zabírá **~6 MB RSS** (Go ~11 MB) a binárka má **6,3 MB** (Go 10,3 MB).
+
+## Část 1: důkaz, že se chová stejně
+
+„Přímá náhrada“ je silné tvrzení. Klient nesmí výměnu poznat, ani podle textu chyby. Testujeme to ve čtyřech vrstvách, od rychlých po realistické.
+
+<Mermaid chart={`
+flowchart LR
+  U[unit testy<br/>každý helper proti textům z Go] --> C[contract testy<br/>skutečný HTTP server]
+  C --> L[linuxové testy v Dockeru<br/>PTY, inotify, setuid, cgroupy]
+  L --> S[oficiální testy E2B SDK<br/>proti envd v Dockeru]
+  S --> V[CI s KVM<br/>SDK proti skutečné microVM]
+`} />
+
+### 1. Unit testy vedle kódu
+
+Každý modul má testy na konci stejného souboru. Ty zajímavé hlídají **přesný výstup z Go**: texty errno z Go (`no such file or directory`), `exit status 1` a `signal: killed` z Go, escapování JSON enkodéru z Go, čištění cest jako `filepath` v Go, chyby parseru přepínačů z Go (`flag provided but not defined: -x`). Když jsme si nebyli jistí, co Go vypíše, spustili jsme malý program v Go a jeho výstup vložili do testu.
+
+### 2. Contract testy proti běžícímu serveru
+
+`crates/envd/tests/*_contract.rs` spustí skutečný envd na náhodném portu a mluví s ním přes HTTP tak, jak by mluvil klient: stavové kódy, hlavičky, těla i streamované Connect zprávy se kontrolují bajt po bajtu. Pokrývají init, soubory, souborový systém, procesy, PTY, watchery, podepisování i upgrade.
+
+### 3. Chování jen pro Linux v Dockeru
+
+PTY, inotify, `setuid`, cgroupy a `copy_file_range` existují jen na Linuxu a většina z nás vyvíjí na macOS. `scripts/test-linux.sh` spustí celou sadu v privilegovaném linuxovém kontejneru. CI navíc sestaví statickou musl binárku pro x86_64 i arm64 a pustí na ní testy jako root, stejně jako envd běží ve skutečném sandboxu.
+
+### 4. Oficiální SDK beze změn
+
+Nejsilnější důkaz je samotné SDK. `scripts/sdk-tests.sh`:
+
+1. sestaví image s envd a spustí ho na `localhost:49983`;
+2. zavolá `POST /init` s výchozím uživatelem a pracovní složkou, přesně jako by to udělal orchestrator;
+3. naklonuje `e2b-dev/E2B` na pevném commitu a spustí jeho vitest sady pro příkazy, soubory a PTY, s `E2B_DEBUG=true`, aby SDK mluvilo přímo s envd.
+
+Výsledek na SDK commitu `3221e8ec`: **25 testovacích souborů, 105 testů prošlo, 9 přeskočeno**. Přeskočené jsou v SDK označené `skipIf(isDebug)` (podepsané URL, globální proměnné prostředí, zabitý sandbox); podepisování pokrývají naše vlastní contract testy.
+
+Nakonec CI na runneru s KVM nastartuje skutečnou Firecracker microVM s envd v Rustu pod systemd a pustí stejné SDK testy proti cold-bootnutému i probuzenému sandboxu.
+
+## Část 2: výkon
+
+### Metodika
+
+| | |
+|---|---|
+| Verze | Go envd z `e2b-dev/infra` commit `92197909` (`packages/envd`); envd v Rustu z tohoto repozitáře |
+| Build | Go jako v upstream `make build`: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"`. Rust: `cargo build --release` s LTO, `codegen-units = 1`, stripnutý |
+| Image | Oba ve stejném Debian trixie image, spuštěné s `envd -isnotfc -verbose`, pak `POST /init {"defaultUser":"user"}` |
+| Zátěž | [oha](https://github.com/hatoo/oha) v samostatném kontejneru ve stejné Docker síti, 15 s na test, pro každý test nový kontejner s envd |
+| Paměť | Špičkové RSS envd (`VmHWM` procesu PID 1) |
+| CPU | `cpu.stat` cgroupy kontejneru děleno počtem požadavků |
+| Hostitel | Docker Desktop na Apple Silicon; čísla mezi běhy kolísají o ±10 %, menší rozdíly jsou remíza |
+
+Sedm testů:
+
+| Test | Požadavek |
+|---|---|
+| health | `GET /health` |
+| stat | `POST /filesystem.Filesystem/Stat` na `/home/user` (Connect JSON) |
+| listdir | `POST /filesystem.Filesystem/ListDir` na `/usr/bin`, hloubka 1 (~625 položek) |
+| download | `GET /files` souboru 1 MiB |
+| upload multipart | `POST /files`, 1 MiB `multipart/form-data`, 1000 střídaných cest na tmpfs |
+| upload raw | `POST /files`, 1 MiB `application/octet-stream`, 1000 střídaných cest na tmpfs |
+| spuštění procesu | `POST /process.Process/Start` spouštějící `/bin/true` (Connect server stream) |
+
+Jeden běh vypadá takhle:
+
+```bash
+docker run -d --name envd --network bench --cpus=8 --memory=2g envd:bench
+docker run --rm --network bench --cpus=4 ghcr.io/hatoo/oha:latest \
+  --no-tui -z 15s -c 100 http://envd:49983/health
+```
+
+### 8 CPU, 100 spojení
+
+| Test | Rust req/s | Go req/s | Rust p99 | Go p99 | Rust CPU/req | Go CPU/req | Rust RSS | Go RSS |
+|---|---|---|---|---|---|---|---|---|
+| health | **361 285** | 257 347 | **0,72 ms** | 2,34 ms | **15 µs** | 21 µs | **9 MB** | 20 MB |
+| stat | **101 106** | 50 669 | **2,3 ms** | 15,7 ms | **74 µs** | 123 µs | **10 MB** | 60 MB |
+| listdir | **1 012** | 466 | **417 ms** | 785 ms | **8,0 ms** | 16,2 ms | **105 MB** | 130 MB |
+| download | 492 | 501 | **515 ms** | 1 016 ms | 16,4 ms | **15,7 ms** | **116 MB** | 141 MB |
+| upload multipart | **10 409** | 7 080 | **25 ms** | 103 ms | **733 µs** | 908 µs | 59 MB | **23 MB** |
+| upload raw | **13 687** | 9 076 | **19 ms** | 67 ms | **554 µs** | 622 µs | 32 MB | **24 MB** |
+| spuštění procesu | **6 057** | 5 450 | **47 ms** | 59 ms | **1,32 ms** | 1,47 ms | **51 MB** | 126 MB |
+
+health a stat brzdí generátor zátěže (4 CPU): oba servery využily jen asi 5,5 z 8 jader, takže jejich skutečný strop je výš. Na stejném CPU obslouží Rust o 40–100 % víc takových požadavků.
+
+### 2 CPU, 50 spojení
+
+| Test | Rust req/s | Go req/s | Rust p99 | Go p99 | Rust RSS | Go RSS |
+|---|---|---|---|---|---|---|
+| health | **233 460** | 193 503 | **0,45 ms** | 0,87 ms | **6,7 MB** | 17 MB |
+| stat | **49 892** | 25 371 | **2,1 ms** | 5,8 ms | **7,5 MB** | 25 MB |
+| listdir | 233 | 253 | **587 ms** | 664 ms | **56 MB** | 67 MB |
+| download | 172 | **195** | **506 ms** | 778 ms | **58 MB** | 64 MB |
+| upload multipart | **5 084** | 3 643 | **17 ms** | 36 ms | 30 MB | **16 MB** |
+| upload raw | 6 358 | **6 736** | **13 ms** | 20 ms | 17 MB | 17 MB |
+| spuštění procesu | ~1 700 | ~1 430–1 880 | 83–87 ms | 82–93 ms | **18 MB** | 42–50 MB |
+
+Na 2 CPU jsou listdir a spuštění procesu remíza v rámci šumu a Go si drží malý náskok u downloadu a raw uploadu. p99 je v Rustu pořád všude stejná nebo nižší.
+
+### V klidu
+
+| | Rust | Go |
+|---|---|---|
+| Velikost binárky | **6,3 MB** | 10,3 MB |
+| RSS po `/init` | **~6 MB** | ~11 MB |
+| Vlákna | 3 | 5 |
+
+Paměť v klidu je důležitější, než vypadá: envd běží v **každém** sandboxu, takže každý megabajt se násobí počtem sandboxů na nodu.
+
+## Co rozhodlo
+
+První verze v Rustu rychlejší nebyla. Profilovali jsme a opravovali jednu změnu po druhé:
+
+| Změna | Efekt |
+|---|---|
+| `TCP_NODELAY` na každém spojení (Go ho nastavuje automaticky) | Streamované odpovědi přestaly čekat 40 ms na zpožděný ACK; p50 spuštění procesu bylo předtím pevných 41 ms |
+| Upload zapisuje kusy rovnou do `std::fs::File` | Žádný přeskok do thread poolu na každých 8 KiB; multipart upload 713 → 3 489 req/s na 2 CPU |
+| Těla požadavků jako stream `Bytes` | Méně kopírování; multipart upload 3 489 → 4 728 req/s |
+| hyper `max_buf_size` 64 KiB (vlastní serve smyčka) | RSS při uploadu 137 MB → 30 MB, vyšší propustnost |
+| Cache jmen uid/gid v rámci jednoho ListDir | Jedno čtení `/etc/passwd` na vlastníka místo na položku; ListDir 82 → 239 req/s |
+| Spouštění pod credentials vlákna místo `pre_exec` | std může použít `posix_spawn` (vfork); jedno spuštění 0,83 → 0,59 ms (Go 0,71 ms) |
+| Ukončené procesy v mapě podle pid plus fronta expirací | Každý start a konec předtím procházel ~120 000 držených ukončení pod jedním zámkem; spuštění procesu na 8 CPU 4 341 → 6 057 req/s |
+
+Ta poslední je dobrý příklad, proč profilujeme místo hádání: naše první teorie (blokující spawn) byla špatně a `perf` ukázal 31 % CPU v lineárním procházení registru ukončených procesů.
+
+## Co jsme zkusili a zahodili
+
+- **mimalloc**: o 5–10 % vyšší propustnost, ale RSS u ListDir vyrostlo na 454 MB.
+- **jemalloc**: celkově pomalejší; download spadl na 41 req/s.
+- **`spawn_blocking` kolem spouštění procesu**: pomalejší (1 971 → 1 365 req/s na 2 CPU); přeskok mezi vlákny stojí víc než pauza vfork.
+
+## Známé mezery
+
+- **Download**: Go posílá soubor jedním voláním `sendfile`; hyper kopíruje přes user space. Na 8 CPU nastejno, na 2 CPU asi o 12 % pozadu.
+- **Paměť při uploadu pod zátěží**: s 50–100 souběžnými uploady po 1 MiB má Rust vyšší špičku než Go, protože hyper drží až 64 KiB na spojení.
+- **Velikost hlaviček**: 64KiB buffer omezuje i hlavičky požadavku na 64 KiB; Go povoluje 1 MiB. Tokeny E2B jsou mnohem menší, ale je to zdokumentovaný rozdíl.
+
+Kompletní čísla jsou v repozitáři v [`docs/performance.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance.md).

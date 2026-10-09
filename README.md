@@ -1,19 +1,74 @@
 # e2b-runtime-rs
 
-A self-hosted [E2B](https://e2b.dev) runtime written in Rust, aimed at bare-metal Kubernetes. The official E2B SDKs (JS, Python) work against it unchanged.
+**The [E2B](https://e2b.dev) sandbox runtime, rewritten in Rust.** Firecracker microVMs that resume from a snapshot, run untrusted agent code and pause when the agent stops, with the same APIs, file formats and behaviour as the [Go original](https://github.com/e2b-dev/runtime). The official E2B SDKs (JS, Python) work against it unchanged.
+
+**[Documentation](website/)** (English and Czech) | [Performance](docs/performance.md) | [Go parity](docs/PARITY.md) | [Known gaps](docs/BACKLOG.md)
+
+## What is it?
+
+[E2B Runtime](https://github.com/e2b-dev/runtime) is the open-source backend behind E2B: a control-plane API, an orchestrator on every node that drives Firecracker, `envd` inside every VM, an edge proxy and a template builder, all written in Go.
+
+This project rewrites **the node side** of it in Rust: **envd** and the **orchestrator** (including the template-manager role). Everything at the edges stays exactly as in Go: routes, gRPC services, status codes, error texts, snapshot and header formats, metric names, feature flags. The rest of E2B (API, client proxy, dashboard) talks to a Rust node exactly as it talks to a Go one.
+
+## Why it's fast
+
+The design is upstream's; the implementation is Rust.
+
+**A sandbox is a resumed snapshot.** Templates are pre-booted VMs (memory, disk and machine state) stored in object storage. Creating a sandbox restores one instead of booting a kernel. Memory pages are served lazily on page fault through `userfaultfd`, and the root filesystem is a copy-on-write overlay over a read-only image, so only the data a sandbox actually touches is fetched. Fresh creates and resumes after a pause take the same path.
+
+**Less runtime under the hood.** No garbage collector, no goroutine scheduler: envd and the orchestrator run on tokio with small, predictable memory, and tail latencies stay low under load.
+
+## Key numbers
+
+envd, Rust vs Go, under load (8 CPUs, 100 connections; full method in [docs/performance.md](docs/performance.md) and the [blog post](website/content/blog/envd-rust-vs-go.mdx)):
+
+| Test | Rust req/s | Go req/s | Rust p99 | Go p99 | Rust RSS | Go RSS |
+|---|---|---|---|---|---|---|
+| health | **361 285** | 257 347 | **0.72 ms** | 2.34 ms | **9 MB** | 20 MB |
+| stat | **101 106** | 50 669 | **2.3 ms** | 15.7 ms | **10 MB** | 60 MB |
+| list dir | **1 012** | 466 | **417 ms** | 785 ms | **105 MB** | 130 MB |
+| download 1 MiB | 492 | 501 | **515 ms** | 1 016 ms | **116 MB** | 141 MB |
+| upload 1 MiB multipart | **10 409** | 7 080 | **25 ms** | 103 ms | 59 MB | **23 MB** |
+| upload 1 MiB raw | **13 687** | 9 076 | **19 ms** | 67 ms | 32 MB | **24 MB** |
+| process start | **6 057** | 5 450 | **47 ms** | 59 ms | **51 MB** | 126 MB |
+
+| envd idle | Rust | Go |
+|---|---|---|
+| binary size | **6.3 MB** | 10.3 MB |
+| RSS after `/init` | **~6 MB** | ~11 MB |
+| threads | 3 | 5 |
+
+- **p99 latency is lower in all seven tests**, often several times lower (stat 2.3 vs 15.7 ms, multipart upload 25 vs 103 ms).
+- **Throughput is higher or equal in all seven** on 8 CPUs; CPU per request is lower everywhere except download (Go uses `sendfile`).
+- **SDK compatibility:** the official E2B JS SDK sandbox tests pass against envd-rs (105 passed, 9 skipped by the SDK itself in debug mode).
+- **Sandbox start:** the target is upstream's ~150 ms create/resume on a bare-metal node. CI runners (nested virtualisation) measure 0.8–2.4 s for a resume; bare-metal numbers will be published here.
+
+## What you get
+
+- **Hardware-isolated sandboxes.** One Firecracker microVM per sandbox, in its own cgroup and network namespace, with a per-sandbox nftables egress firewall and SNI/Host-inspecting domain allow and deny lists.
+- **Pause, resume and checkpoint.** Pause diffs memory and disk against the parent build and uploads the diff in the background; a resume on the same node reads only local files.
+- **Templates from your recipe.** Layered builds from Docker images and steps (RUN, ENV, WORKDIR, USER, COPY), each layer hashed and cached, with an optimize pass that records which pages a resume touches.
+- **envd inside every VM.** Processes, PTYs, filesystem, watchers, uploads and port forwarding over Connect RPC and REST, live-upgradable without dropping processes.
+- **Upstream's operations story.** LaunchDarkly feature flags, OpenTelemetry metrics, traces and logs, ClickHouse events and host stats, Redis routing, GCS/S3/Azure storage with the same credential chains as the Go SDKs.
 
 ## Status
 
 | Component | What it does | State |
 |---|---|---|
 | **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs over NBD, pause with diffs to S3 | 🚧 cold boot, resume (~0.5 s with prefetch), pause, checkpoint and the gRPC `SandboxService` and `InfoService` work end to end in CI; egress firewall, Redis routing, events, ClickHouse stats at upstream parity ([parity](docs/PARITY.md), [spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
-| template build | OCI image → ext4 → snapshot (template-manager role of the orchestrator) | 🚧 `TemplateService`, build cache, the base phase (pull, ext4, provisioning, base layer) and the steps (RUN, ENV, WORKDIR, USER, COPY), finalize (configure, start and ready commands, CA bundle) and optimize (prefetch) done ([spec](docs/superpowers/specs/2026-10-17-template-builder-design.md)) |
-| api | REST API for the SDK, node selection | planned |
-| client-proxy | `https://<port>-<sandbox>.<domain>` routing | planned |
-| Kubernetes deployment | Helm chart: orchestrator DaemonSet, API, proxy, S3, Postgres | planned |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs over NBD, pause with diffs to object storage | ✅ create, resume, pause, checkpoint, `SandboxService`, `InfoService`, egress firewall, routing, events and stats at upstream parity; 🚧 wave 2: NBD/network over netlink, in-place pause, huge pages, `VolumeService`/`ChunkService` |
+| **template build** | OCI image → ext4 → snapshot (template-manager role) | ✅ base, steps, finalize and optimize phases with the layer cache |
+| api, client-proxy | REST API for the SDK, `https://<port>-<sandbox>.<domain>` routing | not part of this project: use upstream's Go services |
 
-Until the orchestrator lands, envd runs as a plain container and the SDK talks to it in debug mode (`E2B_DEBUG=true`).
+## How it fits together
+
+```
+SDK / CLI ──REST──▶ API (Go, upstream) ──gRPC──▶ orchestrator (Rust) ──▶ Firecracker microVM ──▶ envd (Rust) ──▶ your processes
+                                                     │
+                                                     ├── object storage (templates, snapshots)
+                                                     ├── Redis (routing, events)
+                                                     └── ClickHouse (events, host stats)
+```
 
 ## Quick start (docker compose)
 
@@ -67,7 +122,7 @@ The manifests are validated with `kubectl kustomize` but have not been run on a 
 
 ## Documentation
 
-`website/` is a [Fumadocs](https://fumadocs.dev) site that explains the concepts, envd and the orchestrator, in English and Czech: `cd website && npm install && npm run dev`.
+`website/` is a [Fumadocs](https://fumadocs.dev) site that explains the concepts, envd and the orchestrator, plus a blog, in English and Czech: `cd website && npm install && npm run dev`.
 
 ## Development
 

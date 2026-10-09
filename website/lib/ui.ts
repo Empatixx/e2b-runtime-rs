@@ -17,5 +17,6 @@ export const i18nUI = defineI18nUI(i18n, {
     'Last updated on(page footer)': 'Naposledy upraveno',
     'Page Not Found(404 page)': 'Stránka nenalezena',
     'Back to Home(404 page)': 'Zpět na úvod',
+    'Table of Contents(inline table of contents)': 'Obsah',
   },
 })

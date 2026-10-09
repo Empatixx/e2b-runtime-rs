@@ -2,9 +2,9 @@ import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared'
 import { REPO_URL } from './source'
 import type { Lang } from './i18n'
 
-const labels: Record<Lang, { docs: string }> = {
-  en: { docs: 'Documentation' },
-  cs: { docs: 'Dokumentace' },
+const labels: Record<Lang, { docs: string; blog: string }> = {
+  en: { docs: 'Documentation', blog: 'Blog' },
+  cs: { docs: 'Dokumentace', blog: 'Blog' },
 }
 
 export function baseOptions(lang: Lang): BaseLayoutProps {
@@ -14,6 +14,9 @@ export function baseOptions(lang: Lang): BaseLayoutProps {
       url: `/${lang}`,
     },
     githubUrl: REPO_URL,
-    links: [{ text: labels[lang].docs, url: `/${lang}/docs`, active: 'nested-url' }],
+    links: [
+      { text: labels[lang].docs, url: `/${lang}/docs`, active: 'nested-url' },
+      { text: labels[lang].blog, url: `/${lang}/blog`, active: 'nested-url' },
+    ],
   }
 }
