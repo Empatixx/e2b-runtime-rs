@@ -39,6 +39,7 @@ rustix = { version = "1", features = ["process", "thread"] }
 tempfile = "3"
 futures = "0.3"
 bon = "3.10.2"
+moka = { version = "0.12.16", features = ["sync"] }
 
 [build-dependencies]
 connectrpc-build = "0.9"

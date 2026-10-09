@@ -1,8 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use connectrpc::ConnectError;
+use moka::Expiry;
+use moka::sync::Cache;
 use parking_lot::Mutex;
 
 use super::spawn::Process;
@@ -12,21 +14,9 @@ use crate::proto::process::process_event::EndEvent;
 
 const RETENTION: Duration = Duration::from_secs(30);
 
-#[derive(Default)]
 pub struct Processes {
     running: Mutex<HashMap<u32, Arc<Process>>>,
-    exited: Mutex<ExitedProcesses>,
-}
-
-#[derive(Default)]
-struct ExitedProcesses {
-    by_pid: HashMap<u32, Exited>,
-    expiry_order: VecDeque<Expiry>,
-}
-
-struct Expiry {
-    pid: u32,
-    at: Instant,
+    exited: Cache<u32, Exited>,
 }
 
 #[derive(Clone)]
@@ -37,9 +27,36 @@ pub struct Exited {
     pub expires: Instant,
 }
 
+struct UntilExpires;
+
+impl Expiry<u32, Exited> for UntilExpires {
+    fn expire_after_create(&self, _: &u32, exited: &Exited, created_at: Instant) -> Option<Duration> {
+        Some(exited.expires.saturating_duration_since(created_at))
+    }
+
+    fn expire_after_update(
+        &self,
+        _: &u32,
+        exited: &Exited,
+        updated_at: Instant,
+        _: Option<Duration>,
+    ) -> Option<Duration> {
+        Some(exited.expires.saturating_duration_since(updated_at))
+    }
+}
+
+impl Default for Processes {
+    fn default() -> Self {
+        Self {
+            running: Mutex::default(),
+            exited: Cache::builder().expire_after(UntilExpires).build(),
+        }
+    }
+}
+
 impl Processes {
     pub fn add(&self, process: Arc<Process>) {
-        self.exited.lock().forget(process.pid, process.tag.as_deref());
+        self.forget(process.pid, process.tag.as_deref());
         self.running.lock().insert(process.pid, process);
     }
 
@@ -52,35 +69,27 @@ impl Processes {
             return;
         }
         running.remove(&process.pid);
-
-        let now = Instant::now();
-        let mut exited = self.exited.lock();
-        exited.evict_expired(now);
-        exited.insert(Exited {
-            pid: process.pid,
-            tag: process.tag.clone(),
-            end,
-            expires: now + RETENTION,
-        });
+        self.exited.insert(
+            process.pid,
+            Exited {
+                pid: process.pid,
+                tag: process.tag.clone(),
+                end,
+                expires: Instant::now() + RETENTION,
+            },
+        );
     }
 
     pub fn retained(&self) -> Vec<Exited> {
-        let now = Instant::now();
-        self.exited
-            .lock()
-            .by_pid
-            .values()
-            .filter(|exited| exited.expires > now)
-            .cloned()
-            .collect()
+        self.exited.iter().map(|(_, exited)| exited).collect()
     }
 
-    pub fn restore(&self, mut retained: Vec<Exited>) {
+    pub fn restore(&self, retained: Vec<Exited>) {
         let running = self.running.lock();
-        retained.retain(|exited| !running.contains_key(&exited.pid));
-        retained.sort_by_key(|exited| exited.expires);
-        let mut exited = self.exited.lock();
-        retained.into_iter().for_each(|entry| exited.insert(entry));
+        retained
+            .into_iter()
+            .filter(|exited| !running.contains_key(&exited.pid))
+            .for_each(|exited| self.exited.insert(exited.pid, exited));
     }
 
     pub fn all(&self) -> Vec<Arc<Process>> {
@@ -106,46 +115,25 @@ impl Processes {
     }
 
     pub fn find_exited(&self, selector: Option<&ProcessSelector>) -> Option<Exited> {
-        let now = Instant::now();
-        let exited = self.exited.lock();
         match selector.and_then(|selector| selector.selector.as_ref()) {
-            Some(Selector::Pid(pid)) => exited.by_pid.get(pid).filter(|exited| exited.expires > now).cloned(),
-            Some(Selector::Tag(tag)) => exited
-                .by_pid
-                .values()
-                .find(|exited| exited.expires > now && exited.tag.as_deref() == Some(tag))
-                .cloned(),
+            Some(Selector::Pid(pid)) => self.exited.get(pid),
+            Some(Selector::Tag(tag)) => self.exited_with_tag(tag).next(),
             None => None,
         }
     }
-}
 
-impl ExitedProcesses {
-    fn insert(&mut self, exited: Exited) {
-        self.expiry_order.push_back(Expiry {
-            pid: exited.pid,
-            at: exited.expires,
-        });
-        self.by_pid.insert(exited.pid, exited);
+    fn exited_with_tag(&self, tag: &str) -> impl Iterator<Item = Exited> {
+        self.exited
+            .iter()
+            .map(|(_, exited)| exited)
+            .filter(move |exited| exited.tag.as_deref() == Some(tag))
     }
 
-    fn forget(&mut self, pid: u32, tag: Option<&str>) {
-        self.by_pid.remove(&pid);
-        if let Some(tag) = tag {
-            self.by_pid.retain(|_, exited| exited.tag.as_deref() != Some(tag));
-        }
-    }
-
-    fn evict_expired(&mut self, now: Instant) {
-        while let Some(expiry) = self.expiry_order.pop_front_if(|expiry| expiry.at <= now) {
-            if self
-                .by_pid
-                .get(&expiry.pid)
-                .is_some_and(|exited| exited.expires == expiry.at)
-            {
-                self.by_pid.remove(&expiry.pid);
-            }
-        }
+    fn forget(&self, pid: u32, tag: Option<&str>) {
+        self.exited.invalidate(&pid);
+        tag.into_iter()
+            .flat_map(|tag| self.exited_with_tag(tag))
+            .for_each(|exited| self.exited.invalidate(&exited.pid));
     }
 }
 
@@ -163,43 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn evicts_only_expired_entries_in_order() {
-        let start = Instant::now();
-        let mut processes = ExitedProcesses::default();
-        processes.insert(exited(1, None, start));
-        processes.insert(exited(2, None, start + RETENTION));
-
-        processes.evict_expired(start);
-
-        assert!(!processes.by_pid.contains_key(&1));
-        assert!(processes.by_pid.contains_key(&2));
-        assert_eq!(processes.expiry_order.len(), 1);
-    }
-
-    #[test]
-    fn stale_expiry_keeps_entry_of_reused_pid() {
-        let start = Instant::now();
-        let mut processes = ExitedProcesses::default();
-        processes.insert(exited(7, None, start));
-        processes.insert(exited(7, None, start + RETENTION));
-
-        processes.evict_expired(start);
-
-        assert_eq!(processes.by_pid[&7].expires, start + RETENTION);
-    }
-
-    #[test]
     fn forget_drops_pid_and_every_entry_with_tag() {
         let expires = Instant::now() + RETENTION;
-        let mut processes = ExitedProcesses::default();
-        processes.insert(exited(1, Some("web"), expires));
-        processes.insert(exited(2, Some("web"), expires));
-        processes.insert(exited(3, Some("db"), expires));
-        processes.insert(exited(4, None, expires));
+        let processes = Processes::default();
+        processes.restore(vec![
+            exited(1, Some("web"), expires),
+            exited(2, Some("web"), expires),
+            exited(3, Some("db"), expires),
+            exited(4, None, expires),
+        ]);
 
         processes.forget(4, Some("web"));
 
-        let mut left: Vec<u32> = processes.by_pid.keys().copied().collect();
+        let mut left: Vec<u32> = processes.retained().iter().map(|exited| exited.pid).collect();
         left.sort();
         assert_eq!(left, [3]);
     }

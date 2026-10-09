@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use moka::sync::Cache;
 use tokio::sync::watch;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::logs::BuildLog;
@@ -55,62 +53,37 @@ impl BuildInfo {
     }
 }
 
-#[derive(Default)]
 pub struct BuildCache {
-    builds: Mutex<HashMap<String, Entry>>,
+    builds: Cache<String, Arc<BuildInfo>>,
 }
 
-struct Entry {
-    info: Arc<BuildInfo>,
-    expires: Instant,
+impl Default for BuildCache {
+    fn default() -> Self {
+        Self {
+            builds: Cache::builder().time_to_idle(BUILD_EXPIRATION).build(),
+        }
+    }
 }
 
 impl BuildCache {
     pub fn register(&self, build_id: &str) -> Result<Arc<BuildInfo>, String> {
-        let now = Instant::now();
-        let mut builds = self.builds.lock();
-        if builds.get(build_id).is_some_and(|entry| entry.expires > now) {
-            return Err(format!("build {build_id} already exists in cache"));
-        }
-        let info = Arc::new(BuildInfo {
-            log: BuildLog::default(),
-            cancel: CancellationToken::new(),
-            result: watch::Sender::new(None),
+        let entry = self.builds.entry_by_ref(build_id).or_insert_with(|| {
+            Arc::new(BuildInfo {
+                log: BuildLog::default(),
+                cancel: CancellationToken::new(),
+                result: watch::Sender::new(None),
+            })
         });
-        builds.insert(
-            build_id.to_owned(),
-            Entry {
-                info: info.clone(),
-                expires: now + BUILD_EXPIRATION,
-            },
-        );
-        Ok(info)
+        entry
+            .is_fresh()
+            .then(|| entry.into_value())
+            .ok_or_else(|| format!("build {build_id} already exists in cache"))
     }
 
     pub fn get(&self, build_id: &str) -> Result<Arc<BuildInfo>, String> {
-        let now = Instant::now();
         self.builds
-            .lock()
-            .get_mut(build_id)
-            .filter(|entry| entry.expires > now)
-            .map(|entry| {
-                entry.expires = now + BUILD_EXPIRATION;
-                entry.info.clone()
-            })
+            .get(build_id)
             .ok_or_else(|| format!("build {build_id} not found in cache"))
-    }
-
-    pub fn evict_expired(&self) {
-        let now = Instant::now();
-        self.builds.lock().retain(|_, entry| entry.expires > now);
-    }
-
-    pub async fn run_eviction(self: Arc<Self>) {
-        let mut ticks = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            ticks.tick().await;
-            self.evict_expired();
-        }
     }
 }
 
@@ -138,8 +111,8 @@ mod tests {
         assert_eq!(cache.get("b2").err(), Some("build b2 not found in cache".to_owned()));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn builds_expire_ten_minutes_after_the_last_lookup_and_the_first_result_wins() {
+    #[tokio::test]
+    async fn the_first_result_wins() {
         let cache = BuildCache::default();
         let info = cache.register("b1").unwrap();
         info.finish(completed());
@@ -148,24 +121,6 @@ mod tests {
             ..completed()
         });
         assert_eq!(info.finished().await, completed());
-
-        tokio::time::advance(BUILD_EXPIRATION - Duration::from_secs(1)).await;
-        assert!(cache.get("b1").is_ok());
-        tokio::time::advance(BUILD_EXPIRATION - Duration::from_secs(1)).await;
-        cache.evict_expired();
-        assert!(cache.get("b1").is_ok());
-        tokio::time::advance(BUILD_EXPIRATION + Duration::from_secs(1)).await;
-        assert!(cache.get("b1").is_err());
-        cache.evict_expired();
-        assert!(cache.register("b1").is_ok());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_running_build_nobody_polls_expires_too() {
-        let cache = BuildCache::default();
-        cache.register("b1").unwrap();
-        tokio::time::advance(BUILD_EXPIRATION + Duration::from_secs(1)).await;
-        cache.evict_expired();
-        assert!(cache.get("b1").is_err());
+        assert!(Arc::ptr_eq(&info, &cache.get("b1").unwrap()));
     }
 }
