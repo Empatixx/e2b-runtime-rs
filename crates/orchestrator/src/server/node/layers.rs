@@ -31,6 +31,7 @@ pub struct LayerSandbox<'a> {
     pub source: &'a LayerSource,
     pub sandbox_id: &'a str,
     pub template_id: &'a str,
+    pub team_id: &'a str,
     pub firecracker_version: &'a str,
 }
 

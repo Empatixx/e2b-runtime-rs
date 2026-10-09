@@ -23,7 +23,7 @@ impl BuildFlags {
             .filter(|version| *version != BUILD_PROVISION_VERSION.fallback)
     }
 
-    pub(super) fn envd_memory_protection(&self) -> bool {
+    pub fn envd_memory_protection(&self) -> bool {
         self.flags.get(&BUILD_ENVD_MEMORY_PROTECTION, &self.contexts)
     }
 

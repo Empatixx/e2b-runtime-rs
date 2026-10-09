@@ -8,7 +8,6 @@ pub struct BuildSettings {
     pub envd: PathBuf,
     pub kernel_version: String,
     pub firecracker_version: String,
-    pub envd_memory_protection: bool,
     pub flags: BuildFlags,
 }
 
@@ -22,7 +21,6 @@ impl BuildSettings {
             .map_err(|e| format!("error resolving envd binary for build: {e}"))?;
         Ok(Self {
             envd,
-            envd_memory_protection: flags.envd_memory_protection(),
             kernel_version: config
                 .feature_flags
                 .get(&build_kernel_version(&config.kernel_version), &contexts),

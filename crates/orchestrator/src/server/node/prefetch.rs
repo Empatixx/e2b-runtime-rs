@@ -48,9 +48,11 @@ impl Node {
             "",
             BUILD_SANDBOX_TYPE,
         );
-        let flags = self
-            .feature_flags
-            .scoped(vec![sandbox, FlagContext::template(layer.template_id)]);
+        let flags = self.feature_flags.scoped(vec![
+            sandbox,
+            FlagContext::template(layer.template_id),
+            FlagContext::team(layer.team_id),
+        ]);
         PrefetchSettings::from_flags(&flags)
     }
 

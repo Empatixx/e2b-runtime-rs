@@ -145,7 +145,8 @@ fn base_hash(settings: &BuildSettings, request: &BaseRequest, source_key: &str) 
         provision_version: &provision_version,
         disk_size_mb: request.disk_size_mb,
         source: source_key,
-        envd_memory_protection: matches!(request.source, BaseSource::Image { .. }) && settings.envd_memory_protection,
+        envd_memory_protection: matches!(request.source, BaseSource::Image { .. })
+            && settings.flags.envd_memory_protection(),
     }
     .hash()
 }

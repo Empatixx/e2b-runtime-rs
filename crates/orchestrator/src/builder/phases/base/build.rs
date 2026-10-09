@@ -114,7 +114,7 @@ impl BaseBuild<'_> {
             busybox: config.busybox.clone(),
             provision_script,
             memory_mb: self.phase.request.memory_mb,
-            envd_memory_protection: self.phase.settings.envd_memory_protection,
+            envd_memory_protection: self.phase.settings.flags.envd_memory_protection(),
         }
     }
 

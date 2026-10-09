@@ -194,6 +194,7 @@ impl LayerExecutor<'_> {
             source,
             sandbox_id,
             template_id: self.template_id,
+            team_id: self.team_id,
             firecracker_version: &self.settings.firecracker_version,
         }
     }
