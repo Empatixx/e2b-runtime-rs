@@ -42,7 +42,6 @@ pub struct App {
     pub metrics: Arc<HostMetrics>,
     pub templates: Option<Arc<TemplateServer<PhasePipeline>>>,
     uploads: Option<UploadHandler>,
-    builds: Arc<BuildCache>,
 }
 
 impl App {
@@ -58,7 +57,6 @@ impl App {
             metrics: Arc::default(),
             templates,
             uploads: setup.and_then(|setup| setup.build.uploads),
-            builds,
         })
     }
 
