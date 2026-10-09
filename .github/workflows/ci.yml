@@ -63,7 +63,7 @@ jobs:
       - run: cargo clippy -p envd --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo build --release --locked -p envd --target ${{ matrix.target }}
       - run: file target/${{ matrix.target }}/release/envd | tee /dev/stderr | grep -Eq "static(-pie|ally) linked"
-      - run: cargo test -p envd --target ${{ matrix.target }}
+      - run: sudo -E env "PATH=$PATH" cargo test -p envd --target ${{ matrix.target }}
 
   kvm-spike:
     runs-on: ubuntu-24.04
