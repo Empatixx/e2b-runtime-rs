@@ -11,7 +11,8 @@ Layout follows rust-lang/crates.io: `foo.rs` declares submodules that live in `f
 Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/storage/         object_store backends (backend.rs: Storage::open per provider, signed UploadUrl;
-                       backend/providers.rs: S3, GCS, Azure builders), spec.rs (StorageSpec, upstream storage URL
+                       backend/providers.rs: S3, GCS, Azure builders; backend/gcs/ ADC, credential flows, external
+                       accounts; backend/azure/ DefaultAzureCredential chain, AAD, WS-Trust, SAS; backend/aws.rs), spec.rs (StorageSpec, upstream storage URL
                        parsing), local_upload.rs (HMAC UploadSigner), build paths, header V3
   src/go_url.rs        Go net/url parse and String (go_url/escape.rs, go_url/query.rs url.Values)
   src/go_exec.rs       commands with Go exec error texts (exit status N, signal: killed, not found in $PATH);
@@ -24,6 +25,13 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        rootfs.rs (+ unpack.rs CreateExt4Filesystem), provision.rs (console marker scan),
                        phases.rs (BuildEnv) + phases/base.rs (+ build.rs), pipeline.rs (PhasePipeline)
   src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text)
+  src/go_gzip.rs       Go compress/gzip + flate BestSpeed port (layer digests byte for byte); go_tar.rs (Go archive/tar
+                       writer: USTAR prefix split, PAX records); go_time.rs + go_time/parse.rs (time.ParseDuration)
+  src/featureflags.rs  LaunchDarkly client (featureflags/client.rs: offline fallbacks, overrides), contexts.rs (sandbox,
+                       team, service, kind contexts), flags.rs (every upstream flag with its fallback), prefetch.rs
+  src/telemetry.rs     OpenTelemetry: metrics.rs, traces.rs, logs.rs (tracing bridge with target/level filters),
+                       endpoint.rs (OTEL_COLLECTOR_GRPC_ENDPOINT), identity.rs (resource), grpc.rs (otelgrpc server
+                       spans, traceparent, rpc.server.duration), report.rs (span errors), server/ (upstream instruments)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
@@ -50,7 +58,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (logStream adapter), commands.rs + commands/ (RUN, ENV, WORKDIR, USER, COPY; script.rs
                        renders the embedded assets/template/commands/*.sh), phases/ (base, steps: steps and default user,
                        finalize: configure.sh, start/ready, CA bundle from assets/template/finalize/, optimize: prefetch,
-                       ensure_free_disk: BUILD_ENSURE_FREE_DISK_SPACE rootfs grow over NBD, with sizing.rs, measure.rs,
+                       ensure_free_disk: build-ensure-free-disk-space flag, rootfs grow over NBD, with sizing.rs, measure.rs,
                        resize.rs, offline.rs (NBD device guard), grow.rs; layer/filesystem.rs persists its VM-less layer)
   src/template.rs      Template: snapfile, headers and metadata fetched once per build (OnceCell); template/cache.rs
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
@@ -63,14 +71,16 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
                        pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
-                       trace.rs (PrefetchTracker, Trace intersection), prefetch.rs (init-trace prefetcher)
+                       trace.rs (PrefetchTracker, Trace intersection), prefetch.rs + prefetch/ (source.rs init/last-cycle/both,
+                       last_cycle.rs, plan.rs, flags.rs worker settings)
   src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0);
                        envd/process.rs (Connect process.Start client, bash -l -c as a user)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload;
                        snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff),
-                       resume.rs (snapshot load over uffd)
+                       resume.rs (snapshot load over uffd),
+                       harvest.rs + harvest/ (pause harvest: throwaway deny-egress resume recording a fresh trace)
   src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution,
                        config/binaries.rs: kernel and Firecracker per version),
                        upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
@@ -80,7 +90,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        scheduling.rs (SchedulingMetadata from headers), user_error.rs (UserError status details),
                        host_stats.rs and oom_monitor.rs (per-sandbox collectors), status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
                        metrics poller, /proc parsers), info.rs (InfoService), health.rs (/health on the tonic router),
-                       admission.rs (max sandboxes, starting semaphore), shutdown.rs (drain), app.rs (App: one axum
+                       admission.rs (max sandboxes from flags; admission/semaphore.rs resizable starting semaphore), shutdown.rs (drain), app.rs (App: one axum
                        router for SandboxService, InfoService, grpc health and /health), retry.rs (upload retry
                        policy), uploads.rs (Uploads: background snapshot uploads, parents land first)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/*.proto (no package upstream)

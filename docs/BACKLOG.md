@@ -3,13 +3,7 @@
 Every final review ends with minors and deferred rulings. They are collected here so they don't get lost.
 
 - When an item is fixed, delete its line in the same commit.
-- "Target" is when the item starts to matter: `API` before the node serves the real E2B API, `perf` with performance work, `template build` with the template builder, `ublk` with ublk exposure, `any` whenever convenient, `later` after that.
-
-## Orchestrator: NBD (M3a)
-
-| Item | Target |
-|---|---|
-| ublk exposure (M3b): needs a bare-metal node with kernel 6.12+ | M3b |
+- "Target" is when the item starts to matter: `API` before the node serves the real E2B API, `perf` with performance work, `template build` with the template builder, `any` whenever convenient, `later` after that.
 
 ## Orchestrator: cold boot (M5)
 
@@ -41,7 +35,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | `VolumeService`, `ChunkService` and the cmux HTTP side are not served | API |
-| `RunningSandbox.config` (deprecated upstream) is not filled | API |
 | Local expiry is opt-in (`E2B_LOCAL_EXPIRY=1`); default leaves expiry and auto-pause to the API evictor like upstream | API |
 | Startup sweep removes every `ns-<N>` netns and all of `/sys/fs/cgroup/e2b/*` and `E2B_WORK_DIR`; assumes a dedicated node | API |
 
@@ -52,39 +45,22 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | perf |
 | NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn | perf |
 
-## Orchestrator: node services (M10)
-
-| Item | Matters from |
-|---|---|
-| Deprecated `ServiceInfoResponse` fields 101–103 stay 0 (`#[allow(deprecated)]` is not allowed) | API |
-| `max_sandboxes` and the starting limit are read once from env; upstream refreshes them from feature flags every 30 s | API |
-
 ## Orchestrator: async pause (M11)
 
 | Item | Matters from |
 |---|---|
-| No peer-to-peer chunk routing: another node resuming a build whose upload is still running gets `FailedPrecondition` | API |
+| No peer-to-peer chunk routing (`ChunkService`): another node resuming a build whose upload is still running gets `FailedPrecondition` | API |
 | A failed upload is only logged; upstream also counts it in a metric and keeps the template marked for the superseded-release logic | API |
 | A process that exits during forced shutdown before starting sandboxes finish leaves their slots and cgroups to the next startup sweep | API |
-| `Flush` is answered at once while earlier writes may still be in flight (overlay is never fsynced anyway) | ublk |
 
 ## Orchestrator: prefetch (M12)
 
 | Item | Matters from |
 |---|---|
-| `RESUME_PREFETCH_SOURCE=last-cycle` and `both` (fetch-only warming of the newest layer) are not implemented; they act as `off` and `init` | API |
-| Pause harvest (record a trace with a throwaway resume after each pause) is not implemented; upstream has it off by default | API |
 | Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
 
 ## Orchestrator: template builder (M13–M16)
 
 | Item | Matters from |
 |---|---|
-| GCS takes credentials from object_store's env (`GOOGLE_SERVICE_ACCOUNT*`, `GOOGLE_APPLICATION_CREDENTIALS`); `GOOGLE_SERVICE_ACCOUNT_BASE64` signs uploads and also authenticates the client, upstream uses ADC for the client | template build |
-| Azure connection strings are split into `AccountName`/`AccountKey`/`BlobEndpoint`; SAS signing is object_store's, not upstream's user-delegation fallback with its error texts | template build |
-| The Docker Hub `AZURE_ACR` remote repository (ACR token exchange with DefaultAzureCredential) is not ported; startup fails with a "not ported" error | template build |
-| ECR tokens use static env credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, `AWS_REGION`); upstream's default AWS config also reads profiles and instance roles | template build |
-| Our envd is a glibc binary, so it only runs in images with a new enough glibc (CI builds from `debian:trixie-slim`); upstream's envd is static. Build envd for `x86_64-unknown-linux-musl` for template builds | template build |
-| Feature flags read through LaunchDarkly upstream are fixed at their defaults: `build-provision-version` (0), `build-envd-memory-protection` (false), `build-reserved-disk-space-mb` (256), `build-base-rootfs-size-limit-mb` (25000), `build-kernel-version`/`build-firecracker-version` (env defaults) | template build |
-| Finalize and optimize flags are fixed at their defaults: `build-io-engine` (Sync), `free-page-reporting` and `free-page-hinting-config` (off, so `balloon` is `{"reporting":false,"hinting":false}`), `build-kernel-cmdline-args` (none), `build-cpu-template` (none); `build-ensure-free-disk-space` (false) is read from env `BUILD_ENSURE_FREE_DISK_SPACE` instead | template build |
-| The injected files and symlink layers are gzipped with flate2, so their logged `sha256:` digests differ from Go's compress/gzip output for the same tar | template build |
+| `build-kernel-cmdline-args`, `build-cpu-template`, `free-page-reporting` and `free-page-hinting-config` are read from LaunchDarkly but not applied to the VM (`balloon` stays `{"reporting":false,"hinting":false}`) | template build |
