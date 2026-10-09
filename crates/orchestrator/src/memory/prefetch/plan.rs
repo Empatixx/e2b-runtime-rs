@@ -1,5 +1,6 @@
 use super::last_cycle::{cap, diff_mapping};
 use super::source::PrefetchSettings;
+use super::workers::PrefetchWorkers;
 use crate::storage::header::Header;
 use crate::template::metadata::MemoryPrefetch;
 
@@ -7,6 +8,7 @@ use crate::template::metadata::MemoryPrefetch;
 pub struct PrefetchPlan {
     pub init: Option<MemoryPrefetch>,
     pub last_cycle: Option<MemoryPrefetch>,
+    pub workers: PrefetchWorkers,
 }
 
 impl PrefetchPlan {
@@ -18,6 +20,7 @@ impl PrefetchPlan {
                 .uses_last_cycle()
                 .then(|| cap(diff_mapping(memfile), settings.last_cycle_max_mib))
                 .flatten(),
+            workers: settings.workers,
         }
     }
 
@@ -79,11 +82,27 @@ mod tests {
         PrefetchSettings {
             source: PrefetchSource::parse(source),
             last_cycle_max_mib,
+            workers: PrefetchWorkers::default(),
         }
     }
 
     fn resolved(source: &str) -> PrefetchPlan {
         PrefetchPlan::resolve(settings(source, -1), Some(trace()), &layered())
+    }
+
+    #[test]
+    fn the_plan_carries_the_worker_settings() {
+        let workers = PrefetchWorkers {
+            fetch: 3,
+            copy: 2,
+            coalesce_max_mib: 1,
+        };
+        let settings = PrefetchSettings {
+            workers,
+            ..settings("init", -1)
+        };
+
+        assert_eq!(PrefetchPlan::resolve(settings, None, &layered()).workers, workers);
     }
 
     #[test]

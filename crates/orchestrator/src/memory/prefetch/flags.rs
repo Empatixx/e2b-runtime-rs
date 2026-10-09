@@ -4,6 +4,9 @@ pub trait PrefetchFlags: Send + Sync {
     fn pause_resume_prefetch_harvest(&self) -> bool;
     fn pause_resume_prefetch_consume(&self) -> bool;
     fn pause_resume_prefetch_harvest_timeout_ms(&self) -> i64;
+    fn memory_prefetch_max_fetch_workers(&self) -> i64;
+    fn memory_prefetch_max_copy_workers(&self) -> i64;
+    fn memory_prefetch_coalesce_max_mb(&self) -> i64;
 }
 
 #[cfg(test)]
@@ -17,6 +20,9 @@ pub mod fixed {
         pub harvest: bool,
         pub consume: bool,
         pub harvest_timeout_ms: i64,
+        pub fetch_workers: i64,
+        pub copy_workers: i64,
+        pub coalesce_max_mb: i64,
     }
 
     impl Default for FixedPrefetchFlags {
@@ -27,6 +33,9 @@ pub mod fixed {
                 harvest: false,
                 consume: false,
                 harvest_timeout_ms: 15_000,
+                fetch_workers: 16,
+                copy_workers: 8,
+                coalesce_max_mb: 0,
             }
         }
     }
@@ -50,6 +59,18 @@ pub mod fixed {
 
         fn pause_resume_prefetch_harvest_timeout_ms(&self) -> i64 {
             self.harvest_timeout_ms
+        }
+
+        fn memory_prefetch_max_fetch_workers(&self) -> i64 {
+            self.fetch_workers
+        }
+
+        fn memory_prefetch_max_copy_workers(&self) -> i64 {
+            self.copy_workers
+        }
+
+        fn memory_prefetch_coalesce_max_mb(&self) -> i64 {
+            self.coalesce_max_mb
         }
     }
 }

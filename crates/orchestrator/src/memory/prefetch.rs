@@ -1,7 +1,9 @@
+pub mod extent;
 pub mod flags;
 pub mod last_cycle;
 pub mod plan;
 pub mod source;
+pub mod workers;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -10,11 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+use self::extent::{Extent, coalesce_indices};
+use self::workers::PrefetchWorkers;
 use crate::block::build_file::BuildFile;
 use crate::template::metadata::MemoryPrefetch;
-
-pub const FETCH_WORKERS: usize = 16;
-pub const COPY_WORKERS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prefaulted {
@@ -48,8 +49,16 @@ pub async fn prefetch<I: Installer>(
     memfile: Arc<BuildFile>,
     installer: impl Future<Output = Option<Arc<I>>>,
     stats: Arc<PrefetchStats>,
+    workers: PrefetchWorkers,
 ) -> Result<(), String> {
     let block_size = u64::try_from(mapping.block_size).map_err(|_| "negative prefetch block size".to_owned())?;
+    if workers.fetch == 0 {
+        return Ok(());
+    }
+    if workers.copy == 0 {
+        fetch_only(mapping, memfile, stats, workers).await;
+        return Ok(());
+    }
     let (warmed, mut ready) = mpsc::unbounded_channel();
     let warming = tokio::spawn(warm(
         mapping.indices,
@@ -57,6 +66,7 @@ pub async fn prefetch<I: Installer>(
         memfile.clone(),
         warmed,
         stats.clone(),
+        workers,
     ));
     let Some(installer) = installer.await else {
         warming.abort();
@@ -73,7 +83,7 @@ pub async fn prefetch<I: Installer>(
     let fetching = warming.abort_handle();
     futures::stream::poll_fn(|context| ready.poll_recv(context))
         .take_while(|_| std::future::ready(!closed.load(Ordering::Relaxed)))
-        .for_each_concurrent(COPY_WORKERS, |offset| {
+        .for_each_concurrent(workers.copy, |offset| {
             let installer = installer.clone();
             let memfile = memfile.clone();
             let stats = stats.clone();
@@ -98,47 +108,63 @@ pub async fn prefetch<I: Installer>(
     Ok(())
 }
 
-fn fetched_blocks(
+struct FetchedExtent {
+    extent: Extent,
+    read: Result<(), String>,
+}
+
+fn fetched_extents(
     indices: Vec<u64>,
     block_size: u64,
     memfile: Arc<BuildFile>,
-) -> impl futures::Stream<Item = Result<u64, String>> {
+    workers: PrefetchWorkers,
+) -> impl futures::Stream<Item = FetchedExtent> {
     let size = memfile.size();
-    futures::stream::iter(indices)
-        .filter_map(move |index| {
-            std::future::ready(
-                index
-                    .checked_mul(block_size)
-                    .filter(|offset| offset.checked_add(block_size).is_some_and(|end| end <= size)),
-            )
-        })
-        .map(move |offset| {
+    let in_range = |index: &u64| {
+        index
+            .checked_mul(block_size)
+            .and_then(|offset| offset.checked_add(block_size))
+            .is_some_and(|end| end <= size)
+    };
+    let indices: Vec<u64> = indices.into_iter().filter(in_range).collect();
+    futures::stream::iter(coalesce_indices(&indices, workers.extent_blocks(block_size)))
+        .map(move |extent| {
             let memfile = memfile.clone();
             async move {
-                let mut data = vec![0; block_size as usize];
-                memfile.read_at(offset, &mut data).await.map(|()| offset)
+                let mut data = vec![0; extent.bytes(block_size)];
+                let read = memfile.read_at(extent.offset(block_size), &mut data).await;
+                FetchedExtent { extent, read }
             }
         })
-        .buffered(FETCH_WORKERS)
+        .buffered(workers.fetch)
 }
 
-pub async fn fetch_only(mapping: MemoryPrefetch, memfile: Arc<BuildFile>, stats: Arc<PrefetchStats>) {
+pub async fn fetch_only(
+    mapping: MemoryPrefetch,
+    memfile: Arc<BuildFile>,
+    stats: Arc<PrefetchStats>,
+    workers: PrefetchWorkers,
+) {
     let Ok(block_size) = u64::try_from(mapping.block_size) else {
         return;
     };
-    let reads = fetched_blocks(mapping.indices, block_size, memfile);
+    if workers.fetch == 0 {
+        return;
+    }
+    let reads = fetched_extents(mapping.indices, block_size, memfile, workers);
     futures::pin_mut!(reads);
-    while let Some(read) = reads.next().await {
-        record_fetch(&read, &stats);
+    while let Some(fetched) = reads.next().await {
+        record_fetch(&fetched, &stats);
     }
 }
 
-fn record_fetch(read: &Result<u64, String>, stats: &PrefetchStats) {
-    match read {
-        Ok(_) => stats.fetched.fetch_add(1, Ordering::Relaxed),
+fn record_fetch(fetched: &FetchedExtent, stats: &PrefetchStats) {
+    let blocks = fetched.extent.blocks as u64;
+    match &fetched.read {
+        Ok(()) => stats.fetched.fetch_add(blocks, Ordering::Relaxed),
         Err(e) => {
             tracing::warn!(error = %e, "prefetch read failed");
-            stats.skipped.fetch_add(1, Ordering::Relaxed)
+            stats.skipped.fetch_add(blocks, Ordering::Relaxed)
         }
     };
 }
@@ -149,13 +175,17 @@ async fn warm(
     memfile: Arc<BuildFile>,
     warmed: mpsc::UnboundedSender<u64>,
     stats: Arc<PrefetchStats>,
+    workers: PrefetchWorkers,
 ) {
-    let reads = fetched_blocks(indices, block_size, memfile);
+    let reads = fetched_extents(indices, block_size, memfile, workers);
     futures::pin_mut!(reads);
-    while let Some(read) = reads.next().await {
-        record_fetch(&read, &stats);
-        if let Ok(offset) = read
-            && warmed.send(offset).is_err()
+    while let Some(fetched) = reads.next().await {
+        record_fetch(&fetched, &stats);
+        if fetched.read.is_ok()
+            && fetched
+                .extent
+                .block_offsets(block_size)
+                .any(|offset| warmed.send(offset).is_err())
         {
             return;
         }
@@ -301,6 +331,7 @@ mod tests {
             memfile(&dir, 4).await,
             std::future::ready(Some(guest.clone())),
             stats.clone(),
+            PrefetchWorkers::default(),
         )
         .await
         .unwrap();
@@ -320,6 +351,7 @@ mod tests {
             memfile(&dir, 1).await,
             std::future::ready(Some(Arc::new(FakeGuest::default()))),
             Arc::default(),
+            PrefetchWorkers::default(),
         )
         .await
         .unwrap_err();
@@ -337,6 +369,7 @@ mod tests {
             memfile(&dir, 16).await,
             std::future::ready(Some(guest.clone())),
             Arc::default(),
+            PrefetchWorkers::default(),
         )
         .await
         .unwrap();
@@ -358,11 +391,12 @@ mod tests {
             memfile(&dir, 200).await,
             std::future::ready(Some(guest.clone())),
             stats.clone(),
+            PrefetchWorkers::default(),
         )
         .await
         .unwrap();
 
-        assert!(guest.attempts.load(Ordering::SeqCst) <= 2 * COPY_WORKERS);
+        assert!(guest.attempts.load(Ordering::SeqCst) <= 2 * PrefetchWorkers::default().copy);
         assert_eq!(stats.installed(), 0);
         assert_eq!(stats.skipped.load(Ordering::Relaxed), 0);
     }
@@ -376,6 +410,7 @@ mod tests {
             mapping(vec![3, 2, 0, 99, u64::MAX], PAGE as i64),
             memfile(&dir, 4).await,
             stats.clone(),
+            PrefetchWorkers::default(),
         )
         .await;
 
@@ -389,8 +424,107 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stats = Arc::new(PrefetchStats::default());
 
-        fetch_only(mapping(vec![0], -1), memfile(&dir, 1).await, stats.clone()).await;
+        fetch_only(
+            mapping(vec![0], -1),
+            memfile(&dir, 1).await,
+            stats.clone(),
+            PrefetchWorkers::default(),
+        )
+        .await;
 
         assert_eq!(stats.fetched.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn coalesced_extents_fetch_every_traced_block_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats = Arc::new(PrefetchStats::default());
+        let workers = PrefetchWorkers {
+            coalesce_max_mib: 1,
+            ..PrefetchWorkers::default()
+        };
+
+        fetch_only(
+            mapping(vec![0, 1, 2, 5], PAGE as i64),
+            memfile(&dir, 8).await,
+            stats.clone(),
+            workers,
+        )
+        .await;
+
+        assert_eq!(stats.fetched.load(Ordering::Relaxed), 4);
+        assert_eq!(stats.skipped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn coalesced_prefetch_still_installs_block_by_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest = Arc::new(FakeGuest::default());
+        let workers = PrefetchWorkers {
+            coalesce_max_mib: 1,
+            ..PrefetchWorkers::default()
+        };
+
+        prefetch(
+            mapping(vec![1, 2, 3], PAGE as i64),
+            memfile(&dir, 4).await,
+            std::future::ready(Some(guest.clone())),
+            Arc::default(),
+            workers,
+        )
+        .await
+        .unwrap();
+
+        let mut installed = guest.installed.lock().clone();
+        installed.sort();
+        assert_eq!(installed, vec![(PAGE, 1), (2 * PAGE, 2), (3 * PAGE, 3)]);
+    }
+
+    #[tokio::test]
+    async fn zero_fetch_workers_do_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest = Arc::new(FakeGuest::default());
+        let stats = Arc::new(PrefetchStats::default());
+        let workers = PrefetchWorkers {
+            fetch: 0,
+            ..PrefetchWorkers::default()
+        };
+
+        prefetch(
+            mapping(vec![0, 1], PAGE as i64),
+            memfile(&dir, 2).await,
+            std::future::ready(Some(guest.clone())),
+            stats.clone(),
+            workers,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.fetched.load(Ordering::Relaxed), 0);
+        assert!(guest.installed.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_copy_workers_only_warm_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest = Arc::new(FakeGuest::default());
+        let stats = Arc::new(PrefetchStats::default());
+        let workers = PrefetchWorkers {
+            copy: 0,
+            ..PrefetchWorkers::default()
+        };
+
+        prefetch(
+            mapping(vec![0, 1], PAGE as i64),
+            memfile(&dir, 2).await,
+            std::future::ready(Some(guest.clone())),
+            stats.clone(),
+            workers,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.fetched.load(Ordering::Relaxed), 2);
+        assert!(guest.installed.lock().is_empty());
     }
 }

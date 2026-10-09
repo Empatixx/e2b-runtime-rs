@@ -1,4 +1,5 @@
 use super::flags::PrefetchFlags;
+use super::workers::PrefetchWorkers;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrefetchSource {
@@ -32,6 +33,7 @@ impl PrefetchSource {
 pub struct PrefetchSettings {
     pub source: PrefetchSource,
     pub last_cycle_max_mib: i64,
+    pub workers: PrefetchWorkers,
 }
 
 impl Default for PrefetchSettings {
@@ -39,6 +41,7 @@ impl Default for PrefetchSettings {
         Self {
             source: PrefetchSource::Init,
             last_cycle_max_mib: -1,
+            workers: PrefetchWorkers::default(),
         }
     }
 }
@@ -53,6 +56,7 @@ impl PrefetchSettings {
             } else {
                 Self::default().last_cycle_max_mib
             },
+            workers: PrefetchWorkers::from_flags(flags),
         }
     }
 }

@@ -166,12 +166,18 @@ async fn replay(
     stats: Arc<PrefetchStats>,
 ) -> Result<(), String> {
     if let Some(init) = plan.init {
-        let _ = prefetch(init, memfile.clone(), async { installer.await.ok() }, stats.clone())
-            .await
-            .inspect_err(|e| tracing::error!(error = %e, "failed to start init prefetcher"));
+        let _ = prefetch(
+            init,
+            memfile.clone(),
+            async { installer.await.ok() },
+            stats.clone(),
+            plan.workers,
+        )
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "failed to start init prefetcher"));
     }
     if let Some(last_cycle) = plan.last_cycle {
-        fetch_only(last_cycle, memfile, stats).await;
+        fetch_only(last_cycle, memfile, stats, plan.workers).await;
     }
     Ok(())
 }
