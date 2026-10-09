@@ -29,9 +29,9 @@ Credentials are resolved the way the Go SDKs resolve them:
 A header starts with metadata (version, block size, total size, build id, base build id) followed by a list of **mappings**. Each mapping says which range of the device is stored in which build, and at which offset in that build's file.
 
 ```
-offset 0       length 4 MiB    → build A, storage offset 0
-offset 4 MiB   length 64 KiB   → build C, storage offset 0
-offset 4.06 MiB length …       → build B, storage offset 12 MiB
+offset 0       length 4 MiB    in build A, storage offset 0
+offset 4 MiB   length 64 KiB   in build C, storage offset 0
+offset 4.06 MiB length …       in build B, storage offset 12 MiB
 ```
 
 A diff build stores only its own blocks, packed one after another, and its header maps everything else to its ancestors. The format is upstream's header V3, byte for byte.

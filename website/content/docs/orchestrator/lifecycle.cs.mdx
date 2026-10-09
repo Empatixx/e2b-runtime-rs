@@ -50,8 +50,8 @@ sequenceDiagram
 flowchart LR
   A[zmrazit uživatelské procesy a fs] --> B[pozastavit VM]
   B --> C[snapshot Firecrackeru: snapfile]
-  C --> D[zapsané stránky paměti → rozdíl memfilu]
-  C --> E[zapsané bloky overlaye → rozdíl rootfs]
+  C --> D[zapsané stránky paměti: rozdíl memfilu]
+  C --> E[zapsané bloky overlaye: rozdíl rootfs]
   D --> F[nové hlavičky]
   E --> F
   F --> G[přidat do cache šablon]

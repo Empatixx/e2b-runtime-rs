@@ -21,7 +21,7 @@ sequenceDiagram
 
 1. The orchestrator copies the new binary into the sandbox and calls `POST /upgrade`.
 2. The old envd writes a **handover file** (protobuf) with everything it knows: running processes and their pipes and PTYs, their tags, filesystem watchers, port forwards, the default user and working directory, and which cgroups were frozen.
-3. The file descriptors stay open across `exec`, so the new envd inherits the actual pipes and terminals, not just their numbers.
+3. The file descriptors stay open across `exec`, so the new envd inherits the real pipes and terminals. It does not get only their numbers.
 4. The new envd starts with `-resume-handover`, reads the file, adopts every process and reports what it took over.
 
 Clients that were streaming output reconnect with `Connect` and continue where they were.

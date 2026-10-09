@@ -13,7 +13,7 @@ flowchart LR
   NBD --> S[NBD server v orchestratoru]
   S --> O{overlay}
   O -- zapsaný blok --> L[lokální řídký soubor]
-  O -- nezměněný blok --> C[cache chunků → hlavičky buildu → úložiště]
+  O -- nezměněný blok --> C[cache chunků, hlavičky buildu, úložiště]
 `} />
 
 - **Čtení** vrátí blok z lokálního souboru, pokud do něj sandbox zapsal, jinak z buildu (přes hlavičku a cache chunků).

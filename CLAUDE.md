@@ -28,6 +28,10 @@ Put unit tests at the bottom of the same file in `#[cfg(test)] mod tests`. Put H
 
 Deferred review findings live in `docs/BACKLOG.md`, each with the milestone where it starts to matter. Add every deferred minor there when a review ends, and delete the line when it is fixed.
 
+## Writing docs and posts
+
+README, docs and the website use plain, short English (and a Czech translation on the website). Follow the `writing-blogs` skill. `scripts/check-prose.py` rejects AI-sounding words, arrows, dashes and emoji; the git pre-push hook (`git config core.hooksPath scripts/hooks`) and the Claude Code hook in `.claude/settings.json` run it before every push.
+
 ## Before a commit
 
 Run `cargo fmt`, `cargo clippy --all-targets` and `cargo test`, and commit when all three are clean. Commit locally and leave pushing to the user.

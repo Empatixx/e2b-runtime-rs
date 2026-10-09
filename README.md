@@ -41,7 +41,7 @@ envd, Rust vs Go, under load (8 CPUs, 100 connections; full method in [docs/perf
 - **p99 latency is lower in all seven tests**, often several times lower (stat 2.3 vs 15.7 ms, multipart upload 25 vs 103 ms).
 - **Throughput is higher or equal in all seven** on 8 CPUs; CPU per request is lower everywhere except download (Go uses `sendfile`).
 - **SDK compatibility:** the official E2B JS SDK sandbox tests pass against envd-rs (105 passed, 9 skipped by the SDK itself in debug mode).
-- **Sandbox start:** the target is upstream's ~150 ms create/resume on a bare-metal node. CI runners (nested virtualisation) measure 0.8–2.4 s for a resume; bare-metal numbers will be published here.
+- **Sandbox start:** the target is upstream's ~150 ms create/resume on a bare-metal node. CI runners (nested virtualisation) measure 0.8 to 2.4 s for a resume; bare-metal numbers will be published here.
 
 ## What you get
 
@@ -55,9 +55,9 @@ envd, Rust vs Go, under load (8 CPUs, 100 connections; full method in [docs/perf
 
 | Component | What it does | State |
 |---|---|---|
-| **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs over NBD, pause with diffs to object storage | ✅ create, resume, pause, checkpoint, `SandboxService`, `InfoService`, egress firewall, routing, events and stats at upstream parity; 🚧 wave 2: NBD/network over netlink, in-place pause, huge pages, `VolumeService`/`ChunkService` |
-| **template build** | OCI image → ext4 → snapshot (template-manager role) | ✅ base, steps, finalize and optimize phases with the layer cache |
+| **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | Done, passes the official E2B JS SDK tests |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs over NBD, pause with diffs to object storage | Done: create, resume, pause, checkpoint, `SandboxService`, `InfoService`, egress firewall, routing, events and stats at upstream parity. In progress (wave 2): NBD/network over netlink, in-place pause, huge pages, `VolumeService`/`ChunkService` |
+| **template build** | Builds snapshots from an OCI image and steps (template-manager role) | Done: base, steps, finalize and optimize phases with the layer cache |
 | api, client-proxy | REST API for the SDK, `https://<port>-<sandbox>.<domain>` routing | not part of this project: use upstream's Go services |
 
 ## How it fits together

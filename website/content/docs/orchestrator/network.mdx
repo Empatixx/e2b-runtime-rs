@@ -31,4 +31,4 @@ Creating a slot takes tens of milliseconds, so the **network pool** creates up t
 
 ## Egress control
 
-A sandbox can be created with egress rules: allowed and denied CIDRs and domains. IP rules go into the slot's nftables sets. Domain rules need to see the hostname, so TCP traffic is redirected to the orchestrator's **TCP firewall proxy** (ports 5016–5018), which reads the HTTP `Host` header or the TLS SNI and allows or blocks the connection.
+A sandbox can be created with egress rules: allowed and denied CIDRs and domains. IP rules go into the slot's nftables sets. Domain rules need to see the hostname, so TCP traffic is redirected to the orchestrator's **TCP firewall proxy** (ports 5016 to 5018), which reads the HTTP `Host` header or the TLS SNI and allows or blocks the connection.

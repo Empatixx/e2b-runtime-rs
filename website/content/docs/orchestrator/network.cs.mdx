@@ -31,4 +31,4 @@ Vytvoření slotu trvá desítky milisekund, proto **síťový pool** předem vy
 
 ## Řízení odchozího provozu
 
-Sandbox jde vytvořit s egress pravidly: povolené a zakázané CIDR rozsahy a domény. IP pravidla jdou do nftables setů slotu. Pravidla pro domény potřebují vidět jméno hostitele, proto se TCP provoz přesměruje na **TCP firewall proxy** orchestratoru (porty 5016–5018), která přečte HTTP hlavičku `Host` nebo TLS SNI a spojení povolí nebo zablokuje.
+Sandbox jde vytvořit s egress pravidly: povolené a zakázané CIDR rozsahy a domény. IP pravidla jdou do nftables setů slotu. Pravidla pro domény potřebují vidět jméno hostitele, proto se TCP provoz přesměruje na **TCP firewall proxy** orchestratoru (porty 5016 až 5018), která přečte HTTP hlavičku `Host` nebo TLS SNI a spojení povolí nebo zablokuje.

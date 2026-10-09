@@ -13,7 +13,7 @@ flowchart LR
   NBD --> S[NBD server in the orchestrator]
   S --> O{overlay}
   O -- written block --> L[local sparse file]
-  O -- untouched block --> C[chunk cache → build headers → storage]
+  O -- untouched block --> C[chunk cache, build headers, storage]
 `} />
 
 - A **read** returns the block from the local file if the sandbox wrote it, otherwise from the build (through the header and the chunk cache).

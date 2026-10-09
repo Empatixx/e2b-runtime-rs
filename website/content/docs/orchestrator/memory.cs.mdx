@@ -17,7 +17,7 @@ sequenceDiagram
   participant C as cache chunků
   G->>K: sáhne na stránku na adrese X
   K->>S: událost výpadku stránky (uffd)
-  S->>S: adresa → offset v memfilu (mapa oblastí)
+  S->>S: adresa na offset v memfilu (mapa oblastí)
   S->>C: přečti 4 KiB na offsetu
   C-->>S: bajty (z cache, nebo ze staženého chunku)
   S->>K: UFFDIO_COPY stránky do hosta

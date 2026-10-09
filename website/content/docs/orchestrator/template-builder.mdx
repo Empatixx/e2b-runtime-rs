@@ -7,7 +7,7 @@ With `ORCHESTRATOR_SERVICES=template-manager`, the orchestrator also serves `Tem
 
 <Mermaid chart={`
 flowchart LR
-  B[base: image → ext4 → provision → boot] --> U[default user]
+  B[base: image, ext4, provision, boot] --> U[default user]
   U --> S1[step 1] --> S2[step 2] --> SN[step N]
   SN --> FD[ensure free disk]
   FD --> F[finalize: configure, start, ready]

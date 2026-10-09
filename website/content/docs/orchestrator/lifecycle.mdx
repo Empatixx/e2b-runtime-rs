@@ -50,8 +50,8 @@ The lifecycle task enforces `endTime` (when local expiry is on; normally the API
 flowchart LR
   A[freeze user processes and fs] --> B[pause VM]
   B --> C[Firecracker snapshot: snapfile]
-  C --> D[dirty memory pages → memfile diff]
-  C --> E[overlay written blocks → rootfs diff]
+  C --> D[dirty memory pages: memfile diff]
+  C --> E[overlay written blocks: rootfs diff]
   D --> F[new headers]
   E --> F
   F --> G[add to template cache]

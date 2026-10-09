@@ -20,9 +20,9 @@ Every memfile and rootfs has a **header** next to it. The header is a list of ma
 <Mermaid chart={`
 flowchart LR
   subgraph header[rootfs header of build C]
-    m1[blocks 0-99 → build A]
-    m2[blocks 100-119 → build C]
-    m3[blocks 120-999 → build B]
+    m1[blocks 0-99: build A]
+    m2[blocks 100-119: build C]
+    m3[blocks 120-999: build B]
   end
 `} />
 

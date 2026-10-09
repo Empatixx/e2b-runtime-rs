@@ -59,7 +59,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
 
-## Orchestrator: template builder (M13–M16)
+## Orchestrator: template builder (M13 to M16)
 
 | Item | Matters from |
 |---|---|

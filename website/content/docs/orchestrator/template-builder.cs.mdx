@@ -7,7 +7,7 @@ S `ORCHESTRATOR_SERVICES=template-manager` orchestrator obsluhuje i `TemplateSer
 
 <Mermaid chart={`
 flowchart LR
-  B[base: image → ext4 → provisioning → boot] --> U[výchozí uživatel]
+  B[base: image, ext4, provisioning, boot] --> U[výchozí uživatel]
   U --> S1[krok 1] --> S2[krok 2] --> SN[krok N]
   SN --> FD[zajištění volného místa]
   FD --> F[finalize: konfigurace, start, ready]

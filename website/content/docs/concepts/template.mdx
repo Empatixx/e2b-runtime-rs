@@ -19,7 +19,7 @@ A template has a stable `templateID`, for example `my-python`. You refer to it w
 
 ## Build
 
-A **build** is one baked version of a template, identified by a `buildID` (a UUID). Building takes the image and the steps, turns them into a disk image, boots a VM, runs the steps inside it, and finally **pauses that VM**. The result of a build is therefore not just a disk: it is a full [snapshot](../snapshot/) of a running machine, with memory.
+A **build** is one baked version of a template, identified by a `buildID` (a UUID). Building takes the image and the steps, turns them into a disk image, boots a VM, runs the steps inside it, and finally **pauses that VM**. The result of a build is more than a disk. It is a full [snapshot](../snapshot/) of a running machine, with memory.
 
 That is the trick behind fast starts. Creating a sandbox does not boot Linux; it **resumes** the snapshot of the build, so the start command is already running and the Python interpreter is already loaded.
 

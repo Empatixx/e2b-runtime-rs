@@ -17,7 +17,7 @@ sequenceDiagram
   participant C as chunk cache
   G->>K: touches page at address X
   K->>S: page fault event (uffd)
-  S->>S: address → memfile offset (region map)
+  S->>S: address to memfile offset (region map)
   S->>C: read 4 KiB at offset
   C-->>S: bytes (from cache, or fetched chunk)
   S->>K: UFFDIO_COPY page into guest

@@ -49,7 +49,7 @@ V každém E2B sandboxu běží **envd**, malý daemon, se kterým SDK mluví po
 />
 
 <CompareChart
-  title="Špičková paměť pod zátěží, 8 CPU"
+  title="Nejvyšší paměť pod zátěží, 8 CPU"
   unit="MB"
   note="kratší je lepší"
   lowerIsBetter
@@ -123,7 +123,7 @@ Nakonec CI na runneru s KVM nastartuje skutečnou Firecracker microVM s envd v R
 | Build | Go jako v upstream `make build`: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"`. Rust: `cargo build --release` s LTO, `codegen-units = 1`, stripnutý |
 | Image | Oba ve stejném Debian trixie image, spuštěné s `envd -isnotfc -verbose`, pak `POST /init {"defaultUser":"user"}` |
 | Zátěž | [oha](https://github.com/hatoo/oha) v samostatném kontejneru ve stejné Docker síti, 15 s na test, pro každý test nový kontejner s envd |
-| Paměť | Špičkové RSS envd (`VmHWM` procesu PID 1) |
+| Paměť | Nejvyšší RSS envd (`VmHWM` procesu PID 1) |
 | CPU | `cpu.stat` cgroupy kontejneru děleno počtem požadavků |
 | Hostitel | Docker Desktop na Apple Silicon; čísla mezi běhy kolísají o ±10 %, menší rozdíly jsou remíza |
 
@@ -159,7 +159,7 @@ docker run --rm --network bench --cpus=4 ghcr.io/hatoo/oha:latest \
 | upload raw | **13 687** | 9 076 | **19 ms** | 67 ms | **554 µs** | 622 µs | 32 MB | **24 MB** |
 | spuštění procesu | **6 057** | 5 450 | **47 ms** | 59 ms | **1,32 ms** | 1,47 ms | **51 MB** | 126 MB |
 
-health a stat brzdí generátor zátěže (4 CPU): oba servery využily jen asi 5,5 z 8 jader, takže jejich skutečný strop je výš. Na stejném CPU obslouží Rust o 40–100 % víc takových požadavků.
+health a stat brzdí generátor zátěže (4 CPU): oba servery využily jen asi 5,5 z 8 jader, takže jejich skutečný strop je výš. Na stejném CPU obslouží Rust o 40 až 100 % víc takových požadavků.
 
 ### 2 CPU, 50 spojení
 
@@ -171,7 +171,7 @@ health a stat brzdí generátor zátěže (4 CPU): oba servery využily jen asi 
 | download | 172 | **195** | **506 ms** | 778 ms | **58 MB** | 64 MB |
 | upload multipart | **5 084** | 3 643 | **17 ms** | 36 ms | 30 MB | **16 MB** |
 | upload raw | 6 358 | **6 736** | **13 ms** | 20 ms | 17 MB | 17 MB |
-| spuštění procesu | ~1 700 | ~1 430–1 880 | 83–87 ms | 82–93 ms | **18 MB** | 42–50 MB |
+| spuštění procesu | ~1 700 | ~1 430 až 1 880 | 83 až 87 ms | 82 až 93 ms | **18 MB** | 42 až 50 MB |
 
 Na 2 CPU jsou listdir a spuštění procesu remíza v rámci šumu a Go si drží malý náskok u downloadu a raw uploadu. p99 je v Rustu pořád všude stejná nebo nižší.
 
@@ -192,25 +192,25 @@ První verze v Rustu rychlejší nebyla. Profilovali jsme a opravovali jednu zm�
 | Změna | Efekt |
 |---|---|
 | `TCP_NODELAY` na každém spojení (Go ho nastavuje automaticky) | Streamované odpovědi přestaly čekat 40 ms na zpožděný ACK; p50 spuštění procesu bylo předtím pevných 41 ms |
-| Upload zapisuje kusy rovnou do `std::fs::File` | Žádný přeskok do thread poolu na každých 8 KiB; multipart upload 713 → 3 489 req/s na 2 CPU |
-| Těla požadavků jako stream `Bytes` | Méně kopírování; multipart upload 3 489 → 4 728 req/s |
-| hyper `max_buf_size` 64 KiB (vlastní serve smyčka) | RSS při uploadu 137 MB → 30 MB, vyšší propustnost |
-| Cache jmen uid/gid v rámci jednoho ListDir | Jedno čtení `/etc/passwd` na vlastníka místo na položku; ListDir 82 → 239 req/s |
-| Spouštění pod credentials vlákna místo `pre_exec` | std může použít `posix_spawn` (vfork); jedno spuštění 0,83 → 0,59 ms (Go 0,71 ms) |
-| Ukončené procesy v mapě podle pid plus fronta expirací | Každý start a konec předtím procházel ~120 000 držených ukončení pod jedním zámkem; spuštění procesu na 8 CPU 4 341 → 6 057 req/s |
+| Upload zapisuje kusy rovnou do `std::fs::File` | Žádný přeskok do thread poolu na každých 8 KiB; multipart upload 713 na 3 489 req/s na 2 CPU |
+| Těla požadavků jako stream `Bytes` | Méně kopírování; multipart upload 3 489 na 4 728 req/s |
+| hyper `max_buf_size` 64 KiB (vlastní serve smyčka) | RSS při uploadu 137 MB na 30 MB, vyšší propustnost |
+| Cache jmen uid/gid v rámci jednoho ListDir | Jedno čtení `/etc/passwd` na vlastníka místo na položku; ListDir 82 na 239 req/s |
+| Spouštění pod credentials vlákna místo `pre_exec` | std může použít `posix_spawn` (vfork); jedno spuštění 0,83 na 0,59 ms (Go 0,71 ms) |
+| Ukončené procesy v mapě podle pid plus fronta expirací | Každý start a konec předtím procházel ~120 000 držených ukončení pod jedním zámkem; spuštění procesu na 8 CPU 4 341 na 6 057 req/s |
 
 Ta poslední je dobrý příklad, proč profilujeme místo hádání: naše první teorie (blokující spawn) byla špatně a `perf` ukázal 31 % CPU v lineárním procházení registru ukončených procesů.
 
 ## Co jsme zkusili a zahodili
 
-- **mimalloc**: o 5–10 % vyšší propustnost, ale RSS u ListDir vyrostlo na 454 MB.
+- **mimalloc**: o 5 až 10 % vyšší propustnost, ale RSS u ListDir vyrostlo na 454 MB.
 - **jemalloc**: celkově pomalejší; download spadl na 41 req/s.
-- **`spawn_blocking` kolem spouštění procesu**: pomalejší (1 971 → 1 365 req/s na 2 CPU); přeskok mezi vlákny stojí víc než pauza vfork.
+- **`spawn_blocking` kolem spouštění procesu**: pomalejší (1 971 na 1 365 req/s na 2 CPU); přeskok mezi vlákny stojí víc než pauza vfork.
 
 ## Známé mezery
 
 - **Download**: Go posílá soubor jedním voláním `sendfile`; hyper kopíruje přes user space. Na 8 CPU nastejno, na 2 CPU asi o 12 % pozadu.
-- **Paměť při uploadu pod zátěží**: s 50–100 souběžnými uploady po 1 MiB má Rust vyšší špičku než Go, protože hyper drží až 64 KiB na spojení.
+- **Paměť při uploadu pod zátěží**: s 50 až 100 souběžnými uploady po 1 MiB má Rust vyšší špičku než Go, protože hyper drží až 64 KiB na spojení.
 - **Velikost hlaviček**: 64KiB buffer omezuje i hlavičky požadavku na 64 KiB; Go povoluje 1 MiB. Tokeny E2B jsou mnohem menší, ale je to zdokumentovaný rozdíl.
 
 Kompletní čísla jsou v repozitáři v [`docs/performance.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance.md).

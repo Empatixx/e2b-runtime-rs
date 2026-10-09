@@ -44,7 +44,7 @@ health and stat are limited by the load generator (4 CPUs): both servers used ab
 | download | 172 | **195** | **506 ms** | 778 ms | **58 MB** | 64 MB |
 | upload multipart | **5 084** | 3 643 | **17 ms** | 36 ms | 30 MB | **16 MB** |
 | upload raw | 6 358 | **6 736** | **13 ms** | 20 ms | 17 MB | 17 MB |
-| process start | ~1 700 | ~1 430–1 880 | 83–87 ms | 82–93 ms | **18 MB** | 42–50 MB |
+| process start | ~1 700 | ~1 430 to 1 880 | 83 to 87 ms | 82 to 93 ms | **18 MB** | 42 to 50 MB |
 
 listdir and process start are a tie within run-to-run noise.
 
@@ -61,22 +61,22 @@ listdir and process start are a tie within run-to-run noise.
 | Change | Effect |
 |---|---|
 | `TCP_NODELAY` on every connection (Go sets it by default) | Streaming responses no longer wait 40 ms for a delayed ACK; process start p50 was a flat 41 ms before |
-| Uploads write chunks straight into a `std::fs::File` instead of `tokio::fs` + `BufWriter` | No thread-pool hop per 8 KiB write; multipart upload 713 → 3 489 req/s on 2 CPUs |
-| Request bodies flow as `Bytes` streams (no `AsyncRead` round trips) | Fewer copies; multipart upload 3 489 → 4 728 req/s on 2 CPUs |
-| hyper `max_buf_size` 64 KiB (custom serve loop in `main.rs`, `axum::serve` cannot set it) | Upload RSS 137 MB → 30 MB and higher throughput |
-| `OwnerNames` cache of uid/gid names within one ListDir | One `/etc/passwd` and `/etc/group` lookup per owner instead of per entry; ListDir 82 → 239 req/s on 2 CPUs |
-| Spawn under per-thread credentials (`rustix::thread`) instead of `pre_exec` | std uses `posix_spawn` (vfork) instead of `fork`; one process start 0.83 → 0.59 ms (Go 0.71 ms) |
-| Exited-process retention as a pid map plus an expiry queue | Start and exit were scanning ~120 000 retained exits under one lock; process start on 8 CPUs 4 341 → 6 057 req/s |
+| Uploads write chunks straight into a `std::fs::File` instead of `tokio::fs` + `BufWriter` | No thread-pool hop per 8 KiB write; multipart upload 713 to 3 489 req/s on 2 CPUs |
+| Request bodies flow as `Bytes` streams (no `AsyncRead` round trips) | Fewer copies; multipart upload 3 489 to 4 728 req/s on 2 CPUs |
+| hyper `max_buf_size` 64 KiB (custom serve loop in `main.rs`, `axum::serve` cannot set it) | Upload RSS 137 MB to 30 MB and higher throughput |
+| `OwnerNames` cache of uid/gid names within one ListDir | One `/etc/passwd` and `/etc/group` lookup per owner instead of per entry; ListDir 82 to 239 req/s on 2 CPUs |
+| Spawn under per-thread credentials (`rustix::thread`) instead of `pre_exec` | std uses `posix_spawn` (vfork) instead of `fork`; one process start 0.83 to 0.59 ms (Go 0.71 ms) |
+| Exited-process retention as a pid map plus an expiry queue | Start and exit were scanning ~120 000 retained exits under one lock; process start on 8 CPUs 4 341 to 6 057 req/s |
 
 ## Tried and dropped
 
-- **mimalloc**: 5–10 % more req/s, but ListDir RSS grew to 454 MB.
+- **mimalloc**: 5 to 10 % more req/s, but ListDir RSS grew to 454 MB.
 - **jemalloc**: slower overall, download fell to 41 req/s.
 - **Synchronous reads for download**: no change, the gap to Go is `sendfile`.
-- **`spawn_blocking` around process spawn**: slower (1 971 → 1 365 req/s on 2 CPUs), the thread hop costs more than the vfork pause.
+- **`spawn_blocking` around process spawn**: slower (1 971 to 1 365 req/s on 2 CPUs), the thread hop costs more than the vfork pause.
 
 ## Known gaps
 
 - **Download**: Go serves files with a single `sendfile` per request; hyper copies through user space. Equal on 8 CPUs, about 12 % behind on 2 CPUs.
-- **Upload memory under load**: with 50–100 concurrent 1 MiB uploads Rust peaks higher than Go (hyper buffers up to 64 KiB per connection plus in-flight chunks).
+- **Upload memory under load**: with 50 to 100 concurrent 1 MiB uploads Rust peaks higher than Go (hyper buffers up to 64 KiB per connection plus in-flight chunks).
 - **Header size**: the 64 KiB hyper buffer also caps request headers at 64 KiB; Go allows 1 MiB (`MaxHeaderBytes`).

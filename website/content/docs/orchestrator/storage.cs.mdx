@@ -29,9 +29,9 @@ Přihlašovací údaje se hledají stejně jako v Go SDK:
 Hlavička začíná metadaty (verze, velikost bloku, celková velikost, ID buildu, ID základního buildu) a za nimi následuje seznam **mapování**. Každé mapování říká, který rozsah zařízení je uložený ve kterém buildu a na jakém offsetu v souboru toho buildu.
 
 ```
-offset 0        délka 4 MiB   → build A, offset v úložišti 0
-offset 4 MiB    délka 64 KiB  → build C, offset v úložišti 0
-offset 4,06 MiB délka …       → build B, offset v úložišti 12 MiB
+offset 0        délka 4 MiB   v buildu A, offset v úložišti 0
+offset 4 MiB    délka 64 KiB  v buildu C, offset v úložišti 0
+offset 4,06 MiB délka …       v buildu B, offset v úložišti 12 MiB
 ```
 
 Rozdílový build ukládá jen své vlastní bloky, naskládané za sebou, a jeho hlavička všechno ostatní mapuje na předky. Formát je hlavička V3 z Go, bajt po bajtu.
