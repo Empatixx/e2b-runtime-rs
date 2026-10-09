@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 
+use super::azcore::{CallError, HttpFailure};
 use super::xml::{self, Element};
 
 const TRUST_13_SPEC: &str = "http://docs.oasis-open.org/ws-sx/ws-trust/200512/RST/Issue";
@@ -26,10 +27,18 @@ pub struct Endpoint {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SamlToken {
     pub grant_type: &'static str,
     pub assertion: String,
+}
+
+impl std::fmt::Debug for SamlToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamlToken")
+            .field("grant_type", &self.grant_type)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -73,29 +82,28 @@ impl UserRealm {
     }
 }
 
-pub fn call_error(method: &str, url: &str, status: u16, body: &str) -> String {
-    match body.trim().is_empty() {
-        true => format!("http call({url})({method}) error: reply status code was {status}"),
-        false => format!(
-            "http call({url})({method}) error: reply status code was {status}:\n{}",
-            body.trim()
-        ),
-    }
-}
-
-async fn read(response: reqwest::Response, method: &str, url: &str) -> Result<String, String> {
-    let status = response.status().as_u16();
+async fn read(response: reqwest::Response, method: &str, url: &str) -> Result<String, CallError> {
+    let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|e| format!("could not read the body of an HTTP Response: {e}"))?;
-    match status {
+        .map_err(|e| CallError::Message(format!("could not read the body of an HTTP Response: {e}")))?;
+    match status.as_u16() {
         200 | 201 => Ok(body),
-        _ => Err(call_error(method, url, status, &body)),
+        _ => Err(CallError::Http(HttpFailure {
+            method: method.to_owned(),
+            url: url.to_owned(),
+            status,
+            body,
+        })),
     }
 }
 
-pub async fn user_realm(client: &Client, base_url: &str, username: &str) -> Result<UserRealm, String> {
+fn transport_error(error: reqwest::Error) -> CallError {
+    CallError::Message(format!("server response error:\n {error}"))
+}
+
+pub async fn user_realm(client: &Client, base_url: &str, username: &str) -> Result<UserRealm, CallError> {
     let url = format!(
         "{base_url}/common/UserRealm/{}?api-version=1.0",
         super::path_escape(username)
@@ -105,23 +113,25 @@ pub async fn user_realm(client: &Client, base_url: &str, username: &str) -> Resu
         .header("client-request-id", uuid::Uuid::new_v4().to_string())
         .send()
         .await
-        .map_err(|e| format!("server response error:\n {e}"))?;
+        .map_err(transport_error)?;
     let body = read(response, "GET", &url).await?;
-    let realm: UserRealm =
-        serde_json::from_str(&body).map_err(|e| format!("json decode error: {e}\njson message bytes were: {body}"))?;
-    realm.validate().map(|()| realm)
+    let realm: UserRealm = serde_json::from_str(&body)
+        .map_err(|e| CallError::Message(format!("json decode error: {e}\njson message bytes were: {body}")))?;
+    realm.validate().map(|()| realm).map_err(CallError::Message)
 }
 
-pub async fn mex(client: &Client, url: &str) -> Result<Endpoint, String> {
+pub async fn mex(client: &Client, url: &str) -> Result<Endpoint, CallError> {
     let response = client
         .get(url)
         .header("Content-Type", "application/xml; charset=utf-8")
         .send()
         .await
-        .map_err(|e| format!("server response error:\n {e}"))?;
+        .map_err(transport_error)?;
     let body = read(response, "GET", url).await?;
-    let definitions = xml::parse(&body).map_err(|e| format!("XML syntax error: {e}"))?;
-    username_password_endpoint(&definitions)
+    xml::parse(&body)
+        .map_err(|e| format!("XML syntax error: {e}"))
+        .and_then(|definitions| username_password_endpoint(&definitions))
+        .map_err(CallError::Message)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -130,15 +140,56 @@ enum EndpointType {
     WindowsTransport,
 }
 
-fn policies(definitions: &Element) -> Result<Vec<(String, EndpointType)>, String> {
-    let found: Vec<(String, EndpointType)> = definitions.children_named("Policy").flat_map(classify).collect();
+struct Policy {
+    id: String,
+    kind: EndpointType,
+}
+
+struct Binding {
+    name: String,
+    version: Version,
+    kind: EndpointType,
+}
+
+struct Located {
+    kind: EndpointType,
+    endpoint: Endpoint,
+}
+
+#[derive(Default)]
+struct Endpoints {
+    username_password: Endpoint,
+    windows: Endpoint,
+}
+
+impl Endpoint {
+    fn replaced_by(&self, found: &Endpoint) -> bool {
+        self.version == Version::Unknown || (self.version == Version::Trust2005 && found.version == Version::Trust13)
+    }
+}
+
+impl Endpoints {
+    fn offer(mut self, found: Located) -> Self {
+        let slot = match found.kind {
+            EndpointType::UsernamePassword => &mut self.username_password,
+            EndpointType::WindowsTransport => &mut self.windows,
+        };
+        if slot.replaced_by(&found.endpoint) {
+            *slot = found.endpoint;
+        }
+        self
+    }
+}
+
+fn policies(definitions: &Element) -> Result<Vec<Policy>, String> {
+    let found: Vec<Policy> = definitions.children_named("Policy").flat_map(classify).collect();
     match found.is_empty() {
         true => Err("no policies for mex document".to_owned()),
         false => Ok(found),
     }
 }
 
-fn classify(policy: &Element) -> Vec<(String, EndpointType)> {
+fn classify(policy: &Element) -> Vec<Policy> {
     let id = policy.attribute("Id").unwrap_or_default();
     let Some(all) = policy.path(&["ExactlyOne", "All"]) else {
         return Vec::new();
@@ -146,82 +197,111 @@ fn classify(policy: &Element) -> Vec<(String, EndpointType)> {
     let transport = all
         .child("TransportBinding")
         .is_some_and(|binding| binding.attribute("sp").is_some_and(|sp| !sp.is_empty()));
-    let key = format!("#{id}");
-    let mut found = Vec::new();
-    if all.child("NegotiateAuthentication").is_some() && transport && !id.is_empty() {
-        found.push((key.clone(), EndpointType::WindowsTransport));
-    }
+    let usable = transport && !id.is_empty();
     let username_token = ["SignedEncryptedSupportingTokens", "SignedSupportingTokens"]
         .iter()
-        .filter_map(|name| all.path(&[name, "Policy", "UsernameToken", "Policy", "WssUsernameToken10"]))
-        .next()
-        .is_some();
-    if username_token && transport && !id.is_empty() {
-        found.push((key, EndpointType::UsernamePassword));
+        .any(|name| {
+            all.path(&[name, "Policy", "UsernameToken", "Policy", "WssUsernameToken10"])
+                .is_some()
+        });
+    [
+        (
+            all.child("NegotiateAuthentication").is_some(),
+            EndpointType::WindowsTransport,
+        ),
+        (username_token, EndpointType::UsernamePassword),
+    ]
+    .into_iter()
+    .filter(|(present, _)| *present && usable)
+    .map(|(_, kind)| Policy {
+        id: format!("#{id}"),
+        kind,
+    })
+    .collect()
+}
+
+fn soap_version(action: &str) -> Result<Version, String> {
+    match action {
+        TRUST_13_SPEC => Ok(Version::Trust13),
+        TRUST_2005_SPEC => Ok(Version::Trust2005),
+        _ => Err("found unknown spec version in mex document".to_owned()),
     }
-    found
+}
+
+fn binding_of(binding: &Element, policies: &[Policy]) -> Result<Option<Binding>, String> {
+    let reference = binding
+        .child("PolicyReference")
+        .and_then(|r| r.attribute("URI"))
+        .unwrap_or_default();
+    let transport = binding
+        .child("binding")
+        .and_then(|b| b.attribute("transport"))
+        .unwrap_or_default();
+    let Some(policy) = policies.iter().rev().find(|policy| policy.id == reference) else {
+        return Ok(None);
+    };
+    if transport != SOAP_HTTP {
+        return Ok(None);
+    }
+    let action = binding
+        .path(&["operation", "operation"])
+        .and_then(|operation| operation.attribute("soapAction"))
+        .unwrap_or_default();
+    soap_version(action).map(|version| {
+        Some(Binding {
+            name: binding.attribute("name").unwrap_or_default().to_owned(),
+            version,
+            kind: policy.kind,
+        })
+    })
+}
+
+fn bindings(definitions: &Element, policies: &[Policy]) -> Result<Vec<Binding>, String> {
+    definitions
+        .children_named("binding")
+        .filter_map(|binding| binding_of(binding, policies).transpose())
+        .collect()
+}
+
+fn located(port: &Element, bindings: &[Binding]) -> Result<Option<Located>, String> {
+    let reference = port.attribute("binding").unwrap_or_default();
+    let name = reference.split_once(':').map_or(reference, |(_, rest)| rest);
+    let Some(binding) = bindings.iter().find(|binding| binding.name == name) else {
+        return Ok(None);
+    };
+    let url = port
+        .path(&["EndpointReference", "Address"])
+        .map(|address| address.text.trim().to_owned())
+        .unwrap_or_default();
+    match url.is_empty() {
+        true => Err("MexDocument cannot have blank URL endpoint".to_owned()),
+        false => Ok(Some(Located {
+            kind: binding.kind,
+            endpoint: Endpoint {
+                version: binding.version,
+                url,
+            },
+        })),
+    }
+}
+
+fn endpoints(definitions: &Element, bindings: &[Binding]) -> Result<Endpoints, String> {
+    definitions
+        .child("service")
+        .into_iter()
+        .flat_map(|service| service.children_named("port"))
+        .try_fold(Endpoints::default(), |found, port| {
+            located(port, bindings).map(|located| match located {
+                Some(located) => found.offer(located),
+                None => found,
+            })
+        })
 }
 
 fn username_password_endpoint(definitions: &Element) -> Result<Endpoint, String> {
     let policies = policies(definitions)?;
-    let mut bindings: Vec<(String, Version, EndpointType)> = Vec::new();
-    for binding in definitions.children_named("binding") {
-        let reference = binding
-            .child("PolicyReference")
-            .and_then(|r| r.attribute("URI"))
-            .unwrap_or_default();
-        let transport = binding
-            .child("binding")
-            .and_then(|b| b.attribute("transport"))
-            .unwrap_or_default();
-        let Some((_, kind)) = policies.iter().rev().find(|(id, _)| id == reference) else {
-            continue;
-        };
-        if transport != SOAP_HTTP {
-            continue;
-        }
-        let action = binding
-            .path(&["operation", "operation"])
-            .and_then(|operation| operation.attribute("soapAction"))
-            .unwrap_or_default();
-        let version = match action {
-            TRUST_13_SPEC => Version::Trust13,
-            TRUST_2005_SPEC => Version::Trust2005,
-            _ => return Err("found unknown spec version in mex document".to_owned()),
-        };
-        bindings.push((binding.attribute("name").unwrap_or_default().to_owned(), version, *kind));
-    }
-    let mut username_password = Endpoint::default();
-    let mut windows = Endpoint::default();
-    for port in definitions
-        .child("service")
-        .into_iter()
-        .flat_map(|s| s.children_named("port"))
-    {
-        let reference = port.attribute("binding").unwrap_or_default();
-        let name = reference.split_once(':').map_or(reference, |(_, rest)| rest);
-        let Some((_, version, kind)) = bindings.iter().find(|(binding, _, _)| binding == name) else {
-            continue;
-        };
-        let url = port
-            .path(&["EndpointReference", "Address"])
-            .map(|address| address.text.trim().to_owned())
-            .unwrap_or_default();
-        if url.is_empty() {
-            return Err("MexDocument cannot have blank URL endpoint".to_owned());
-        }
-        let found = Endpoint { version: *version, url };
-        let target = match kind {
-            EndpointType::UsernamePassword => &mut username_password,
-            EndpointType::WindowsTransport => &mut windows,
-        };
-        if target.version == Version::Unknown
-            || (target.version == Version::Trust2005 && found.version == Version::Trust13)
-        {
-            *target = found;
-        }
-    }
-    Ok(username_password)
+    let bindings = bindings(definitions, &policies)?;
+    endpoints(definitions, &bindings).map(|found| found.username_password)
 }
 
 fn escape(text: &str) -> String {
@@ -244,6 +324,33 @@ fn time_string(time: DateTime<Utc>) -> String {
     time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
+struct TrustSpec {
+    action: &'static str,
+    namespace: &'static str,
+    key_type: &'static str,
+    request_type: &'static str,
+}
+
+impl TrustSpec {
+    fn of(version: Version) -> Option<Self> {
+        match version {
+            Version::Trust2005 => Some(Self {
+                action: TRUST_2005_SPEC,
+                namespace: "http://schemas.xmlsoap.org/ws/2005/02/trust",
+                key_type: "http://schemas.xmlsoap.org/ws/2005/05/identity/NoProofKey",
+                request_type: "http://schemas.xmlsoap.org/ws/2005/02/trust/Issue",
+            }),
+            Version::Trust13 => Some(Self {
+                action: TRUST_13_SPEC,
+                namespace: "http://docs.oasis-open.org/ws-sx/ws-trust/200512",
+                key_type: "http://docs.oasis-open.org/ws-sx/ws-trust/200512/Bearer",
+                request_type: "http://docs.oasis-open.org/ws-sx/ws-trust/200512/Issue",
+            }),
+            Version::Unknown => None,
+        }
+    }
+}
+
 pub fn token_request(
     endpoint: &Endpoint,
     audience: &str,
@@ -251,23 +358,9 @@ pub fn token_request(
     password: &str,
     now: DateTime<Utc>,
 ) -> Result<String, String> {
-    let (action, namespace, key_type, request_type) = match endpoint.version {
-        Version::Trust2005 => (
-            TRUST_2005_SPEC,
-            "http://schemas.xmlsoap.org/ws/2005/02/trust",
-            "http://schemas.xmlsoap.org/ws/2005/05/identity/NoProofKey",
-            "http://schemas.xmlsoap.org/ws/2005/02/trust/Issue",
-        ),
-        Version::Trust13 => (
-            TRUST_13_SPEC,
-            "http://docs.oasis-open.org/ws-sx/ws-trust/200512",
-            "http://docs.oasis-open.org/ws-sx/ws-trust/200512/Bearer",
-            "http://docs.oasis-open.org/ws-sx/ws-trust/200512/Issue",
-        ),
-        Version::Unknown => {
-            return Err("buildTokenRequestMessage had Version == \"TrustUnknown\", which is not recognized".to_owned());
-        }
-    };
+    let spec = TrustSpec::of(endpoint.version).ok_or_else(|| {
+        "buildTokenRequestMessage had Version == \"TrustUnknown\", which is not recognized".to_owned()
+    })?;
     let token_id = match endpoint.version {
         Version::Trust2005 => format!("UnPwSecTok2005-{}", uuid::Uuid::new_v4()),
         _ => format!("UnPwSecTok13-{}", uuid::Uuid::new_v4()),
@@ -286,7 +379,7 @@ pub fn token_request(
             r#"<wsa:EndpointReference><wsa:Address>{audience}</wsa:Address></wsa:EndpointReference></wsp:AppliesTo>"#,
             r#"<wst:KeyType>{key_type}</wst:KeyType><wst:RequestType>{request_type}</wst:RequestType></wst:RequestSecurityToken></s:Body></s:Envelope>"#
         ),
-        action = action,
+        action = spec.action,
         message_id = uuid::Uuid::new_v4(),
         url = escape(&endpoint.url),
         created = time_string(now),
@@ -294,10 +387,10 @@ pub fn token_request(
         token_id = token_id,
         username = escape(username),
         password = escape(password),
-        namespace = namespace,
+        namespace = spec.namespace,
         audience = escape(audience),
-        key_type = key_type,
-        request_type = request_type,
+        key_type = spec.key_type,
+        request_type = spec.request_type,
     ))
 }
 
@@ -307,10 +400,12 @@ pub async fn saml_token(
     audience: &str,
     username: &str,
     password: &str,
-) -> Result<SamlToken, String> {
-    let message = token_request(endpoint, audience, username, password, Utc::now())?;
+) -> Result<SamlToken, CallError> {
+    let message = token_request(endpoint, audience, username, password, Utc::now()).map_err(CallError::Message)?;
     if endpoint.version == Version::Trust2005 {
-        return Err("WS Trust 2005 support is not implemented".to_owned());
+        return Err(CallError::Message(
+            "WS Trust 2005 support is not implemented".to_owned(),
+        ));
     }
     let response = client
         .post(&endpoint.url)
@@ -319,9 +414,9 @@ pub async fn saml_token(
         .body(message)
         .send()
         .await
-        .map_err(|e| format!("server response error:\n {e}"))?;
+        .map_err(transport_error)?;
     let body = read(response, "POST", &endpoint.url).await?;
-    assertion(&body)
+    assertion(&body).map_err(CallError::Message)
 }
 
 pub fn assertion(body: &str) -> Result<SamlToken, String> {
@@ -337,7 +432,7 @@ pub fn assertion(body: &str) -> Result<SamlToken, String> {
         let Some(assertion) = token.child("Assertion") else {
             continue;
         };
-        let raw = body[token.inner.0..token.inner.1].to_owned();
+        let raw = body[token.inner.start..token.inner.end].to_owned();
         let version = assertion.attribute("saml").unwrap_or_default();
         return match version {
             SAML_V1 => Ok(SamlToken {

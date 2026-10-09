@@ -3,8 +3,6 @@ use std::time::{Duration, SystemTime};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 
 use super::delegation::UserDelegationKey;
 use crate::go_url::query::Query;
@@ -164,9 +162,8 @@ pub fn format_time(time: DateTime<Utc>) -> String {
 }
 
 fn hmac_base64(key: &[u8], message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
-    mac.update(message.as_bytes());
-    STANDARD.encode(mac.finalize().into_bytes())
+    let signature = ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), message.as_bytes());
+    STANDARD.encode(signature)
 }
 
 #[cfg(test)]

@@ -4,20 +4,21 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
 use reqwest::Client;
-use ring::digest::{SHA256, digest};
+use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
 use ring::rand::SystemRandom;
-use ring::signature::{RSA_PSS_SHA256, RsaKeyPair};
+use ring::signature::{RSA_PKCS1_SHA256, RSA_PSS_SHA256, RsaEncoding, RsaKeyPair};
 
 use super::super::pem::{self, PemBlock};
 use super::aad::Authority;
+use super::der;
 use super::token_source::{BearerToken, SourceError, TokenSource};
 
 const CREDENTIAL: &str = "ClientCertificateCredential";
-const ANCHOR: &str = "client-cert";
 const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const ASSERTION_LIFETIME_SECONDS: u64 = 600;
 
 pub struct ClientCertificate {
+    signing: Vec<u8>,
     chain: Vec<Vec<u8>>,
     key: RsaKeyPair,
 }
@@ -28,6 +29,50 @@ pub struct ClientCertificateCredential {
     pub send_chain: bool,
     pub authority: Authority,
     pub client: Client,
+}
+
+#[derive(Clone, Copy)]
+pub enum Signing {
+    Pss256,
+    Rs256,
+}
+
+impl Signing {
+    fn of(authority: &Authority) -> Self {
+        match authority.is_adfs() {
+            true => Self::Rs256,
+            false => Self::Pss256,
+        }
+    }
+
+    fn algorithm(self) -> &'static str {
+        match self {
+            Self::Pss256 => "PS256",
+            Self::Rs256 => "RS256",
+        }
+    }
+
+    fn thumbprint_header(self) -> &'static str {
+        match self {
+            Self::Pss256 => "x5t#S256",
+            Self::Rs256 => "x5t",
+        }
+    }
+
+    fn thumbprint(self, certificate: &[u8]) -> String {
+        let algorithm = match self {
+            Self::Pss256 => &SHA256,
+            Self::Rs256 => &SHA1_FOR_LEGACY_USE_ONLY,
+        };
+        STANDARD.encode(digest(algorithm, certificate))
+    }
+
+    fn padding(self) -> &'static dyn RsaEncoding {
+        match self {
+            Self::Pss256 => &RSA_PSS_SHA256,
+            Self::Rs256 => &RSA_PKCS1_SHA256,
+        }
+    }
 }
 
 impl ClientCertificate {
@@ -60,10 +105,10 @@ impl ClientCertificate {
     }
 
     fn from_blocks(blocks: &[PemBlock]) -> Result<Self, String> {
-        let chain: Vec<Vec<u8>> = blocks
+        let certificates: Vec<&[u8]> = blocks
             .iter()
             .filter(|block| block.label == "CERTIFICATE")
-            .map(|block| block.der.clone())
+            .map(|block| block.der.as_slice())
             .collect();
         let mut keys = blocks
             .iter()
@@ -72,14 +117,48 @@ impl ClientCertificate {
         if keys.next().is_some() {
             return Err("certData contains multiple private keys".to_owned());
         }
-        if chain.is_empty() {
+        if certificates.is_empty() {
             return Err("found no certificate".to_owned());
         }
         let key = key.ok_or_else(|| "found no private key".to_owned())?;
-        RsaKeyPair::from_pkcs8(&key.der)
-            .or_else(|_| RsaKeyPair::from_der(&key.der))
-            .map(|key| Self { chain, key })
-            .map_err(|e| e.to_string())
+        let pair = rsa_key_pair(key)?;
+        Self::matching(&certificates, pair)
+    }
+
+    fn matching(certificates: &[&[u8]], key: RsaKeyPair) -> Result<Self, String> {
+        let public = key.public().as_ref().to_vec();
+        let matches = |certificate: &&[u8]| der::certificate_rsa_public_key(certificate) == Some(public.as_slice());
+        let signing = certificates
+            .iter()
+            .rev()
+            .find(|certificate| matches(certificate))
+            .ok_or_else(|| "key doesn't match any certificate".to_owned())?;
+        let chain = certificates
+            .iter()
+            .filter(|certificate| matches(certificate))
+            .rev()
+            .chain(certificates.iter().filter(|certificate| !matches(certificate)))
+            .map(|certificate| certificate.to_vec())
+            .collect();
+        Ok(Self {
+            signing: signing.to_vec(),
+            chain,
+            key,
+        })
+    }
+
+    fn chain_header(&self, send_chain: bool) -> String {
+        match send_chain {
+            true => format!(
+                r#""x5c":[{}],"#,
+                self.chain
+                    .iter()
+                    .map(|certificate| format!("\"{}\"", STANDARD.encode(certificate)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            false => String::new(),
+        }
     }
 
     pub fn assertion(
@@ -88,21 +167,15 @@ impl ClientCertificate {
         client_id: &str,
         send_chain: bool,
         now_unix: u64,
+        signing: Signing,
     ) -> Result<String, String> {
-        let leaf = self.chain.first().ok_or_else(|| "found no certificate".to_owned())?;
-        let thumbprint = STANDARD.encode(digest(&SHA256, leaf));
-        let chain = match send_chain {
-            true => format!(
-                r#""x5c":[{}],"#,
-                self.chain
-                    .iter()
-                    .map(|cert| format!("\"{}\"", STANDARD.encode(cert)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            false => String::new(),
-        };
-        let header = format!(r#"{{"alg":"PS256","typ":"JWT",{chain}"x5t#S256":"{thumbprint}"}}"#);
+        let header = format!(
+            r#"{{"alg":"{}","typ":"JWT",{}"{}":"{}"}}"#,
+            signing.algorithm(),
+            self.chain_header(send_chain),
+            signing.thumbprint_header(),
+            signing.thumbprint(&self.signing)
+        );
         let claims = format!(
             r#"{{"aud":{},"exp":{},"iss":{},"jti":"{}","nbf":{now_unix},"sub":{}}}"#,
             json_string(audience),
@@ -115,7 +188,7 @@ impl ClientCertificate {
         let mut signature = vec![0; self.key.public().modulus_len()];
         self.key
             .sign(
-                &RSA_PSS_SHA256,
+                signing.padding(),
                 &SystemRandom::new(),
                 signing_input.as_bytes(),
                 &mut signature,
@@ -123,6 +196,15 @@ impl ClientCertificate {
             .map_err(|e| format!("unable to sign JWT token: {e}"))?;
         Ok(format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature)))
     }
+}
+
+fn rsa_key_pair(key: &PemBlock) -> Result<RsaKeyPair, String> {
+    if key.label == "PRIVATE KEY" && !der::pkcs8_is_rsa(&key.der) && RsaKeyPair::from_der(&key.der).is_err() {
+        return Err("key must be an RSA key".to_owned());
+    }
+    RsaKeyPair::from_pkcs8(&key.der)
+        .or_else(|_| RsaKeyPair::from_der(&key.der))
+        .map_err(|e| e.to_string())
 }
 
 fn json_string(text: &str) -> String {
@@ -151,18 +233,28 @@ fn pkcs12_blocks(data: &[u8], password: &str) -> Result<Vec<PemBlock>, String> {
 #[async_trait::async_trait]
 impl TokenSource for ClientCertificateCredential {
     async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+        let authority = self
+            .authority
+            .resolved(&self.client)
+            .await
+            .map_err(|e| e.failed(CREDENTIAL, |message| message))?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
         let assertion = self
             .certificate
-            .assertion(self.authority.token_endpoint(), &self.client_id, self.send_chain, now)
+            .assertion(
+                authority.token_endpoint(),
+                &self.client_id,
+                self.send_chain,
+                now,
+                Signing::of(&authority),
+            )
             .map_err(|e| SourceError::Failed(format!("{CREDENTIAL}: {e}")))?;
-        self.authority
+        authority
             .request_token(
                 &self.client,
                 CREDENTIAL,
-                ANCHOR,
                 scope,
                 vec![
                     ("grant_type", "client_credentials".to_owned()),
@@ -178,13 +270,14 @@ impl TokenSource for ClientCertificateCredential {
 
 #[cfg(test)]
 mod tests {
-    use ring::signature::{RSA_PSS_2048_8192_SHA256, UnparsedPublicKey};
+    use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256, UnparsedPublicKey};
     use tokio::io::AsyncWriteExt;
 
     use super::*;
 
     const PEM: &[u8] = include_bytes!("client_certificate/cert.pem");
     const PKCS12: &[u8] = include_bytes!("client_certificate/cert.p12");
+    const OTHER_CERTIFICATE: &str = include_str!("client_certificate/other_cert.pem");
 
     fn decoded(part: &str) -> String {
         String::from_utf8(URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
@@ -241,7 +334,13 @@ mod tests {
         let certificate = ClientCertificate::parse(PEM, "").unwrap();
 
         let jwt = certificate
-            .assertion("https://login/t/oauth2/v2.0/token", "client", true, 1_700_000_000)
+            .assertion(
+                "https://login/t/oauth2/v2.0/token",
+                "client",
+                true,
+                1_700_000_000,
+                Signing::Pss256,
+            )
             .unwrap();
         let parts: Vec<&str> = jwt.split('.').collect();
 
@@ -258,9 +357,100 @@ mod tests {
         UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, certificate.key.public().as_ref())
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
             .unwrap();
-        let without_chain = certificate.assertion("a", "c", false, 1).unwrap();
+        let without_chain = certificate.assertion("a", "c", false, 1, Signing::Pss256).unwrap();
         assert!(
             decoded(without_chain.split('.').next().unwrap()).starts_with(r#"{"alg":"PS256","typ":"JWT","x5t#S256""#)
+        );
+    }
+
+    fn pem_blocks() -> (PemBlock, PemBlock, PemBlock) {
+        let blocks = pem::blocks(&String::from_utf8_lossy(PEM));
+        let certificate = blocks
+            .iter()
+            .find(|block| block.label == "CERTIFICATE")
+            .unwrap()
+            .clone();
+        let key = blocks
+            .iter()
+            .find(|block| block.label != "CERTIFICATE")
+            .unwrap()
+            .clone();
+        let other = pem::blocks(OTHER_CERTIFICATE).remove(0);
+        (certificate, key, other)
+    }
+
+    #[test]
+    fn the_certificate_matching_the_key_signs_even_when_it_is_not_first() {
+        let (certificate, key, other) = pem_blocks();
+
+        let loaded = ClientCertificate::from_blocks(&[other.clone(), certificate.clone(), key]).unwrap();
+
+        assert_eq!(loaded.signing, certificate.der);
+        assert_eq!(loaded.chain, vec![certificate.der, other.der]);
+    }
+
+    #[test]
+    fn a_key_without_a_matching_certificate_is_rejected() {
+        let (_, key, other) = pem_blocks();
+
+        assert_eq!(
+            ClientCertificate::from_blocks(&[other, key]).err().unwrap(),
+            "key doesn't match any certificate"
+        );
+    }
+
+    #[test]
+    fn adfs_assertions_are_rs256_with_a_sha1_thumbprint() {
+        let certificate = ClientCertificate::parse(PEM, "").unwrap();
+
+        let jwt = certificate
+            .assertion("https://adfs/token", "client", false, 1_700_000_000, Signing::Rs256)
+            .unwrap();
+        let parts: Vec<&str> = jwt.split('.').collect();
+
+        let thumbprint = STANDARD.encode(digest(&SHA1_FOR_LEGACY_USE_ONLY, &certificate.signing));
+        assert_eq!(
+            decoded(parts[0]),
+            format!(r#"{{"alg":"RS256","typ":"JWT","x5t":"{thumbprint}"}}"#)
+        );
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, certificate.key.public().as_ref())
+            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn adfs_authorities_sign_for_the_discovered_endpoint() {
+        let (base, handle) = super::super::testing::serve(vec![
+            (
+                200,
+                "application/json",
+                r#"{"authorization_endpoint":"{BASE}/adfs/oauth2/authorize","token_endpoint":"{BASE}/adfs/oauth2/token","issuer":"{BASE}/adfs"}"#.to_owned(),
+            ),
+            (200, "application/json", r#"{"access_token":"aad","expires_in":3600}"#.to_owned()),
+        ])
+        .await;
+        let credential = ClientCertificateCredential {
+            client_id: "client".to_owned(),
+            certificate: ClientCertificate::parse(PEM, "").unwrap(),
+            send_chain: false,
+            authority: Authority::local_adfs(&base),
+            client: Client::new(),
+        };
+
+        let token = credential.token("s").await.unwrap();
+        let requests = handle.await.unwrap();
+
+        assert_eq!(token.secret, "aad");
+        assert!(requests[1].starts_with("POST /adfs/oauth2/token HTTP/1.1"));
+        let assertion = requests[1]
+            .split("client_assertion=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .unwrap();
+        assert!(decoded(assertion.split('.').next().unwrap()).starts_with(r#"{"alg":"RS256""#));
+        assert!(
+            decoded(assertion.split('.').nth(1).unwrap()).contains(&format!(r#""aud":"{base}/adfs/oauth2/token""#))
         );
     }
 

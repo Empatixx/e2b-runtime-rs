@@ -6,7 +6,7 @@ use reqwest::{Client, StatusCode};
 use super::azcore::{self, ResponseError};
 use super::sas::{SERVICE_VERSION, format_time};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UserDelegationKey {
     pub signed_oid: String,
     pub signed_tid: String,
@@ -16,6 +16,16 @@ pub struct UserDelegationKey {
     pub signed_version: String,
     pub signed_delegated_user_tenant_id: String,
     pub value: Vec<u8>,
+}
+
+impl std::fmt::Debug for UserDelegationKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserDelegationKey")
+            .field("signed_oid", &self.signed_oid)
+            .field("signed_tid", &self.signed_tid)
+            .field("signed_expiry", &self.signed_expiry)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct DelegationRequest<'a> {
@@ -80,9 +90,25 @@ impl UserDelegationKey {
             signed_service: field("SignedService")?,
             signed_version: field("SignedVersion")?,
             signed_delegated_user_tenant_id: tag(xml, "SignedDelegatedUserTid").unwrap_or_default(),
-            value: STANDARD.decode(field("Value")?).unwrap_or_default(),
+            value: go_decoded_prefix(&field("Value")?),
         })
     }
+}
+
+fn go_decoded_prefix(text: &str) -> Vec<u8> {
+    let compact: Vec<char> = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+    let mut decoded = Vec::new();
+    for quantum in compact.chunks(4) {
+        let quantum: String = quantum.iter().collect();
+        match STANDARD.decode(&quantum) {
+            Ok(bytes) => decoded.extend(bytes),
+            Err(_) => break,
+        }
+        if quantum.contains('=') {
+            break;
+        }
+    }
+    decoded
 }
 
 fn tag(xml: &str, name: &str) -> Option<String> {
@@ -108,6 +134,15 @@ mod tests {
         assert_eq!(key.value, b"secret");
         assert_eq!(format_time(key.signed_start), "2026-01-02T03:04:05Z");
         assert_eq!(format_time(key.signed_expiry), "2026-01-03T03:04:05Z");
+    }
+
+    #[test]
+    fn malformed_key_values_decode_up_to_the_first_bad_quantum_like_go() {
+        assert_eq!(go_decoded_prefix("c2Vj\r\ncmV0"), b"secret");
+        assert_eq!(go_decoded_prefix("c2Vj!!!!cmV0"), b"sec");
+        assert_eq!(go_decoded_prefix("c2Vjcm"), b"sec");
+        assert_eq!(go_decoded_prefix("c2Vjcg==cmV0"), b"secr");
+        assert_eq!(go_decoded_prefix("!!"), b"");
     }
 
     #[tokio::test]

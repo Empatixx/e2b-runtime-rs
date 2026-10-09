@@ -95,7 +95,7 @@ impl AcrAuthenticator {
                 login_server: login_server.to_owned(),
                 base_url,
                 credential,
-                client: Client::new(),
+                client: azcore::pipeline_client(),
                 cache: std::sync::Mutex::default(),
                 walk: AsyncMutex::new(()),
             }),

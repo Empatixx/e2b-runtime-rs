@@ -33,16 +33,16 @@ impl UsernamePasswordCredential {
 
     async fn managed(&self, authority: &Authority, scope: &str) -> Result<BearerToken, SourceError> {
         authority
-            .request_token(&self.client, CREDENTIAL, "", scope, self.form("password"))
+            .request_token(&self.client, CREDENTIAL, scope, self.form("password"))
             .await
     }
 
     async fn federated(&self, realm: &ws_trust::UserRealm, scope: &str) -> Result<BearerToken, SourceError> {
         let metadata_url = &realm.federation_metadata_url;
         let endpoint = ws_trust::mex(&self.client, metadata_url).await.map_err(|e| {
-            Self::failed(format!(
-                "problem getting mex doc from federated url({metadata_url}): {e}"
-            ))
+            e.failed(CREDENTIAL, |message| {
+                format!("problem getting mex doc from federated url({metadata_url}): {message}")
+            })
         })?;
         let saml = ws_trust::saml_token(
             &self.client,
@@ -52,11 +52,15 @@ impl UsernamePasswordCredential {
             &self.password,
         )
         .await
-        .map_err(|e| Self::failed(format!("problem getting SAML token info: {e}")))?;
+        .map_err(|e| {
+            e.failed(CREDENTIAL, |message| {
+                format!("problem getting SAML token info: {message}")
+            })
+        })?;
         let mut form = self.form(saml.grant_type);
         form.push(("assertion", STANDARD.encode(saml.assertion)));
         self.authority
-            .request_token(&self.client, CREDENTIAL, "", scope, form)
+            .request_token(&self.client, CREDENTIAL, scope, form)
             .await
     }
 }
@@ -65,12 +69,20 @@ impl UsernamePasswordCredential {
 impl TokenSource for UsernamePasswordCredential {
     async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
         if self.authority.is_adfs() {
-            let resolved = self.authority.discover_adfs(&self.client).await.map_err(Self::failed)?;
+            let resolved = self
+                .authority
+                .resolved(&self.client)
+                .await
+                .map_err(|e| e.failed(CREDENTIAL, |message| message))?;
             return self.managed(&resolved, scope).await;
         }
         let realm = ws_trust::user_realm(&self.client, self.authority.base_url(), &self.username)
             .await
-            .map_err(|e| Self::failed(format!("problem getting user realm from authority: {e}")))?;
+            .map_err(|e| {
+                e.failed(CREDENTIAL, |message| {
+                    format!("problem getting user realm from authority: {message}")
+                })
+            })?;
         match realm.account_type.as_str() {
             "Federated" => self.federated(&realm, scope).await,
             "Managed" => self.managed(&self.authority, scope).await,
@@ -83,6 +95,8 @@ impl TokenSource for UsernamePasswordCredential {
 mod tests {
     use super::super::testing::serve;
     use super::*;
+
+    const SEPARATOR: &str = "--------------------------------------------------------------------------------";
 
     fn credential(base_url: &str) -> UsernamePasswordCredential {
         UsernamePasswordCredential {
@@ -200,7 +214,21 @@ mod tests {
         assert_eq!(
             error,
             SourceError::Failed(format!(
-                "UsernamePasswordCredential: problem getting mex doc from federated url({base}/mex): http call({base}/mex)(GET) error: reply status code was 404:\ngone"
+                "UsernamePasswordCredential authentication failed. \nGET {base}/mex\n{SEPARATOR}\nRESPONSE 404: 404 Not Found\n{SEPARATOR}\ngone\n{SEPARATOR}\n"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_user_realm_reads_like_the_sdk() {
+        let (base, _handle) = serve(vec![(404, "application/json", r#"{"error":"nope"}"#.to_owned())]).await;
+
+        let error = credential(&base).token("s").await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SourceError::Failed(format!(
+                "UsernamePasswordCredential authentication failed. \nGET {base}/common/UserRealm/me@example.com\n{SEPARATOR}\nRESPONSE 404: 404 Not Found\n{SEPARATOR}\n{{\n  \"error\": \"nope\"\n}}\n{SEPARATOR}\n"
             ))
         );
     }
@@ -226,6 +254,30 @@ mod tests {
         assert!(requests[0].starts_with("GET /adfs/.well-known/openid-configuration HTTP/1.1"));
         assert!(requests[1].starts_with("POST /adfs/oauth2/token HTTP/1.1"));
         assert!(requests[1].contains("grant_type=password"));
+    }
+
+    #[tokio::test]
+    async fn adfs_discovery_runs_once_per_credential() {
+        let (base, handle) = serve(vec![
+            (
+                200,
+                "application/json",
+                r#"{"authorization_endpoint":"{BASE}/adfs/oauth2/authorize","token_endpoint":"{BASE}/adfs/oauth2/token","issuer":"{BASE}/adfs"}"#.to_owned(),
+            ),
+            (200, "application/json", r#"{"access_token":"one","expires_in":3600}"#.to_owned()),
+            (200, "application/json", r#"{"access_token":"two","expires_in":3600}"#.to_owned()),
+        ])
+        .await;
+        let mut credential = credential(&base);
+        credential.authority = Authority::local_adfs(&base);
+
+        credential.token("s").await.unwrap();
+        credential.token("s").await.unwrap();
+        let requests = handle.await.unwrap();
+
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /adfs/.well-known/openid-configuration HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /adfs/oauth2/token HTTP/1.1"));
     }
 
     #[tokio::test]

@@ -4,6 +4,9 @@ mod client_certificate;
 mod connection_string;
 pub mod default_credential;
 mod delegation;
+mod der;
+mod managed_identity;
+mod powershell;
 mod sas;
 #[cfg(test)]
 pub mod testing;
@@ -188,7 +191,7 @@ fn with_default_credential(
             auth: SigningAuth::Delegation {
                 account: account.to_owned(),
                 credential,
-                client: reqwest::Client::new(),
+                client: azcore::pipeline_client(),
             },
         },
     })

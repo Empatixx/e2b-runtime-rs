@@ -4,10 +4,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use azure_core::credentials::TokenCredential;
 use azure_core::error::ErrorKind;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BearerToken {
     pub secret: String,
     pub expires_at: SystemTime,
+}
+
+impl std::fmt::Debug for BearerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BearerToken")
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
