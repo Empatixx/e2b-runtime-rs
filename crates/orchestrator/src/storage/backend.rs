@@ -294,7 +294,9 @@ impl Storage {
                 .await
                 .map_err(|e| crate::go_os::path_error("write", destination, &e))?;
         }
-        Ok(())
+        file.flush()
+            .await
+            .map_err(|e| crate::go_os::path_error("write", destination, &e))
     }
 
     async fn blob_stream(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
