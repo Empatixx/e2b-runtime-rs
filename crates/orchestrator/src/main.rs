@@ -19,8 +19,12 @@ mod serve {
     use orchestrator::routing::redis::Redis;
     use orchestrator::server::app::{App, TemplateManagerSetup};
     use orchestrator::server::config::NodeConfig;
+    use orchestrator::server::info::service_instance_id;
     use orchestrator::server::node::Node;
     use orchestrator::server::shutdown::drain;
+    use orchestrator::telemetry::Telemetry;
+    use orchestrator::telemetry::identity::{Identity, service_name};
+    use orchestrator::telemetry::server::{NodeGauges, NodeSource};
 
     const CONSUMER_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
     use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -34,10 +38,28 @@ mod serve {
             .await
             .map_err(|e| format!("failed to create feature flags client: {e}"))?;
         let config = config.with_feature_flags(feature_flags.clone());
+        let telemetry = Telemetry::start(&Identity {
+            node_id: config.node_id.clone(),
+            service_name: service_name(&config.services),
+            service_commit: orchestrator::server::app::COMMIT.to_owned(),
+            service_version: orchestrator::version().to_owned(),
+            service_instance_id: service_instance_id(),
+            node_labels: config.labels.clone(),
+        })?;
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }
         let node = Arc::new(Node::new(&config)?);
+        let _gauges = NodeGauges::register(NodeSource {
+            running: Arc::new({
+                let node = node.clone();
+                move || node.running_configs()
+            }),
+            max_sandboxes: node.max_sandboxes.clone(),
+            status: node.status.clone(),
+            version: orchestrator::version().to_owned(),
+            commit: orchestrator::server::app::COMMIT.to_owned(),
+        });
         let mut event_sinks: Vec<Arc<dyn EventSink>> = Vec::new();
         match &config.redis {
             Some(settings) => {
@@ -128,6 +150,9 @@ mod serve {
         feature_flags.close().await;
         if let Some((events, host_stats)) = &clickhouse {
             tokio::join!(events.stop(), host_stats.stop());
+        }
+        if let Err(e) = telemetry.shutdown() {
+            tracing::error!(error = %e, "error while shutting down telemetry");
         }
         served
     }

@@ -5,9 +5,8 @@ use parking_lot::{Mutex, RwLock};
 use sysinfo::{Disks, System};
 
 use crate::proto::{DiskMetrics, MachineInfo};
+pub use crate::telemetry::server::count_failed_snapshot_upload;
 
-pub const SNAPSHOT_UPLOAD_FAILED: &str = "orchestrator.snapshot.upload.failed";
-const SNAPSHOT_UPLOAD_FAILED_UNIT: &str = "{snapshot}";
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const SKIPPED_MOUNT_PREFIX: &str = "/boot/";
 const SKIPPED_DEVICE_PREFIXES: [&str; 2] = ["/dev/loop", "/dev/zram"];
@@ -52,16 +51,6 @@ impl HostMetrics {
             }
         }
     }
-}
-
-pub fn count_failed_snapshot_upload(filesystem_only: bool) {
-    tracing::error!(
-        metric = SNAPSHOT_UPLOAD_FAILED,
-        unit = SNAPSHOT_UPLOAD_FAILED_UNIT,
-        value = 1,
-        fs_only = filesystem_only,
-        "snapshot upload did not durably land"
-    );
 }
 
 fn sample(system: &mut System) -> HostSample {

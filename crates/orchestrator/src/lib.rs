@@ -29,6 +29,7 @@ pub mod server;
 pub mod storage;
 pub mod system;
 pub mod tcpfirewall;
+pub mod telemetry;
 pub mod template;
 
 pub fn version() -> &'static str {

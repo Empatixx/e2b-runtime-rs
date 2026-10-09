@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
 
 use tonic::{Request, Response, Status};
@@ -49,8 +49,9 @@ impl Allocated {
     }
 }
 
-pub fn new_service_id() -> String {
-    Uuid::new_v4().to_string()
+pub fn service_instance_id() -> String {
+    static INSTANCE_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
+    INSTANCE_ID.clone()
 }
 
 impl InfoServer {

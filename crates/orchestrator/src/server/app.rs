@@ -6,7 +6,7 @@ use tonic::service::Routes;
 
 use super::config::BuildStorage;
 use super::health::with_health;
-use super::info::{InfoServer, new_service_id};
+use super::info::{InfoServer, service_instance_id};
 use super::metrics::{HostMetrics, machine_info};
 use super::node::Node;
 use super::service::SandboxServer;
@@ -104,7 +104,7 @@ impl App {
         let node = self.node.clone();
         InfoServer {
             node_id: self.node.node_id.clone(),
-            service_id: new_service_id(),
+            service_id: service_instance_id(),
             commit: COMMIT.to_owned(),
             started: SystemTime::now(),
             labels: self.node.labels.clone(),
