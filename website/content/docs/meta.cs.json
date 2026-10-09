@@ -1,4 +1,4 @@
 {
   "title": "Dokumentace",
-  "pages": ["index", "concepts", "envd", "orchestrator"]
+  "pages": ["index", "concepts", "envd", "orchestrator", "design"]
 }

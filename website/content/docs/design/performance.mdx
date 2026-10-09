@@ -1,0 +1,97 @@
+---
+title: Performance
+description: What the code does to resume a sandbox fast, pause it cheaply and keep envd quick.
+---
+
+Our target is to resume a sandbox in about 150 ms on bare metal, like upstream E2B. This page lists what the code does to get there. Each item names the module where you find it.
+
+## Resume: copy nothing up front
+
+A memory snapshot can be gigabytes. The orchestrator does not copy it before the guest starts. Firecracker maps the guest RAM empty, and the memory server (`memory::server`) fills each page through userfaultfd the first time the guest touches it. See [Memory](../orchestrator/memory/).
+
+The rootfs works the same way. The guest disk is a copy-on-write overlay, and a block is read from the build only when the guest asks for it. See [Block devices](../orchestrator/block-devices/).
+
+## Resume: start the slow steps at the same time
+
+`Sandbox::start_resumed` (`sandbox/resume.rs`) runs the independent steps in parallel instead of one after another:
+
+<Mermaid chart={`
+flowchart LR
+  A[start] --> P[prefetch memory pages]
+  A --> N[expose rootfs over NBD]
+  A --> F[take a network slot, spawn Firecracker]
+  N --> L[point rootfs.link at the NBD device]
+  F --> L
+  L --> S[load snapshot]
+  S --> R[resume vCPUs]
+  R --> E[wait for envd]
+`} />
+
+- The **prefetch** task starts first. It downloads the recorded pages while Firecracker is still starting.
+- **NBD** and **Firecracker** start together with `tokio::join!`. Firecracker gets a symlink, `rootfs.link`, that points at `/dev/null`. When the NBD device is ready, the link is replaced in one atomic rename.
+- **Loading the snapshot** and the **userfaultfd handshake** run at the same time. Firecracker connects to the memory server while it loads.
+
+## Resume: keep slow resources ready
+
+Some resources take tens of milliseconds to create. Pools keep them ready before a request arrives:
+
+| Pool | Ready in advance | Where |
+|---|---|---|
+| Network slots | up to 32 new, up to 100 returned for reuse | `network` |
+| NBD devices | `NBD_POOL_SIZE`, default 64 | `exposure` |
+
+Both pools work the same way as the upstream Go pools, including the 3 second wait before a returned network slot is used again.
+
+## Chunk cache: download each chunk once
+
+Build files are read from object storage in 4 MiB chunks (`block::chunker`). The cache is a sparse local file with a bitmap of the blocks it holds.
+
+- **One download per chunk.** The first reader starts the download. Every other reader of the same chunk waits for that download instead of starting its own.
+- **Readers do not wait for the whole chunk.** The download writes data into the cache in page-aligned batches of at least 16 KiB. A reader continues as soon as its own bytes are in the cache.
+- **Cached data stays.** A second sandbox from the same build reads the local file and does not download again.
+
+## Prefetch: fetch what the guest will touch
+
+When a template is built, the optimize phase resumes it twice and records the pages both runs touched. On every resume, the prefetch task fetches these pages and installs them in the recorded order, before the guest asks for them.
+
+- 16 fetch workers download and 8 copy workers install pages into guest memory (`memory::prefetch`).
+- Neighbouring pages can be merged into one larger read. The `memory-prefetch-coalesce-max-mb` flag sets the largest read. Merging is off by default, as in upstream.
+- A page that the guest already touched is skipped.
+
+## Pause: store only what changed
+
+- **Write protection.** Pages that the memory server installs are write-protected. The first write to a page removes the protection, and Firecracker reports those pages as dirty. Pause stores only these pages, not the whole RAM.
+- **Freed pages.** Pages the guest gave back are recorded as empty. They are stored as zero and cost no space.
+- **memfd.** With the `use-memfd` flag, the guest RAM lives in a memfd that the orchestrator can read. The page list is known at once, and the copy of the pages runs in the background while pause continues.
+- **Rootfs.** Only blocks that the guest wrote are stored as the new layer.
+
+## Pause: upload in the background
+
+The rootfs and the memory files upload at the same time (`tokio::try_join!`). The uploads run after the pause call returns, in `server::uploads`.
+
+A snapshot counts as uploaded only when the builds it depends on are uploaded too. On shutdown, the orchestrator waits for the uploads that are still running.
+
+## Measure every resume
+
+Every create and resume records how long each step took (`phases.rs`). The log line looks like this:
+
+```
+rootfs+firecracker=31ms load_snapshot=12ms faults=1840 memfd=true resume_vm=2ms mmds=1ms envd_init=40ms prefetched=2210 total=86ms
+```
+
+The numbers above are an example of the format, not a measurement. They show which step to look at first when a resume is slow.
+
+## envd
+
+envd runs inside every sandbox, so its speed is part of every SDK call. The main changes were:
+
+- `TCP_NODELAY` on every connection, as Go does by default.
+- File uploads written straight to a file, with request bodies kept as `Bytes`.
+- Processes started with `posix_spawn` under per-thread credentials, instead of `fork` with `pre_exec`.
+- A pid map with an expiry queue for exited processes, instead of a linear scan.
+
+The [blog post](../../../blog/envd-rust-vs-go/) has the method, the numbers and the changes we tried and dropped.
+
+## Where we are
+
+On GitHub Actions, inside nested virtualization, a resume takes 0.8 to 2.4 seconds. That runner is far slower than bare metal, so it does not show the 150 ms target. Some upstream optimizations are not ported yet: NBD over generic netlink with several connections, in-place pause, huge pages and peer-to-peer chunk transfer between nodes. The list is in `docs/BACKLOG.md`.

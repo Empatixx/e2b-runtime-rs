@@ -1,0 +1,72 @@
+---
+title: Principy návrhu
+description: Pravidla, podle kterých kód píšeme, a kde je každé z nich vidět ve zdrojácích.
+---
+
+Tato stránka shrnuje pravidla, podle kterých píšeme kód envd a orchestratoru. U každého pravidla je místo ve zdrojácích, kde ho uvidíte.
+
+## Na každém rozhraní stejně jako Go
+
+Všechno, co uvidí klient, uložený soubor nebo dashboard, musí odpovídat verzi v Go. Patří sem routy, stavové kódy, hlavičky, tvar JSON, texty chyb, názvy metrik a formáty souborů. Uvnitř může kód vypadat jinak.
+
+Pravidlo ověřujeme proti zdrojákům v Go, ne proti dokumentaci. Když se liší, platí zdrojáky.
+
+## Formáty z Go napsané znovu v Rustu
+
+Některé výstupy závisí na tom, jak je formátuje standardní knihovna Go. Rustové knihovny dají správný výsledek, ale ne stejné bajty nebo text. Orchestrator proto má malé moduly, které chování Go kopírují:
+
+| Modul | Co kopíruje |
+|---|---|
+| `go_gzip` | `compress/gzip` na `BestSpeed` bajt po bajtu, takže archiv vrstvy má stejný hash jako archiv z Go |
+| `go_tar` | hlavičky `archive/tar` včetně PAX záznamů |
+| `go_strconv` | `strconv.ParseBool` a `strconv.Quote` |
+| `go_time` | `time.ParseDuration` a texty jeho chyb |
+| `go_url` | escapování URL a parsování a kódování `url.Values` |
+| `go_humanize` | `humanize.Bytes` (`1.2 GB`) |
+| `go_os`, `go_exec` | texty chyb `*os.PathError` a `exec` |
+
+Archivy shodné bajt po bajtu potřebuje cache vrstev. Vrstva šablony se hledá podle hashe obsahu, takže jiný gzip enkodér by minul každou vrstvu, kterou už postavilo Go.
+
+## Chyby nesou přesný text
+
+Funkce vrací text, který uvidí klient: `String`, `io::Error`, `ConnectError` nebo `ErrorResponse`. Chyby nebalíme do obecného typu, který by se překládal až na rozhraní. Text vzniká jednou, v místě chyby, stejně jako ho Go skládá přes `fmt.Errorf`.
+
+## Unsafe kód v malých typech
+
+Každý blok `unsafe`, syscall, ioctl a rozložení bajtů je schované za malým typem s bezpečným API. Příklady:
+
+- `memory::uffd` obaluje userfaultfd: registrace rozsahu, čtení událostí, kopie stránky, ochrana stránky proti zápisu.
+- `block::sparse_file` a `block::tracker` skrývají řídký soubor cache a bitmapu bloků, které obsahuje.
+- `exposure::nbd` skrývá NBD ioctly za `expose(overlay)`, které vrátí cestu k zařízení.
+- Modul `credentials` v envd přepne oprávnění jednoho vlákna, spustí proces jako jiný uživatel a oprávnění vrátí.
+
+Zbytek kódu volá tyto typy a holý deskriptor souboru nevidí.
+
+## Každý zdroj má jednoho vlastníka
+
+Běžící sandbox vlastní hodnotu `Resources`: disk, síťový slot, cgroup, proces Firecrackeru, paměťový server a úlohu prefetche. `Resources::release` je ruší v pevném pořadí: zabije VM, zastaví paměťový server, zavře disk, smaže cgroup a vrátí slot.
+
+Když sandbox zanikne bez čistého zastavení, uvolní zdroje na pozadí a případné chyby zaloguje. Neúspěšné vytvoření volá stejný kód, takže napůl spuštěný sandbox nic nenechá.
+
+## Společná práce se dělá jednou
+
+Když totéž potřebuje víc volajících, práci udělá jedna úloha a ostatní čekají na její výsledek. Cache chunků spustí jedno stažení na 4MiB chunk a každý čtenář toho chunku čeká na kanálu `watch`. Upload snapshotu je hotový, až když jsou nahrané i buildy, na kterých závisí.
+
+## Flagy mají stejné názvy a výchozí hodnoty
+
+Feature flagy používají stejné klíče a výchozí hodnoty jako flagy upstreamu v LaunchDarkly. Bez nastavené služby pro flagy platí výchozí hodnoty, takže node bez LaunchDarkly se chová jako upstream node s výchozími flagy.
+
+## Testy mluví se skutečnými věcmi
+
+- **Unit testy** jsou na konci souboru, který testují.
+- **Kontraktové testy** (`crates/*/tests/*_contract.rs`) spustí skutečný server a mluví s ním přes HTTP nebo gRPC. Na Linuxu spouští skutečné VM ve Firecrackeru, NBD zařízení a síťové namespace.
+- **SDK testy** pouští oficiální testy JavaScriptového a Pythonového SDK od E2B proti envd v Rustu.
+- **Golden soubory** (`crates/orchestrator/tests/golden`) obsahují soubory, které builder šablon zapisuje do rootfs, třeba provisioning skript. Výstup z Rustu se s nimi musí shodovat bajt po bajtu.
+
+## Styl kódu
+
+- Malé funkce, které se čtou shora dolů.
+- `Option`, `Result` a iterátory upravované kombinátory.
+- Buildery generované přes `bon`.
+- Struktury s pojmenovanými poli.
+- Žádné komentáře: kód vysvětlují názvy.

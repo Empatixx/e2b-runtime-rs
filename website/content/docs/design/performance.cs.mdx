@@ -1,0 +1,97 @@
+---
+title: Výkon
+description: Co kód dělá pro rychlé probuzení sandboxu, levnou pauzu a rychlé envd.
+---
+
+Naším cílem je probudit sandbox na bare metalu zhruba za 150 ms, stejně jako upstream E2B. Tato stránka shrnuje, co pro to kód dělá. U každé položky je modul, kde ji najdete.
+
+## Probuzení: nic nekopírovat předem
+
+Snapshot paměti může mít gigabajty. Orchestrator ho před startem hosta nekopíruje. Firecracker namapuje RAM hosta prázdnou a paměťový server (`memory::server`) doplní každou stránku přes userfaultfd, až na ni host poprvé sáhne. Viz [Paměť](../orchestrator/memory/).
+
+Rootfs funguje stejně. Disk hosta je copy-on-write overlay a blok se z buildu čte, až když o něj host požádá. Viz [Bloková zařízení](../orchestrator/block-devices/).
+
+## Probuzení: pomalé kroky spustit naráz
+
+`Sandbox::start_resumed` (`sandbox/resume.rs`) spouští nezávislé kroky souběžně, ne jeden po druhém:
+
+<Mermaid chart={`
+flowchart LR
+  A[start] --> P[prefetch stránek paměti]
+  A --> N[rootfs přes NBD]
+  A --> F[síťový slot, spuštění Firecrackeru]
+  N --> L[rootfs.link na NBD zařízení]
+  F --> L
+  L --> S[načtení snapshotu]
+  S --> R[spuštění vCPU]
+  R --> E[čekání na envd]
+`} />
+
+- Úloha **prefetch** startuje první. Stahuje zaznamenané stránky, zatímco se Firecracker teprve spouští.
+- **NBD** a **Firecracker** startují spolu přes `tokio::join!`. Firecracker dostane symlink `rootfs.link`, který ukazuje na `/dev/null`. Když je NBD zařízení připravené, odkaz se nahradí jedním atomickým přejmenováním.
+- **Načtení snapshotu** a **handshake userfaultfd** běží současně. Firecracker se k paměťovému serveru připojí během načítání.
+
+## Probuzení: pomalé zdroje držet připravené
+
+Vytvoření některých zdrojů trvá desítky milisekund. Pooly je mají připravené dřív, než přijde požadavek:
+
+| Pool | Připraveno předem | Kde |
+|---|---|---|
+| Síťové sloty | až 32 nových, až 100 vrácených k dalšímu použití | `network` |
+| NBD zařízení | `NBD_POOL_SIZE`, výchozí 64 | `exposure` |
+
+Oba pooly fungují stejně jako pooly v upstreamu v Go, včetně 3sekundového čekání, než se vrácený síťový slot znovu použije.
+
+## Cache chunků: každý chunk stáhnout jednou
+
+Soubory buildu se z objektového úložiště čtou po 4MiB chuncích (`block::chunker`). Cache je řídký lokální soubor s bitmapou bloků, které obsahuje.
+
+- **Jedno stažení na chunk.** První čtenář stažení spustí. Každý další čtenář stejného chunku čeká na to stažení a nespouští vlastní.
+- **Čtenáři nečekají na celý chunk.** Stahování zapisuje data do cache po dávkách zarovnaných na stránky, nejméně 16 KiB. Čtenář pokračuje, jakmile jsou v cache jeho bajty.
+- **Data v cache zůstanou.** Druhý sandbox ze stejného buildu čte lokální soubor a znovu nestahuje.
+
+## Prefetch: stáhnout, na co host sáhne
+
+Při buildu šablony fáze optimize šablonu dvakrát probudí a zaznamená stránky, na které sáhly oba běhy. Při každém probuzení úloha prefetch tyto stránky stáhne a nainstaluje v zaznamenaném pořadí, dřív než o ně host požádá.
+
+- 16 workerů stahuje a 8 workerů instaluje stránky do paměti hosta (`memory::prefetch`).
+- Sousední stránky lze spojit do jednoho většího čtení. Největší čtení určuje flag `memory-prefetch-coalesce-max-mb`. Ve výchozím stavu je spojování vypnuté, stejně jako v upstreamu.
+- Stránku, na kterou už host sáhl, prefetch přeskočí.
+
+## Pauza: uložit jen změny
+
+- **Ochrana proti zápisu.** Stránky, které nainstaluje paměťový server, jsou chráněné proti zápisu. První zápis ochranu zruší a Firecracker takové stránky nahlásí jako změněné. Pauza uloží jen je, ne celou RAM.
+- **Uvolněné stránky.** Stránky, které host vrátil, se zaznamenají jako prázdné. Uloží se jako nuly a nezaberou místo.
+- **memfd.** S flagem `use-memfd` je RAM hosta v memfd, který orchestrator umí číst. Seznam stránek je znám hned a kopie stránek běží na pozadí, zatímco pauza pokračuje.
+- **Rootfs.** Jako nová vrstva se uloží jen bloky, které host zapsal.
+
+## Pauza: upload na pozadí
+
+Rootfs a soubory paměti se nahrávají současně (`tokio::try_join!`). Uploady běží až po návratu volání pauzy, v `server::uploads`.
+
+Snapshot se počítá za nahraný, až když jsou nahrané i buildy, na kterých závisí. Při vypínání orchestrator počká na uploady, které ještě běží.
+
+## Měřit každé probuzení
+
+Každé vytvoření a probuzení zaznamená, jak dlouho trval každý krok (`phases.rs`). Řádek v logu vypadá takto:
+
+```
+rootfs+firecracker=31ms load_snapshot=12ms faults=1840 memfd=true resume_vm=2ms mmds=1ms envd_init=40ms prefetched=2210 total=86ms
+```
+
+Čísla výše ukazují formát, nejsou to naměřené hodnoty. Z řádku je vidět, na který krok se podívat jako první, když je probuzení pomalé.
+
+## envd
+
+envd běží v každém sandboxu, takže jeho rychlost je součástí každého volání SDK. Hlavní změny:
+
+- `TCP_NODELAY` na každém spojení, jak to Go dělá ve výchozím stavu.
+- Nahrávané soubory se zapisují přímo do souboru a těla požadavků zůstávají jako `Bytes`.
+- Procesy startují přes `posix_spawn` s oprávněními nastavenými na vlákně, ne přes `fork` s `pre_exec`.
+- Mapa pidů s frontou expirace pro skončené procesy místo lineárního procházení.
+
+[Článek na blogu](../../../blog/envd-rust-vs-go/) popisuje metodu, čísla a změny, které jsme zkusili a zahodili.
+
+## Kde jsme
+
+Na GitHub Actions ve vnořené virtualizaci trvá probuzení 0,8 až 2,4 sekundy. Ten runner je mnohem pomalejší než bare metal, takže cíl 150 ms neukáže. Některé optimalizace z upstreamu ještě nejsou převedené: NBD přes generic netlink s více spojeními, pauza na místě, huge pages a přenos chunků mezi nody (peer-to-peer). Seznam je v `docs/BACKLOG.md`.

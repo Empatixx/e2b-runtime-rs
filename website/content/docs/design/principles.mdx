@@ -1,0 +1,72 @@
+---
+title: Design principles
+description: The rules the code follows, and where you can see each one in the source.
+---
+
+This page lists the rules we follow when we write code for envd and the orchestrator. Each rule names the place in the source where you can see it.
+
+## Same as Go at every edge
+
+Anything a client, a stored file or a dashboard can see must match the Go version. That covers routes, status codes, headers, JSON shapes, error texts, metric names and file formats. Inside, the code is free to look different.
+
+We check this rule against the Go source, not the Go documentation. When the two disagree, the source wins.
+
+## Go formats, written again in Rust
+
+Some outputs depend on how the Go standard library formats them. Rust crates give a correct result, but not the same bytes or text. So the orchestrator has small modules that copy the Go behaviour:
+
+| Module | What it copies |
+|---|---|
+| `go_gzip` | `compress/gzip` at `BestSpeed`, byte for byte, so a layer archive has the same hash as one built by Go |
+| `go_tar` | `archive/tar` headers, including PAX records |
+| `go_strconv` | `strconv.ParseBool` and `strconv.Quote` |
+| `go_time` | `time.ParseDuration` and the text of its errors |
+| `go_url` | URL escaping and `url.Values` parsing and encoding |
+| `go_humanize` | `humanize.Bytes` (`1.2 GB`) |
+| `go_os`, `go_exec` | the text of `*os.PathError` and `exec` errors |
+
+Byte-for-byte archives matter for the layer cache. A template layer is found by the hash of its content, so a different gzip encoder would miss every layer that Go already built.
+
+## Errors carry the exact text
+
+A function returns the text the client will see: a `String`, an `io::Error`, a `ConnectError` or an `ErrorResponse`. We do not wrap errors in a generic type and translate them at the edge. The text is built once, where the error happens, the same way Go builds it with `fmt.Errorf`.
+
+## Unsafe code stays in small types
+
+Every `unsafe` block, syscall, ioctl and byte layout lives behind a small type with a safe API. Some examples:
+
+- `memory::uffd` wraps userfaultfd: register a range, read events, copy a page, write-protect a page.
+- `block::sparse_file` and `block::tracker` hide the sparse cache file and its bitmap of present blocks.
+- `exposure::nbd` hides the NBD ioctls behind `expose(overlay)`, which returns a device path.
+- envd's `credentials` module switches the credentials of one thread to spawn a process as another user, and switches them back.
+
+The rest of the code calls these types and does not see a raw file descriptor.
+
+## One owner for every resource
+
+A running sandbox owns a `Resources` value: the disk, the network slot, the cgroup, the Firecracker process, the memory server and the prefetch task. `Resources::release` takes them down in a fixed order: kill the VM, stop the memory server, close the disk, remove the cgroup, then return the slot.
+
+If a sandbox is dropped without a clean stop, it releases its resources in the background and logs any failure. A failed create calls the same code, so a half-started sandbox leaves nothing behind.
+
+## Shared work is done once
+
+When many callers need the same thing, one task does the work and the others wait for its result. The chunk cache starts one download per 4 MiB chunk, and every reader of that chunk waits on a `watch` channel. A snapshot upload is complete only when the uploads of its parent builds are complete.
+
+## Flags have the same names and defaults
+
+Feature flags use the same keys and default values as upstream LaunchDarkly flags. When no flag service is configured, the defaults apply, so a node without LaunchDarkly behaves like an upstream node with default flags.
+
+## Tests talk to real things
+
+- **Unit tests** sit at the bottom of the file they test.
+- **Contract tests** (`crates/*/tests/*_contract.rs`) start a real server and talk to it over HTTP or gRPC. On Linux they start real Firecracker VMs, NBD devices and network namespaces.
+- **SDK tests** run the official E2B JavaScript and Python SDK test suites against the Rust envd.
+- **Golden files** (`crates/orchestrator/tests/golden`) hold the files the template builder writes into a rootfs, such as the provision script. The Rust output must match them byte for byte.
+
+## Code style
+
+- Small functions that read from top to bottom.
+- `Option`, `Result` and iterators transformed with combinators.
+- Builders generated with `bon`.
+- Structs with named fields.
+- No comments: names explain the code.
