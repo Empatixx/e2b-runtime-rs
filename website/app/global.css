@@ -1,0 +1,32 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@source "../app/**/*.tsx";
+@source "../components/**/*.tsx";
+@source "../lib/**/*.tsx";
+@source "../content/**/*.mdx";
+
+@theme {
+  --color-fd-primary: hsl(14, 78%, 44%);
+  --color-fd-primary-foreground: hsl(0, 0%, 100%);
+  --color-fd-ring: hsl(14, 78%, 44%);
+  --color-fd-accent: hsl(22, 48%, 95%);
+  --color-fd-accent-foreground: hsl(14, 70%, 28%);
+  --color-fd-secondary: hsl(22, 30%, 93%);
+}
+
+.dark {
+  --color-fd-primary: hsl(18, 88%, 60%);
+  --color-fd-primary-foreground: hsl(18, 40%, 8%);
+  --color-fd-ring: hsl(18, 88%, 60%);
+  --color-fd-accent: hsl(18, 22%, 15%);
+  --color-fd-accent-foreground: hsl(22, 80%, 82%);
+  --color-fd-secondary: hsl(18, 16%, 15%);
+}
+
+.hero-glow {
+  background:
+    radial-gradient(60rem 28rem at 50% -8rem, color-mix(in oklab, var(--color-fd-primary) 22%, transparent), transparent 70%),
+    radial-gradient(30rem 20rem at 85% 10%, color-mix(in oklab, var(--color-fd-primary) 10%, transparent), transparent 70%);
+}

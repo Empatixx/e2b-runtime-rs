@@ -1,0 +1,28 @@
+---
+title: Block devices
+description: The copy-on-write rootfs overlay and how Firecracker sees it as a disk.
+---
+
+Firecracker needs a block device for the sandbox's disk. Copying a 10 GiB rootfs for every sandbox is out of the question, so each sandbox gets an **overlay**: a copy-on-write view of the build's rootfs.
+
+## The overlay
+
+<Mermaid chart={`
+flowchart LR
+  G[guest ext4] --> NBD[/dev/nbdN/]
+  NBD --> S[NBD server in the orchestrator]
+  S --> O{overlay}
+  O -- written block --> L[local sparse file]
+  O -- untouched block --> C[chunk cache → build headers → storage]
+`} />
+
+- A **read** returns the block from the local file if the sandbox wrote it, otherwise from the build (through the header and the chunk cache).
+- A **write** goes to the local file only, and the block is marked dirty.
+
+On pause, the dirty blocks become the new build's rootfs diff.
+
+## NBD
+
+The overlay is exposed through **NBD** (Network Block Device). The orchestrator runs an NBD server in-process, connects it to a kernel `/dev/nbdN` device over a socket pair, and gives that path to Firecracker. Requests are served concurrently.
+
+Setting up an NBD device takes time, so a **device pool** keeps `NBD_POOL_SIZE` (default 64) devices ready, and a freed device is checked to be fully disconnected before it is reused.

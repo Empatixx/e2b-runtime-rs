@@ -1,0 +1,54 @@
+---
+title: Úvod
+description: Co je e2b-runtime-rs, co nahrazuje a jak do sebe jednotlivé části zapadají.
+---
+
+[E2B](https://e2b.dev) dává každému uživateli **sandbox**: malý linuxový počítač, který nastartuje zhruba za 150 ms, spustí jakýkoli kód, který mu pošlete, a dá se uspat a později znovu probudit. AI agenti v něm bezpečně spouštějí kód, který sami vygenerovali, daleko od vašich serverů.
+
+**e2b-runtime-rs** je přepis té části E2B, která sandboxy na stroji skutečně spouští, do Rustu. Oficiální E2B SDK (JavaScript a Python) i zbytek platformy E2B s ním fungují beze změny.
+
+## Co je přepsané
+
+E2B se skládá z několika služeb. Tento projekt nahrazuje ty dvě, které běží na **nodu**, tedy na fyzickém stroji s KVM, kde sandboxy běží:
+
+| Komponenta | Kde běží | Co dělá |
+|---|---|---|
+| **envd** | uvnitř každého sandboxu | Malý daemon, se kterým SDK mluví: spouští procesy, streamuje jejich výstup, čte a zapisuje soubory, sleduje složky. |
+| **orchestrator** | jednou na každém nodu | Vytváří, uspává, probouzí a ukončuje sandboxy jako Firecracker microVM a staví šablony. |
+
+Zbytek E2B (API server, client proxy, dashboard, databáze) zůstává, jak je. S orchestratorem mluví přes stejné gRPC API a s envd přes stejné HTTP API jako dřív, takže nepozná, jestli na nodu běží verze v Go, nebo v Rustu.
+
+<Mermaid chart={`
+flowchart LR
+  SDK[E2B SDK] -->|REST| API[E2B API]
+  API -->|gRPC| ORCH[orchestrator]
+  ORCH -->|spouští| VM1[Firecracker microVM]
+  ORCH -->|spouští| VM2[Firecracker microVM]
+  SDK -->|HTTP přes proxy| ENVD1[envd]
+  VM1 --- ENVD1
+  VM2 --- ENVD2[envd]
+`} />
+
+## Jediné pravidlo: chovat se přesně jako Go
+
+Původní kód E2B je napsaný v Go. Tento projekt drží jedno pravidlo: **navenek se chovat přesně jako verze v Go.** Routy, stavové kódy, hlavičky, tvar JSONu, texty chyb, formáty souborů, názvy metrik a dokonce i bajty gzip archivů jsou stejné. Klient, uložený snapshot ani dashboard nesmí výměnu poznat.
+
+Uvnitř je to běžný idiomatický Rust: tokio pro asynchronní kód, axum a connectrpc pro HTTP a malé bezpečné typy kolem každého `unsafe` volání, syscallu a ioctl.
+
+## Kam dál
+
+Dokumentace postupuje od jednoduchého ke složitému:
+
+1. **[Základní pojmy](./concepts/)**: slova, která budete potřebovat, třeba sandbox, šablona, build, snapshot a node.
+2. **[envd](./envd/)**: daemon uvnitř sandboxu a jeho API.
+3. **[Orchestrator](./orchestrator/)**: jak node vytváří, uspává a probouzí sandboxy a jak staví šablony.
+
+## Struktura repozitáře
+
+```
+crates/envd/           daemon envd
+crates/orchestrator/   orchestrator včetně template builderu
+proto/                 .proto soubory zkopírované z E2B (nikdy se needitují)
+docs/                  PARITY.md (co odpovídá Go), BACKLOG.md (známé mezery)
+website/               tato dokumentace
+```

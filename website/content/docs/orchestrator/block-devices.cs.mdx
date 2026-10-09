@@ -1,0 +1,28 @@
+---
+title: Bloková zařízení
+description: Copy-on-write overlay rootfs a jak ho Firecracker vidí jako disk.
+---
+
+Firecracker potřebuje pro disk sandboxu blokové zařízení. Kopírovat 10GiB rootfs pro každý sandbox nepřichází v úvahu, proto každý sandbox dostane **overlay**: copy-on-write pohled na rootfs buildu.
+
+## Overlay
+
+<Mermaid chart={`
+flowchart LR
+  G[ext4 v hostovi] --> NBD[/dev/nbdN/]
+  NBD --> S[NBD server v orchestratoru]
+  S --> O{overlay}
+  O -- zapsaný blok --> L[lokální řídký soubor]
+  O -- nezměněný blok --> C[cache chunků → hlavičky buildu → úložiště]
+`} />
+
+- **Čtení** vrátí blok z lokálního souboru, pokud do něj sandbox zapsal, jinak z buildu (přes hlavičku a cache chunků).
+- **Zápis** jde jen do lokálního souboru a blok se označí jako změněný.
+
+Při uspání se ze změněných bloků stane rozdíl rootfs nového buildu.
+
+## NBD
+
+Overlay se vystavuje přes **NBD** (Network Block Device). Orchestrator spouští NBD server přímo ve svém procesu, propojí ho s jaderným zařízením `/dev/nbdN` přes dvojici socketů a tu cestu předá Firecrackeru. Požadavky se obsluhují souběžně.
+
+Připravit NBD zařízení chvíli trvá, proto **pool zařízení** drží `NBD_POOL_SIZE` (výchozí 64) zařízení připravených a uvolněné zařízení se před dalším použitím ověří, že je úplně odpojené.

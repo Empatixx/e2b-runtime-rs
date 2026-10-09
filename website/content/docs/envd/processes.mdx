@@ -1,0 +1,35 @@
+---
+title: Processes
+description: Starting commands, streaming their output and keeping them alive across reconnects.
+---
+
+The `process.Process` service runs commands for the SDK. A command runs as a Linux user, in a working directory, with environment variables, and optionally in a pseudo-terminal (PTY).
+
+## The life of a command
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant envd
+  participant P as process
+  SDK->>envd: Start(cmd, user, cwd, pty?)
+  envd->>P: fork + exec as user, in a cgroup
+  envd-->>SDK: StartEvent(pid)
+  P-->>envd: stdout / stderr
+  envd-->>SDK: DataEvent(...)
+  P-->>envd: exit
+  envd-->>SDK: EndEvent(exitCode, status)
+`} />
+
+- The process is started with the **user's** uid, gid and groups. envd switches credentials only for the spawning thread and restores them right after, so the rest of envd keeps running as root.
+- Every process goes into a **cgroup**: `ptys` for terminals, `socats` for port forwarders, `user` for everything else. That lets the orchestrator freeze user code before a snapshot without freezing envd itself.
+- Output is broadcast: several clients can `Connect` to the same process and each gets the stream. A slow or disconnected client does not block the others.
+- The end event carries Go's status text, for example `exit status 1` or `signal: killed`.
+
+## Tags and listing
+
+A process can be started with a **tag**. `List` returns running processes with their tags, and `Connect` can find a process by tag instead of pid. The SDK uses this to reattach to long-running commands after a reconnect.
+
+## Port forwarding
+
+Programs often listen on `127.0.0.1`, which is not reachable from outside the VM. envd scans for listening sockets and, for each local-only port, starts a `socat` that forwards the sandbox's external address to it. The client proxy can then reach the service at `https://<port>-<sandboxID>.<domain>`.

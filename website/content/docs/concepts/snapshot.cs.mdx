@@ -1,0 +1,33 @@
+---
+title: Snapshot
+description: Zmrazený sandbox (paměť, disk a stav VM) uložený jako rozdíl proti rodiči.
+---
+
+**Snapshot** je všechno, co je potřeba k tomu, aby sandbox pokračoval přesně tam, kde skončil. Má tři části:
+
+| Část | Co to je |
+|---|---|
+| **memfile** | RAM hosta, stránku po stránce. |
+| **rootfs** | Disk hosta, obraz ext4. |
+| **snapfile** | Stav VM ve Firecrackeru: registry CPU, stav zařízení, rozložení paměti. |
+
+## Rozdíly místo kopií
+
+Sandbox se 2 GiB RAM a 10 GiB diskem by bylo drahé kopírovat při každém uspání. Snapshot proto ukládá jen **bloky, které se změnily** od buildu, ze kterého vznikl. Zbytek si půjčuje od rodiče.
+
+Vedle každého memfilu a rootfs leží **hlavička** (header). Je to seznam mapování: „bloky od offsetu A do offsetu B leží v buildu X na offsetu C“. Hlavička nového snapshotu ukazuje na sebe pro změněné bloky a na předky pro všechno ostatní.
+
+<Mermaid chart={`
+flowchart LR
+  subgraph header[hlavička rootfs buildu C]
+    m1[bloky 0-99 → build A]
+    m2[bloky 100-119 → build C]
+    m3[bloky 120-999 → build B]
+  end
+`} />
+
+Když orchestrator čte blok, najde jeho mapování a stáhne ho ze správného buildu. Bloky se stahují líně, po 4 MiB chunkách, a drží se v lokální cache, takže sandbox stáhne jen ty části disku a paměti, na které opravdu sáhne.
+
+## Stránky paměti
+
+Paměť se sleduje po stránkách 4 KiB (nebo 2 MiB s huge pages). Při uspání se orchestrator zeptá Firecrackeru, do kterých stránek se od probuzení zapisovalo, a uloží jen ty. Stránky, na které host nikdy nesáhl, se při probuzení ani nečtou z úložiště; načtou se, až když na ně host poprvé sáhne. Viz [Paměť](../../orchestrator/memory/).

@@ -1,0 +1,26 @@
+---
+title: Lifecycle
+description: Create, run, pause, resume, kill - and what each step does on the node.
+---
+
+<Mermaid chart={`
+stateDiagram-v2
+  [*] --> Running: create (resume a build)
+  Running --> Paused: pause
+  Paused --> Running: resume (create from the paused build)
+  Running --> [*]: kill or timeout
+  Paused --> [*]: delete
+`} />
+
+| Step | What happens |
+|---|---|
+| **Create** | The orchestrator resumes the snapshot of a build: it loads the VM state, serves memory on demand and attaches the disk. envd is told the sandbox's settings through `POST /init`. |
+| **Running** | The SDK talks to envd. The orchestrator watches the VM, collects stats and enforces `endTime`. |
+| **Pause** | The VM is paused and snapshotted. Only changed memory pages and disk blocks are kept, as a new build. The pause answers once the snapshot is in the node's local cache; the upload to storage continues in the background. |
+| **Resume** | Just a create from the build the pause produced. On the same node it reads only local files. |
+| **Checkpoint** | A pause that keeps the sandbox running, so a later resume can return to that moment. |
+| **Kill** | The VM is stopped and every resource it used is released. |
+
+A paused sandbox costs nothing but storage. That is why E2B can keep a sandbox "alive" for days: most of that time it is a snapshot in a bucket.
+
+The node-side details are in [Sandbox lifecycle](../../orchestrator/lifecycle/).

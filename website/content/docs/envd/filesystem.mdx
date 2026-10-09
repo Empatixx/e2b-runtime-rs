@@ -1,0 +1,27 @@
+---
+title: Filesystem and files
+description: Inspecting and changing files, transferring them, and watching for changes.
+---
+
+## Filesystem service
+
+`filesystem.Filesystem` works on paths. A path can be absolute, or relative to the user's home directory, and `~` is expanded the same way as in Go envd. Every entry it returns has the same fields as upstream: name, type, path, size, mode, permissions string, owner, group, modification time and, for symlinks, the target.
+
+## Watching
+
+There are two ways to watch a directory:
+
+- **`WatchDir`** keeps a stream open and sends an event for every create, write, remove, rename and chmod.
+- **`CreateWatcher` + `GetWatcherEvents`** collects events on the server, and the client polls for them. This works for clients that cannot hold a stream.
+
+Both use Linux inotify and can watch recursively.
+
+## Upload and download
+
+`/files` moves file contents over plain HTTP, which is simpler and faster than streaming bytes through RPC:
+
+- `GET /files?path=…` downloads a file, with `Content-Disposition` and range support.
+- `POST /files?path=…` uploads one or more files as `multipart/form-data`. Missing parent directories are created and owned by the request's user.
+- `POST /files/compose` joins previously uploaded parts into one file. Large uploads are split into parts by the SDK and joined here. On Linux the join uses `copy_file_range`, so the data never passes through envd's memory.
+
+Uploads and downloads can be authorized with a **signed URL** instead of the access token, so the SDK can hand a link to a browser.

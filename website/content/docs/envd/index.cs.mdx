@@ -1,0 +1,58 @@
+---
+title: Přehled envd
+description: Daemon uvnitř každého sandboxu, se kterým mluví SDK.
+---
+
+**envd** („environment daemon“) je jedna statická binárka, která běží uvnitř každého sandboxu jako systemd služba. Poslouchá na portu **49983** a je to jediná cesta dovnitř: když SDK spouští příkaz, nahrává soubor nebo sleduje složku, mluví s envd.
+
+<Mermaid chart={`
+flowchart LR
+  SDK[E2B SDK] -- HTTPS přes client proxy --> ENVD[envd :49983]
+  ORCH[orchestrator] -- POST /init, /freeze, /upgrade --> ENVD
+  ENVD --> P[procesy a PTY]
+  ENVD --> FS[soubory a watchery]
+  ENVD --> CG[cgroupy]
+`} />
+
+## Co dělá
+
+| Oblast | Příklady |
+|---|---|
+| **Procesy** | Spustit příkaz, streamovat stdout a stderr, posílat vstup, měnit velikost terminálu, posílat signály, znovu se připojit k běžícímu procesu. |
+| **Souborový systém** | Stat, výpis, přesun, mazání, vytváření složek, sledování změn. |
+| **Soubory** | Nahrávání a stahování souborů přes obyčejné HTTP, spojení několika uploadů do jednoho souboru. |
+| **Init** | Převzít od orchestratoru proměnné prostředí sandboxu, výchozího uživatele, access token a CA certifikáty. |
+| **Práce s hostem** | Zmrazit procesy a souborové systémy před snapshotem, hlásit metriky, přeposílat porty, aktualizovat se bez ztráty procesů. |
+
+## Přímá náhrada
+
+Tento envd nahrazuje binárku envd v Go jedna k jedné. Má stejné routy, stejné Connect RPC služby, stejná JSON těla a texty chyb, stejné přepínače příkazové řádky a stejný řetězec verze (`0.9.0`). V CI proti němu běží oficiální testy E2B JavaScript SDK.
+
+Je sestavený jako **statická musl binárka**, stejně jako v Go, takže běží v jakémkoli image: Debian, Alpine, Ubuntu i distroless.
+
+## Přepínače příkazové řádky
+
+envd bere přepínače ve stylu Go (`-port 49983` nebo `-port=49983`):
+
+| Přepínač | Výchozí | Význam |
+|---|---|---|
+| `-port` | `49983` | Port, na kterém poslouchá. |
+| `-isnotfc` | `false` | Neběží ve Firecrackeru: přeskočí MMDS a další práci jen pro VM (pro testy a kontejnery). |
+| `-cgroup-root` | `/sys/fs/cgroup` | Kde je připojená hierarchie cgroup v2. |
+| `-no-cgroups` | `false` | Spouštět procesy bez cgroup. |
+| `-verbose` | `false` | Víc logů. |
+| `-version` | | Vypíše verzi a skončí. |
+| `-commit` | | Vypíše commit buildu a skončí. |
+| `-resume-handover` | `false` | Začne převzetím procesů od předchozího envd (viz [Živý upgrade](./upgrade/)). |
+
+## Struktura zdrojáků
+
+```
+crates/envd/src/
+  router.rs        všechny routy a Connect služby na jednom místě
+  controllers/     jeden soubor na oblast: init, process/, filesystem/, files/, freeze, ...
+  host/            co se dělá s VM: hodiny, /etc/hosts, MMDS, CA certifikáty, NFS
+  cgroups.rs       cgroupy ptys / socats / user, ve kterých běží procesy
+  port/            skener portů a socat forwarder
+  upgrade/         živý upgrade: předání procesů novému envd
+```

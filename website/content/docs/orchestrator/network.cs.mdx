@@ -1,0 +1,34 @@
+---
+title: Síť
+description: Network namespace, adresy, NAT a egress firewall pro každý sandbox.
+---
+
+Každý sandbox má **uvnitř stejné adresy**: host má `169.254.0.21` na `eth0` a jeho brána (tap zařízení) je `169.254.0.22`. Díky tomu jsou snapshoty přenositelné: probuzená VM si nechá své nastavení sítě. Izolace a unikátní adresy žijí mimo VM, ve **slotu**.
+
+## Sloty
+
+Slot je linuxový **network namespace** `ns-<index>` a obsahuje:
+
+- zařízení `tap0`, ke kterému Firecracker připojí hosta;
+- **veth pár**, který namespace propojuje s hostitelem, s unikátními adresami odvozenými z indexu (`10.12.x.y` pro veth, `10.11.x.y` pro adresu sandboxu viditelnou z hostitele);
+- pravidla NAT, která překládají mezi pevnou adresou hosta a unikátní adresou slotu;
+- **nftables firewall** pro egress pravidla.
+
+<Mermaid chart={`
+flowchart LR
+  VM[host 169.254.0.21] --- TAP[tap0 169.254.0.22]
+  subgraph ns[namespace ns-N]
+    TAP --- NAT[NAT + firewall]
+    NAT --- V1[veth peer]
+  end
+  V1 --- V2[veth hostitele 10.12.x.y]
+  V2 --- HOST[routing hostitele]
+`} />
+
+## Pool
+
+Vytvoření slotu trvá desítky milisekund, proto **síťový pool** předem vytvoří až 32 nových slotů a drží až 100 vrácených slotů k dalšímu použití. Vrácený slot počká 3 sekundy a resetuje se mu firewall, než ho dostane někdo další, přesně jako v poolu v Go.
+
+## Řízení odchozího provozu
+
+Sandbox jde vytvořit s egress pravidly: povolené a zakázané CIDR rozsahy a domény. IP pravidla jdou do nftables setů slotu. Pravidla pro domény potřebují vidět jméno hostitele, proto se TCP provoz přesměruje na **TCP firewall proxy** orchestratoru (porty 5016–5018), která přečte HTTP hlavičku `Host` nebo TLS SNI a spojení povolí nebo zablokuje.

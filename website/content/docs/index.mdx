@@ -1,0 +1,54 @@
+---
+title: Introduction
+description: What e2b-runtime-rs is, what it replaces, and how the pieces fit together.
+---
+
+[E2B](https://e2b.dev) gives every user a **sandbox**: a small Linux computer that starts in about 150 ms, runs any code you send it, and can be paused and resumed later. AI agents use it to run code they generated, safely, away from your servers.
+
+**e2b-runtime-rs** is a Rust rewrite of the part of E2B that actually runs sandboxes on a machine. The official E2B SDKs (JavaScript and Python) and the rest of the E2B platform work against it unchanged.
+
+## What is rewritten
+
+E2B is several services. This project replaces the two that live on the **node**, the bare-metal machine with KVM where sandboxes run:
+
+| Component | Where it runs | What it does |
+|---|---|---|
+| **envd** | inside every sandbox | A small daemon the SDK talks to: start processes, stream their output, read and write files, watch directories. |
+| **orchestrator** | once per node | Starts, pauses, resumes and kills sandboxes as Firecracker microVMs, and builds templates. |
+
+The rest of E2B (the API server, the client proxy, the dashboard, the database) stays as it is. It talks to the orchestrator over the same gRPC API and to envd over the same HTTP API as before, so it cannot tell whether a node runs the Go or the Rust version.
+
+<Mermaid chart={`
+flowchart LR
+  SDK[E2B SDK] -->|REST| API[E2B API]
+  API -->|gRPC| ORCH[orchestrator]
+  ORCH -->|starts| VM1[Firecracker microVM]
+  ORCH -->|starts| VM2[Firecracker microVM]
+  SDK -->|HTTP via proxy| ENVD1[envd]
+  VM1 --- ENVD1
+  VM2 --- ENVD2[envd]
+`} />
+
+## The one rule: behave exactly like Go
+
+The upstream E2B code is written in Go. This project follows one rule: **at every edge, behave exactly like the Go version.** Routes, status codes, headers, JSON shapes, error texts, file formats, metric names and even the bytes of gzip archives are the same. A client, a stored snapshot or a dashboard must never notice the swap.
+
+Inside, the code is ordinary idiomatic Rust: tokio for async, axum and connectrpc for HTTP, small safe types around every `unsafe` call, syscall and ioctl.
+
+## Where to go next
+
+The documentation goes from simple to detailed:
+
+1. **[Concepts](./concepts/)**: the words you need, such as sandbox, template, build, snapshot and node.
+2. **[envd](./envd/)**: the daemon inside the sandbox and its API.
+3. **[Orchestrator](./orchestrator/)**: how a node creates, pauses and resumes sandboxes, and how it builds templates.
+
+## Repository layout
+
+```
+crates/envd/           the envd daemon
+crates/orchestrator/   the orchestrator, including the template builder
+proto/                 .proto files copied from upstream E2B (never edited)
+docs/                  PARITY.md (what matches Go), BACKLOG.md (known gaps)
+website/               this documentation
+```

@@ -1,0 +1,43 @@
+---
+title: Šablona a build
+description: Recept na sandbox a upečený výsledek, ze kterého sandboxy startují.
+---
+
+## Šablona
+
+**Šablona** (template) říká, co má sandbox obsahovat. Vychází z Docker image a přidává kroky, podobně jako Dockerfile:
+
+```ts
+const template = Template()
+  .fromImage('python:3.12')
+  .runCmd('pip install numpy')
+  .setEnvs({ GREETING: 'hello' })
+  .setStartCmd('python3 server.py', waitForPort(8000))
+```
+
+Šablona má stálé `templateID`, například `my-python`. Na to se odkazujete, když vytváříte sandbox.
+
+## Build
+
+**Build** je jedna upečená verze šablony, identifikovaná `buildID` (UUID). Build vezme image a kroky, udělá z nich obraz disku, nastartuje VM, spustí v ní kroky a nakonec **tu VM uspí**. Výsledkem buildu tedy není jen disk, ale úplný [snapshot](../snapshot/) běžícího stroje včetně paměti.
+
+V tom je trik rychlého startu. Vytvoření sandboxu nebootuje Linux, ale **probudí** snapshot buildu, takže start příkaz už běží a interpret Pythonu je už načtený.
+
+## Vrstvy
+
+Každý krok buildu se ukládá jako samostatná **vrstva** (layer): vlastní build, jehož disk a paměť obsahují jen bloky, které ten krok změnil. Pozdější build se stejnými prvními kroky tyto vrstvy vezme z cache, místo aby kroky spouštěl znovu. Fáze popisuje stránka [Template builder](../../orchestrator/template-builder/).
+
+## Kde buildy leží
+
+Buildy jsou uložené v objektovém úložišti (Google Cloud Storage, S3, Azure Blob nebo lokální složka) pod svým `buildID`:
+
+```
+<buildID>/memfile            paměť hosta
+<buildID>/memfile.header     který build drží který blok paměti
+<buildID>/rootfs.ext4        disk
+<buildID>/rootfs.ext4.header který build drží který blok disku
+<buildID>/snapfile           stav VM ve Firecrackeru
+<buildID>/metadata.json      nastavení šablony, verze envd, seznam pro prefetch
+```
+
+Názvy souborů, formát hlaviček i klíče v JSONu jsou přesně ty, které zapisuje orchestrator v Go, takže obě verze umí číst buildy té druhé.

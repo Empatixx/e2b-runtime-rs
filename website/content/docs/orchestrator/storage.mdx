@@ -1,0 +1,49 @@
+---
+title: Storage
+description: Where builds live, how their headers work, and the caches that make reads cheap.
+---
+
+## Object storage
+
+Builds live in object storage. The provider is chosen like upstream: `TEMPLATE_STORAGE_URL` and `BUILD_CACHE_STORAGE_URL` take `gs://bucket`, `s3://bucket?region=…`, `azblob://container` or `file:///path`; without them, the older `STORAGE_PROVIDER` variables apply.
+
+Credentials are resolved the way the Go SDKs resolve them:
+
+| Provider | Chain |
+|---|---|
+| GCS | Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, the gcloud file, external accounts, impersonation, the GCE metadata server. |
+| S3 | The AWS default chain: environment, profiles, SSO, web identity, ECS and EC2 roles. |
+| Azure | Account keys or SAS, or `DefaultAzureCredential`: environment, workload identity, managed identity, Azure CLI, azd, PowerShell. |
+
+## Files of a build
+
+```
+<buildID>/memfile, memfile.header
+<buildID>/rootfs.ext4, rootfs.ext4.header
+<buildID>/snapfile
+<buildID>/metadata.json
+```
+
+## Headers
+
+A header starts with metadata (version, block size, total size, build id, base build id) followed by a list of **mappings**. Each mapping says which range of the device is stored in which build, and at which offset in that build's file.
+
+```
+offset 0       length 4 MiB    → build A, storage offset 0
+offset 4 MiB   length 64 KiB   → build C, storage offset 0
+offset 4.06 MiB length …       → build B, storage offset 12 MiB
+```
+
+A diff build stores only its own blocks, packed one after another, and its header maps everything else to its ancestors. The format is upstream's header V3, byte for byte.
+
+## Chunk cache
+
+Reads go through a local **chunk cache**. Data is fetched from storage in 4 MiB chunks, written into a sparse cache file, and marked as present. A page fault waits only for the chunk that holds its page, and concurrent readers of the same chunk share one download.
+
+## Template cache
+
+The **template cache** keeps a `Template` per build id: its headers, snapfile and metadata, fetched once and shared by every sandbox that resumes the build. Entries live 25 hours after their last use and are pinned while a sandbox uses them. A pause adds its snapshot here before the upload starts, which is why a same-node resume is instant.
+
+## Build cache for diffs
+
+Local diff files are kept for 25 hours, pinned until their upload finishes, and evicted earlier when the cache disk is fuller than `build-cache-max-usage-percentage`.

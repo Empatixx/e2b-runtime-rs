@@ -1,0 +1,34 @@
+---
+title: Template builder
+description: How an OCI image and a list of steps become a resumable snapshot.
+---
+
+With `ORCHESTRATOR_SERVICES=template-manager`, the orchestrator also serves `TemplateService` and builds templates. A build runs as a pipeline of **phases**, and every phase produces a **layer**: a build of its own that the next phase resumes.
+
+<Mermaid chart={`
+flowchart LR
+  B[base: image → ext4 → provision → boot] --> U[default user]
+  U --> S1[step 1] --> S2[step 2] --> SN[step N]
+  SN --> FD[ensure free disk]
+  FD --> F[finalize: configure, start, ready]
+  F --> O[optimize: record prefetch]
+`} />
+
+## Phases
+
+| Phase | What it does |
+|---|---|
+| **base** | Pulls the image (Docker Hub, a mirror, GCP Artifact Registry, ECR or ACR), unpacks the layers into an ext4 file, injects envd and busybox, boots a provisioning VM that installs systemd, openssh, sudo and friends, then boots the result with systemd and pauses it. |
+| **default user** | For new templates, creates the `user` account and home directory. |
+| **steps** | Each `RUN`, `ENV`, `WORKDIR`, `USER` or `COPY` runs through envd in a VM resumed from the previous layer, then the VM is paused and stored as a layer. |
+| **ensure free disk** | Grows the ext4 so the requested free space is available, without a VM. |
+| **finalize** | Boots the last layer under the final build id, runs the configuration script, starts the start command and waits for the ready command, installs the CA bundle. |
+| **optimize** | Resumes the final template twice and stores the pages both runs touched as the [prefetch](../memory/) list. |
+
+## Layer cache
+
+Every phase has a **hash** computed from its inputs and the previous layer's hash, the same way upstream computes it. Before running a phase, the builder looks the hash up in the layer index of the build cache. A hit means the phase is skipped and its stored layer is reused; the build log says `CACHED`. Changing step 5 therefore rebuilds steps 5 onward and nothing before.
+
+## Byte-for-byte artifacts
+
+Some layer files are written by the builder itself, such as the injected envd and its systemd unit. Their digests appear in logs and caches, so they are written with a port of Go's `archive/tar` and `compress/gzip`. The same input gives the same bytes and the same `sha256` as the Go builder.

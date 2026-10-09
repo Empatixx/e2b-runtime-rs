@@ -1,0 +1,42 @@
+---
+title: Operations
+description: Configuration, feature flags, telemetry and shutdown.
+---
+
+## Configuration
+
+The orchestrator is configured with environment variables, the same names as upstream. The most important:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRPC_PORT` | `5008` | gRPC, health and `/health` port. |
+| `NODE_ID` | `local` | Node name in metrics, events and routing. |
+| `ORCHESTRATOR_SERVICES` | `orchestrator` | Roles: `orchestrator`, `template-manager`, or both. |
+| `TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` | | Where builds are stored. |
+| `FIRECRACKER_VERSIONS_DIR`, `HOST_KERNELS_DIR` | `/fc-versions`, `/fc-kernels` | VMM and kernel binaries. |
+| `NBD_POOL_SIZE` | `64` | Ready NBD devices. |
+| `LAUNCH_DARKLY_API_KEY` | | Feature flags; without it, upstream's fallbacks. |
+| `OTEL_COLLECTOR_GRPC_ENDPOINT` | | Enables OTLP metrics, traces and logs. |
+
+## Feature flags
+
+Limits and switches come from **LaunchDarkly** with upstream's flag names, contexts (sandbox, team, cluster, service) and fallbacks. Examples:
+
+| Flag | Fallback | Controls |
+|---|---|---|
+| `max-sandboxes-per-node` | 200 | Admission limit, re-read every 30 s. |
+| `max-starting-instances-per-node` | 3 | Concurrent starts, re-read every 30 s. |
+| `resume-prefetch-source` | `init` | Which prefetch runs on resume. |
+| `use-memfd` | on | memfd-backed guest memory. |
+| `envd-timeout-milliseconds` | `ENVD_TIMEOUT` or 10 s | How long a resume waits for envd. |
+| `build-cache-max-usage-percentage` | 85 | When local diffs are evicted. |
+
+## Telemetry
+
+With `OTEL_COLLECTOR_GRPC_ENDPOINT` set, the orchestrator exports **metrics, traces and logs** over OTLP, with the metric names, units, span names and attributes the Go orchestrator uses, so existing dashboards keep working.
+
+## Shutdown
+
+On `SIGTERM` the node reports itself as draining, waits 15 s (unless `ENVIRONMENT=local`) so the API stops scheduling to it, lets running template builds finish, then waits until the API has removed every sandbox and every upload has landed. `FORCE_STOP=true` skips the waits.
+
+At startup it removes what a previous run left behind (`ns-*` namespaces, `/sys/fs/cgroup/e2b/*`, the work directory), so it expects to own the node.

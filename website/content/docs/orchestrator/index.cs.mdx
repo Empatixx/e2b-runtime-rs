@@ -1,0 +1,51 @@
+---
+title: Přehled orchestratoru
+description: Služba na každém nodu, která z gRPC volání dělá běžící microVM.
+---
+
+**Orchestrator** je jedna binárka v Rustu, která běží jako root na každém nodu. E2B API ho volá přes gRPC (port `5008`), aby vytvořil, uspal, probudil a ukončil sandbox, a v roli template-manager také aby postavil šablonu.
+
+<Mermaid chart={`
+flowchart TB
+  API[E2B API] -- gRPC SandboxService --> SVC[server: service.rs]
+  SVC --> NODE[Node]
+  NODE --> CACHE[cache šablon]
+  NODE --> NET[síťový pool]
+  NODE --> NBD[pool NBD zařízení]
+  NODE --> SBX[Sandbox]
+  SBX --> FC[proces Firecracker]
+  SBX --> MEM[paměťový server: userfaultfd]
+  SBX --> DISK[rootfs overlay přes NBD]
+  CACHE --> STORE[(objektové úložiště)]
+`} />
+
+## Části
+
+| Část | Stránka | Role |
+|---|---|---|
+| gRPC server | [Životní cyklus](./lifecycle/) | `SandboxService`, `InfoService`, health; limity admission; úloha pro každý sandbox. |
+| Firecracker | [Firecracker](./firecracker/) | Spuštění VMM, jeho API socket, načtení snapshotu, MMDS. |
+| Paměť | [Paměť](./memory/) | Obsluha paměti hosta na požádání přes userfaultfd, prefetch, sledování zápisů. |
+| Úložiště | [Úložiště](./storage/) | Buildy v objektovém úložišti, hlavičky, cache chunků, cache šablon. |
+| Disky | [Bloková zařízení](./block-devices/) | Copy-on-write overlay rootfs, vystavený Firecrackeru jako NBD zařízení. |
+| Síť | [Síť](./network/) | Network namespace pro každý sandbox, NAT, egress firewall a proxy. |
+| Šablony | [Template builder](./template-builder/) | Z OCI image snapshot, vrstvu po vrstvě. |
+| Provoz | [Provoz](./operations/) | Konfigurace, feature flagy, telemetrie, vypínání. |
+
+## Struktura zdrojáků
+
+```
+crates/orchestrator/src/
+  server/        gRPC služby, Node, admission, úloha životního cyklu, uploady, vypínání
+  sandbox/       Sandbox: cold boot, resume, snapshot, pause harvest
+  firecracker/   konfigurace VMM, API klient, spuštění, klasifikace ukončení
+  memory/        userfaultfd server, prefetch, trace, export memfilu
+  block/         cache chunků, soubory buildů, overlay rootfs
+  exposure/nbd/  NBD server v procesu a pool zařízení
+  network/       sloty, pool, nftables firewall
+  storage/       backendy úložiště, hlavičky, cesty
+  template/      cache šablon a metadata
+  builder/       role template-manager
+  featureflags/  LaunchDarkly klient a definice flagů
+  telemetry/     OpenTelemetry metriky, trace a logy
+```

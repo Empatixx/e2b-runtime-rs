@@ -1,0 +1,26 @@
+---
+title: Operace s hostem
+description: Routy, které orchestrator používá kolem snapshotů a pro údržbu.
+---
+
+Některé routy existují pro orchestrator, ne pro uživatele. Připravují hosta na snapshot nebo o něm podávají zprávu.
+
+## Zmrazení před snapshotem
+
+Když se sandbox uspává, jeho paměť a disk se zachytí v jediném okamžiku. Ten okamžik můžou rozbít dvě věci: uživatelské procesy, které pořád zapisují, a data souborového systému, která jsou ještě v page cache.
+
+| Routa | Co dělá |
+|---|---|
+| `POST /freeze` | Zmrazí cgroupy `user` a `ptys` pomocí freezeru cgroup v2, takže uživatelský kód se zastaví mezi dvěma instrukcemi. Samotný envd běží dál. |
+| `POST /fsfreeze` | Spustí `FIFREEZE` nad souborovými systémy, což vyprázdní neuložená data a zablokuje nové zápisy. |
+| `POST /unfreeze`, `POST /fsthaw` | Po snapshotu je vrátí zpět. |
+
+Sandbox probuzený z takového snapshotu se rozmrazí v rámci svého prvního `/init`.
+
+## Metriky
+
+`GET /metrics` vrací využití CPU, použitou a celkovou paměť a použitý a celkový disk, se stejnými klíči v JSONu jako envd v Go. Orchestrator z toho hlásí využití prostředků sandboxu a pozná zabití kvůli nedostatku paměti.
+
+## Huge pages
+
+`POST /collapse` požádá jádro (`MADV_COLLAPSE`), aby sloučilo paměť procesu do 2MiB huge pages. Šablony postavené s huge pages se probouzejí rychleji, protože stránek k načtení je 512krát méně.

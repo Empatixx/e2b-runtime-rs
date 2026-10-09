@@ -1,0 +1,29 @@
+---
+title: Node
+description: Fyzický stroj, na kterém běží sandboxy, a orchestrator, který je spravuje.
+---
+
+**Node** je linuxový stroj s KVM (obvykle bare metal), na kterém běží mnoho sandboxů najednou. Na každém nodu běží jeden **orchestrator**, dlouho běžící služba s gRPC API. E2B API pro každý nový sandbox vybere node a zavolá jeho orchestrator.
+
+## Role
+
+Stejná binárka orchestratoru může hrát dvě role, které se volí přes `ORCHESTRATOR_SERVICES`:
+
+| Role | gRPC služba | Co dělá |
+|---|---|---|
+| `orchestrator` | `SandboxService` | Vytváří, upravuje, vypisuje, uspává, checkpointuje a maže sandboxy. |
+| `template-manager` | `TemplateService` | Staví ze šablon snapshoty. |
+
+Obě role navíc obsluhují `InfoService` (stav a prostředky nodu) a gRPC health na stejném portu (výchozí `5008`).
+
+## Co node drží připravené
+
+Start sandboxu musí být rychlý, proto node drahé věci připravuje dopředu:
+
+- **Síťové sloty**: linuxové network namespaces s virtuálními kabely a pravidly firewallu, vytvořené předem a znovu používané.
+- **NBD zařízení**: bloková zařízení, přes která se sandboxům vystavují disky.
+- **Cache šablon**: nedávno použité buildy s hlavičkami a už staženými chunkami.
+
+## Feature flagy
+
+Spousta limitů a přepínačů (kolik sandboxů smí node spustit, jestli prefetchovat paměť, s jakým jádrem stavět) pochází z **LaunchDarkly** feature flagů se stejnými názvy a výchozími hodnotami jako v Go. Bez API klíče použije každý flag vestavěnou výchozí hodnotu z Go. Viz [Provoz](../../orchestrator/operations/).

@@ -102,6 +102,8 @@ scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.s
 scripts/clippy-linux.sh clippy of the whole workspace in Docker (rust:1.98) to catch Linux-only compile errors on a Mac
 proto/envd/            envd .proto copied from upstream E2B (never edit)
 proto/orchestrator/    orchestrator, info, template-manager and volume .proto copied from upstream E2B (never edit), UPSTREAM_COMMIT
+website/               Fumadocs (Next.js, static export) docs: content/docs/**/*.mdx in English, *.cs.mdx and
+                       meta.cs.json in Czech; lib/i18n.ts (en default, cs), components/mermaid.tsx; npm run build
 crates/envd/build.rs   codegen from ../../proto/envd
 crates/envd/reference/ upstream envd OpenAPI + pinned commit
 crates/envd/src/

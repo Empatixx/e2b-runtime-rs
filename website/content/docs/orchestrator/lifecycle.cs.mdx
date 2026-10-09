@@ -1,0 +1,70 @@
+---
+title: Životní cyklus sandboxu
+description: Co node krok po kroku dělá při create, pause, resume a kill.
+---
+
+## Create
+
+`SandboxService/Create` dostane ID šablony, ID buildu, prostředky a čas konce. Create je vždy **probuzení snapshotu**: snapshotu buildu, nebo snapshotu, který zanechalo předchozí uspání.
+
+<Mermaid chart={`
+sequenceDiagram
+  participant API
+  participant N as Node
+  participant T as cache šablon
+  participant FC as Firecracker
+  participant M as paměťový server
+  participant E as envd
+  API->>N: Create(build, prostředky)
+  N->>N: admission (max sandboxů, max startujících)
+  N->>T: hlavičky, snapfile, metadata buildu
+  par paralelně
+    N->>N: půjčí si síťový slot
+    N->>N: vystaví overlay rootfs jako /dev/nbdN
+  end
+  N->>FC: start v network namespace slotu
+  N->>FC: načtení snapshotu (backend paměti = userfaultfd socket)
+  FC->>M: předá uffd a oblasti paměti
+  N->>N: spustí prefetch zaznamenaných stránek
+  N->>FC: probudí VM, nastaví metadata v MMDS
+  N->>E: POST /init (prostředí, token, hodiny, uživatel)
+  E-->>N: ok
+  N-->>API: Created
+`} />
+
+1. **Admission.** Node spustí nejvýš `max-sandboxes-per-node` sandboxů a najednou startuje nejvýš `max-starting-instances-per-node`; obojí pochází z feature flagů. Create, který nemůže nastartovat do 15 s, dostane `ResourceExhausted`.
+2. **Šablona.** [Cache šablon](../storage/) vrátí hlavičky buildu, `snapfile` a `metadata.json`; stáhne je jednou a sdílí mezi sandboxy.
+3. **Disk a síť paralelně.** Z [poolu](../network/) se půjčí síťový slot a [overlay](../block-devices/) rootfs se připojí k volnému NBD zařízení.
+4. **Firecracker** nastartuje uvnitř network namespace slotu a načte snapshot. Jeho backend paměti je unixový socket, na kterém čeká [paměťový server](../memory/).
+5. **Prefetch.** Stránky zaznamenané jako „vždy použité hned po probuzení“ se na pozadí nakopírují do hosta, takže host jen zřídka čeká.
+6. **Resume a init.** VM se probudí, MMDS dostane metadata sandboxu a envd dostane `POST /init`.
+7. **Registrace.** Sandbox se přidá do registru a spustí se úloha životního cyklu, která ho hlídá, dokud neskončí.
+
+## Běh
+
+Úloha životního cyklu dodržuje `endTime` (když je zapnutá lokální expirace; normálně to dělá API), sbírá statistiky hostitele do ClickHouse, hlídá zabití kvůli paměti, posílá události a záznamy pro routing do Redisu a pozná, když Firecracker umře. Ukončení Firecrackeru se klasifikuje stejně jako `fc.ClassifyExit` v Go (čistý konec, chybový konec, externí signál, chyba, vyžádaný signál).
+
+## Pause
+
+<Mermaid chart={`
+flowchart LR
+  A[zmrazit uživatelské procesy a fs] --> B[pozastavit VM]
+  B --> C[snapshot Firecrackeru: snapfile]
+  C --> D[zapsané stránky paměti → rozdíl memfilu]
+  C --> E[zapsané bloky overlaye → rozdíl rootfs]
+  D --> F[nové hlavičky]
+  E --> F
+  F --> G[přidat do cache šablon]
+  G --> H[odpověď API]
+  G --> I[upload do úložiště na pozadí]
+`} />
+
+Pause vytvoří **nový build**. Uloží se jen stránky paměti zapsané od probuzení a bloky disku zapsané do overlaye; nové hlavičky pro všechno ostatní ukazují na rodičovské buildy. Odpověď odchází, jakmile je snapshot v cache šablon nodu, takže probuzení na stejném nodu nic nestahuje. Upload do objektového úložiště běží na pozadí (20 minut na pokus, celkem dvě hodiny) a rodičovské buildy vždycky dorazí dřív než jejich potomci.
+
+## Checkpoint
+
+Checkpoint je pause, po které hned následuje probuzení nového buildu. Sandbox běží dál a API ho může později probudit z toho okamžiku.
+
+## Kill
+
+Delete zastaví úlohu životního cyklu, ta ukončí Firecracker, zastaví paměťový server, odpojí NBD zařízení, vrátí síťový slot (po 3 s, stejně jako Go), smaže cgroupu a pracovní soubory.

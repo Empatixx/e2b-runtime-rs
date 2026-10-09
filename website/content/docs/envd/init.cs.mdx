@@ -1,0 +1,32 @@
+---
+title: Init
+description: Jak orchestrator nastavuje envd po každém vytvoření a probuzení.
+---
+
+Sandbox vzniká ze snapshotu, takže envd v něm se probudí pořád nastavený pro toho, kdo šablonu stavěl. Hned po každém create nebo resume proto orchestrator zavolá **`POST /init`** a řekne envd o nové relaci.
+
+```json
+{
+  "envVars": { "MY_KEY": "value" },
+  "accessToken": "…",
+  "timestamp": "2026-10-09T12:00:00Z",
+  "defaultUser": "user",
+  "defaultWorkdir": "/home/user",
+  "hyperloopIP": "192.0.2.1",
+  "caBundle": "-----BEGIN CERTIFICATE-----…",
+  "volumeMounts": [{ "nfs_target": "10.0.0.1:/data", "path": "/mnt/data" }],
+  "lifecycleID": "…"
+}
+```
+
+## Co s tím envd udělá
+
+1. **Hodiny**: nastaví čas hosta podle `timestamp`, protože probuzená VM se probudí s časem, kdy byla uspaná. Požadavek se starším časem než poslední se ignoruje, takže opakování nemůže vrátit čas zpátky.
+2. **Prostředí**: uloží `envVars` pro všechny procesy spuštěné potom.
+3. **Bezpečnost**: uloží access token, který od teď budou chráněné routy vyžadovat.
+4. **Výchozí hodnoty**: uživatel a pracovní složka, které se použijí, když je požadavek neuvede.
+5. **Certifikáty**: nainstaluje `caBundle` do systémového úložiště důvěryhodných certifikátů, aby sandbox věřil vlastní proxy.
+6. **Svazky**: připojí uvedené NFS svazky.
+7. **Metadata**: přečte identitu sandboxu z Firecracker **MMDS** (metadata služba na `169.254.169.254`) a zapíše ji do `/run/e2b/`.
+
+Orchestrator `/init` opakuje, dokud neuspěje nebo nevyprší jeho lhůta, se stejnými timeouty jako Go (feature flagy `envd-timeout-milliseconds` a `envd-init-request-timeout-milliseconds`).
