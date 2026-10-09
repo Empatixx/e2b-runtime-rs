@@ -5,11 +5,15 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::storage::backend::aws::AwsDefaults;
+
 const SERVICE: &str = "ecr";
 const TARGET: &str = "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken";
 const CONTENT_TYPE: &str = "application/x-amz-json-1.1";
 const BODY: &str = "{}";
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
+const MISSING_REGION: &str = "failed to resolve service endpoint, an AWS region is required, but was not found";
+const CREDENTIALS_REFRESH: &str = "get identity: get credentials: failed to refresh cached credentials";
 const REDACTED: &str = "<redacted>";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -80,16 +84,30 @@ struct SignedRequest {
 }
 
 impl AwsCredentials {
-    pub fn from_env() -> Self {
-        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-        Self {
-            access_key_id: var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
-            secret_access_key: var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-            session_token: var("AWS_SESSION_TOKEN"),
-            region: var("AWS_REGION")
-                .or_else(|| var("AWS_DEFAULT_REGION"))
-                .unwrap_or_default(),
+    pub async fn default_chain_basic_auth() -> Result<BasicCredentials, TokenError> {
+        Self::from_default_chain().await?.ecr_basic_auth().await
+    }
+
+    async fn from_default_chain() -> Result<Self, TokenError> {
+        let defaults = AwsDefaults::load().await;
+        let region = defaults.region().unwrap_or_default();
+        match region.is_empty() {
+            true => Err(TokenError::Request(operation_error(MISSING_REGION))),
+            false => Self::resolved(&defaults, region).await,
         }
+    }
+
+    async fn resolved(defaults: &AwsDefaults, region: String) -> Result<Self, TokenError> {
+        defaults
+            .credentials()
+            .await
+            .map(|credentials| Self {
+                access_key_id: credentials.access_key_id().to_owned(),
+                secret_access_key: credentials.secret_access_key().to_owned(),
+                session_token: credentials.session_token().map(str::to_owned),
+                region,
+            })
+            .map_err(|e| TokenError::Request(operation_error(&format!("{CREDENTIALS_REFRESH}, {e}"))))
     }
 
     pub async fn ecr_basic_auth(&self) -> Result<BasicCredentials, TokenError> {
@@ -109,14 +127,12 @@ impl AwsCredentials {
 
     async fn authorization_token(&self) -> Result<String, TokenError> {
         if self.region.is_empty() {
-            return Err(TokenError::Request(operation_error(
-                "failed to resolve service endpoint, an AWS region is required, but was not found",
-            )));
+            return Err(TokenError::Request(operation_error(MISSING_REGION)));
         }
         if self.access_key_id.is_empty() || self.secret_access_key.is_empty() {
-            return Err(TokenError::Request(operation_error(
-                "get identity: get credentials: failed to refresh cached credentials, static credentials are empty",
-            )));
+            return Err(TokenError::Request(operation_error(&format!(
+                "{CREDENTIALS_REFRESH}, static credentials are empty"
+            ))));
         }
         let signed = self.sign(Utc::now());
         let request = signed

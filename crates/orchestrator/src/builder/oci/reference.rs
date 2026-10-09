@@ -24,6 +24,62 @@ pub struct ImageReference {
     pub identifier: Identifier,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repository {
+    pub registry: String,
+    pub name: String,
+}
+
+impl Repository {
+    pub fn parse_strict(text: &str) -> Result<Self, String> {
+        if text.is_empty() {
+            return Err("a repository name must be specified".to_owned());
+        }
+        let (registry, name) = split_registry(text);
+        check_repository(name)?;
+        let registry = strict_registry(registry)?;
+        match !name.contains('/') && registry == DEFAULT_REGISTRY {
+            true => Err("strict validation requires the full repository path (missing 'library')".to_owned()),
+            false => Ok(Self {
+                registry,
+                name: name.to_owned(),
+            }),
+        }
+    }
+}
+
+fn split_registry(text: &str) -> (&str, &str) {
+    match text.split_once('/') {
+        Some((first, rest)) if first == "localhost" || first.contains(['.', ':']) => (first, rest),
+        _ => ("", text),
+    }
+}
+
+fn check_repository(name: &str) -> Result<(), String> {
+    let length = name.chars().count();
+    match (
+        (2..=255).contains(&length),
+        name.chars().all(|c| REPOSITORY_CHARS.contains(c)),
+    ) {
+        (false, _) => Err(format!(
+            "repository must be between 2 and 255 characters in length: {name}"
+        )),
+        (_, false) => Err(format!(
+            "repository can only contain the characters `{REPOSITORY_CHARS}`: {name}"
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn strict_registry(name: &str) -> Result<String, String> {
+    match (name, valid_registry(name)) {
+        ("", _) => Err("strict validation requires the registry to be explicitly defined".to_owned()),
+        (name, false) => Err(format!("registries must be valid RFC 3986 URI authorities: {name}")),
+        (DEFAULT_REGISTRY_ALIAS, true) => Ok(DEFAULT_REGISTRY.to_owned()),
+        (name, true) => Ok(name.to_owned()),
+    }
+}
+
 impl ImageReference {
     pub fn parse(text: &str) -> Result<Self, String> {
         parse_tag(text)
@@ -221,6 +277,44 @@ mod tests {
                 format!("could not parse reference: {bad}"),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn strict_repositories_need_a_registry_and_report_go_texts() {
+        let repository = Repository::parse_strict("reg.azurecr.io/team/app").unwrap();
+        assert_eq!(
+            (repository.registry.as_str(), repository.name.as_str()),
+            ("reg.azurecr.io", "team/app")
+        );
+        assert_eq!(
+            Repository::parse_strict("docker.io/a/b").unwrap().registry,
+            "index.docker.io"
+        );
+        for (text, error) in [
+            ("", "a repository name must be specified"),
+            (
+                "team/app",
+                "strict validation requires the registry to be explicitly defined",
+            ),
+            (
+                "reg.azurecr.io/AB",
+                "repository can only contain the characters `abcdefghijklmnopqrstuvwxyz0123456789_-./`: AB",
+            ),
+            (
+                "reg.azurecr.io/a",
+                "repository must be between 2 and 255 characters in length: a",
+            ),
+            (
+                "docker.io/app",
+                "strict validation requires the full repository path (missing 'library')",
+            ),
+            (
+                "reg.io:x/a/b",
+                "registries must be valid RFC 3986 URI authorities: reg.io:x",
+            ),
+        ] {
+            assert_eq!(Repository::parse_strict(text).unwrap_err(), error, "{text}");
         }
     }
 

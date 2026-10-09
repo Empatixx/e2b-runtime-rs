@@ -1,3 +1,7 @@
+pub mod aws;
+pub mod azure;
+mod credential_cache;
+pub mod gcs;
 mod providers;
 
 use std::collections::{BTreeMap, HashMap};
@@ -11,7 +15,6 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use hyper::Method;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
-use object_store::azure::MicrosoftAzure;
 use object_store::buffered::BufWriter;
 use object_store::gcp::GoogleCloudStorage;
 use object_store::local::LocalFileSystem;
@@ -26,7 +29,8 @@ use tokio::io::AsyncWriteExt;
 use super::header::Header;
 use super::local_upload::UploadSigner;
 use super::spec::{Provider, StorageSpec};
-use providers::AzureEnv;
+use azure::{AzureBackend, AzureEnv, AzureSigner};
+use gcs::ServiceAccountSigner;
 
 const AZURE_BLOB_TYPE_HEADER: &str = "x-ms-blob-type";
 const AZURE_BLOCK_BLOB: &str = "BlockBlob";
@@ -81,8 +85,8 @@ enum Signing {
         upload: Option<UploadSigner>,
     },
     S3(Arc<AmazonS3>),
-    Gcs(Arc<GoogleCloudStorage>),
-    Azure(Arc<MicrosoftAzure>),
+    Gcs(ServiceAccountSigner),
+    Azure(AzureSigner),
 }
 
 impl Storage {
@@ -93,18 +97,30 @@ impl Storage {
     pub fn open(spec: &StorageSpec, upload: Option<UploadSigner>) -> Result<Self, String> {
         match spec.provider {
             Provider::Local => Self::local_with(Path::new(&spec.base_path), upload),
-            Provider::Aws => Self::s3(spec, AmazonS3Builder::from_env()),
-            Provider::Gcp => providers::gcs(spec, std::env::var("GOOGLE_SERVICE_ACCOUNT_BASE64").ok().as_deref())
-                .map(|store| Self::remote(Arc::new(store), Signing::Gcs)),
-            Provider::Azure => providers::azure(
-                spec,
-                AzureEnv {
-                    connection_string: std::env::var("AZURE_STORAGE_CONNECTION_STRING").ok().as_deref(),
-                    account_name: std::env::var("AZURE_STORAGE_ACCOUNT_NAME").ok().as_deref(),
-                },
-            )
-            .map(|store| Self::remote(Arc::new(store), Signing::Azure)),
+            Provider::Aws => Self::s3(spec, providers::default_s3_builder(spec)),
+            Provider::Gcp => providers::gcs(spec).map(|store| Self::gcs(spec, store)),
+            Provider::Azure => Self::azure(spec),
         }
+    }
+
+    fn azure(spec: &StorageSpec) -> Result<Self, String> {
+        let env = |name: &str| std::env::var(name).ok();
+        let connection_string = env("AZURE_STORAGE_CONNECTION_STRING");
+        let account_name = env("AZURE_STORAGE_ACCOUNT_NAME");
+        let account_key = env("AZURE_STORAGE_ACCOUNT_KEY");
+        azure::open(
+            spec,
+            AzureEnv {
+                connection_string: connection_string.as_deref(),
+                account_name: account_name.as_deref(),
+                account_key: account_key.as_deref(),
+            },
+        )
+        .map(Self::from_azure)
+    }
+
+    fn from_azure(backend: AzureBackend) -> Self {
+        Self::with_signing(backend.store, Signing::Azure(backend.signer))
     }
 
     pub fn s3(spec: &StorageSpec, builder: AmazonS3Builder) -> Result<Self, String> {
@@ -118,20 +134,38 @@ impl Storage {
             bucket: "c".to_owned(),
             ..StorageSpec::local("")
         };
-        providers::azure(
+        azure::open(
             &spec,
             AzureEnv {
                 connection_string: Some("AccountName=account;AccountKey=a2V5"),
                 account_name: None,
+                account_key: None,
             },
         )
-        .map(|store| Self::remote(Arc::new(store), Signing::Azure))
+        .map(Self::from_azure)
         .unwrap()
     }
 
     #[cfg(test)]
     pub fn gcs_for_test(store: GoogleCloudStorage) -> Self {
-        Self::remote(Arc::new(store), Signing::Gcs)
+        let spec = StorageSpec {
+            provider: Provider::Gcp,
+            bucket: "bucket".to_owned(),
+            ..StorageSpec::local("")
+        };
+        Self::gcs(&spec, store)
+    }
+
+    fn gcs(spec: &StorageSpec, store: GoogleCloudStorage) -> Self {
+        let signer = ServiceAccountSigner::from_env(&spec.bucket);
+        Self::with_signing(store, Signing::Gcs(signer))
+    }
+
+    fn with_signing(store: impl ObjectStore, signing: Signing) -> Self {
+        Self {
+            store: Arc::new(store),
+            signing,
+        }
     }
 
     fn remote<T: ObjectStore>(store: Arc<T>, signing: impl FnOnce(Arc<T>) -> Signing) -> Self {
@@ -373,21 +407,14 @@ impl Storage {
             Signing::S3(store) => sign(store.as_ref(), path, expires_in)
                 .await
                 .map_err(|e| format!("failed to presign PUT URL: {e}")),
-            Signing::Gcs(store) => sign(store.as_ref(), path, expires_in)
-                .await
-                .map_err(|e| format!("failed to create signed URL for GCS object ({path}): {e}")),
-            Signing::Azure(store) => sign(store.as_ref(), path, expires_in)
-                .await
-                .map(|url| UploadUrl {
-                    headers: HashMap::from([(AZURE_BLOB_TYPE_HEADER.to_owned(), AZURE_BLOCK_BLOB.to_owned())]),
-                    ..url
-                })
-                .map_err(|e| {
-                    format!(
-                        "failed to sign Azure upload SAS for {}: {e}",
-                        crate::go_strconv::quote(path)
-                    )
-                }),
+            Signing::Gcs(signer) => signer.upload_url(path, expires_in).map(|url| UploadUrl {
+                url,
+                headers: HashMap::new(),
+            }),
+            Signing::Azure(signer) => signer.upload_url(path, expires_in).await.map(|url| UploadUrl {
+                url,
+                headers: HashMap::from([(AZURE_BLOB_TYPE_HEADER.to_owned(), AZURE_BLOCK_BLOB.to_owned())]),
+            }),
         }
     }
 

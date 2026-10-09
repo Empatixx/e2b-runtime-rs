@@ -5,12 +5,14 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE;
 use serde::Deserialize;
 
+use super::acr::AcrAuthenticator;
 use super::auth::{auth_option, basic};
 use super::ecr::{AwsCredentials, BasicCredentials, TokenError};
-use super::reference::ImageReference;
+use super::reference::{ImageReference, Repository};
 use super::registry::{Descriptor, ImageManifest, Platform, RegistryError, RegistrySession};
 use crate::builder::config::BuilderConfig;
 use crate::proto::FromImageRegistry;
+use crate::storage::backend::azure::default_credential::DefaultAzureCredential;
 
 const GCP_PROXY_USER: &str = "_json_key_base64";
 const LINUX: &str = "linux";
@@ -18,8 +20,17 @@ const LINUX: &str = "linux";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockerHubProxy {
     Noop,
-    Gcp { url: String, credentials: BasicCredentials },
-    Aws { url: String },
+    Gcp {
+        url: String,
+        credentials: BasicCredentials,
+    },
+    Aws {
+        url: String,
+    },
+    Azure {
+        url: String,
+        authenticator: AcrAuthenticator,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -76,11 +87,33 @@ impl DockerHubProxy {
                 .map(|credentials| DockerHubProxy::Gcp { url, credentials })
                 .map_err(|e| format!("error getting auth token: {e}")),
             "AWS_ECR" => Ok(DockerHubProxy::Aws { url }),
-            "AZURE_ACR" => Err("the AZURE_ACR dockerhub remote repository is not ported".to_owned()),
+            "AZURE_ACR" => azure_proxy(url),
             "Local" => Ok(DockerHubProxy::Noop),
             other => Err(format!("unknown dockerhub remote repository provider: {other}")),
         }
     }
+}
+
+fn azure_proxy(url: String) -> Result<DockerHubProxy, String> {
+    if url.contains("://") {
+        return Err(format!(
+            "invalid Azure remote repository URL {}: want registry.host/repository without a scheme",
+            crate::go_strconv::quote(&url)
+        ));
+    }
+    let repository = Repository::parse_strict(&url).map_err(|e| {
+        format!(
+            "invalid Azure remote repository URL {} (want registry.host/repository): {e}",
+            crate::go_strconv::quote(&url)
+        )
+    })?;
+    let credential = DefaultAzureCredential::new()
+        .map(Arc::new)
+        .map_err(|e| format!("failed to create Azure default credential: {e}"))?;
+    Ok(DockerHubProxy::Azure {
+        url,
+        authenticator: AcrAuthenticator::new(&repository.registry, credential),
+    })
 }
 
 fn gcp_credentials() -> Result<BasicCredentials, String> {
@@ -148,11 +181,13 @@ impl Puller {
     ) -> Result<(RegistrySession, ImageManifest), RegistryError> {
         let (url, credentials) = match &self.proxy {
             DockerHubProxy::Noop => return self.pull(reference, None).await,
+            DockerHubProxy::Azure { url, authenticator } => {
+                return self.through_acr(reference, url, authenticator).await;
+            }
             DockerHubProxy::Gcp { url, credentials } => (url, credentials.clone()),
             DockerHubProxy::Aws { url } => (
                 url,
-                AwsCredentials::from_env()
-                    .ecr_basic_auth()
+                AwsCredentials::default_chain_basic_auth()
                     .await
                     .map_err(|e| RegistryError::Other(format!("error getting auth token: {}", proxy_token_error(e))))?,
             ),
@@ -160,6 +195,36 @@ impl Puller {
         let proxied = ImageReference::parse(&format!("{url}/{}", reference.without_registry()))
             .map_err(|e| RegistryError::Other(format!("invalid image reference: {e}")))?;
         self.pull(&proxied, Some(credentials)).await
+    }
+
+    async fn through_acr(
+        &self,
+        reference: &ImageReference,
+        url: &str,
+        authenticator: &AcrAuthenticator,
+    ) -> Result<(RegistrySession, ImageManifest), RegistryError> {
+        let proxied = ImageReference::parse(&format!("{url}/{}", reference.without_registry()))
+            .map_err(|e| RegistryError::Other(format!("invalid image reference: {e}")))?;
+        let first = self.pull_with_acr(&proxied, authenticator).await;
+        match first {
+            Err(RegistryError::Transport { status: 401 | 403, .. }) => {
+                authenticator.invalidate();
+                self.pull_with_acr(&proxied, authenticator).await
+            }
+            other => other,
+        }
+    }
+
+    async fn pull_with_acr(
+        &self,
+        reference: &ImageReference,
+        authenticator: &AcrAuthenticator,
+    ) -> Result<(RegistrySession, ImageManifest), RegistryError> {
+        let credentials = authenticator
+            .authorization()
+            .await
+            .map_err(|e| RegistryError::Other(format!("error pulling image: {e}")))?;
+        self.pull(reference, Some(credentials)).await
     }
 
     async fn pull(
@@ -333,6 +398,18 @@ mod tests {
                 url: "1.dkr.ecr".to_owned()
             })
         );
+        assert!(matches!(
+            DockerHubProxy::from_config(&config("AZURE_ACR", "reg.azurecr.io/team")),
+            Ok(DockerHubProxy::Azure { url, .. }) if url == "reg.azurecr.io/team"
+        ));
+        assert_eq!(
+            DockerHubProxy::from_config(&config("AZURE_ACR", "https://reg.azurecr.io/team")),
+            Err("invalid Azure remote repository URL \"https://reg.azurecr.io/team\": want registry.host/repository without a scheme".to_owned())
+        );
+        assert_eq!(
+            DockerHubProxy::from_config(&config("AZURE_ACR", "team/app")),
+            Err("invalid Azure remote repository URL \"team/app\" (want registry.host/repository): strict validation requires the registry to be explicitly defined".to_owned())
+        );
         assert_eq!(
             DockerHubProxy::from_config(&config("Nope", "x")),
             Err("unknown dockerhub remote repository provider: Nope".to_owned())
@@ -370,28 +447,41 @@ mod tests {
         }
 
         pub async fn serve(arch: &'static str) -> String {
+            serve_accepting(arch, CREDENTIALS.to_owned()).await
+        }
+
+        pub fn basic_header(username: &str, password: &str) -> String {
+            use base64::Engine;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+            )
+        }
+
+        pub async fn serve_accepting(arch: &'static str, accepted: String) -> String {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let served = image(arch);
             let blobs = served.clone();
+            let (for_ping, for_manifest, for_blob) = (accepted.clone(), accepted.clone(), accepted);
             let router = Router::new()
-                .route("/v2/", get(ping))
+                .route("/v2/", get(move |headers| ping(headers, for_ping.clone())))
                 .route(
                     "/v2/test/image/manifests/{reference}",
-                    get(move |headers, path| manifest(headers, path, served.clone())),
+                    get(move |headers, path| manifest(headers, path, served.clone(), for_manifest.clone())),
                 )
                 .route(
                     "/v2/test/image/blobs/{digest}",
-                    get(move |headers, path| blob(headers, path, blobs.clone())),
+                    get(move |headers, path| blob(headers, path, blobs.clone(), for_blob.clone())),
                 );
             tokio::spawn(async move { axum::serve(listener, router).await });
             address.to_string()
         }
 
-        fn authorized(headers: &HeaderMap) -> bool {
+        fn authorized(headers: &HeaderMap, accepted: &str) -> bool {
             headers
                 .get(header::AUTHORIZATION)
-                .is_some_and(|value| value == CREDENTIALS)
+                .is_some_and(|value| value == accepted)
         }
 
         fn unauthorized() -> Response {
@@ -403,15 +493,20 @@ mod tests {
                 .into_response()
         }
 
-        async fn ping(headers: HeaderMap) -> Response {
-            match authorized(&headers) {
+        async fn ping(headers: HeaderMap, accepted: String) -> Response {
+            match authorized(&headers, &accepted) {
                 true => StatusCode::OK.into_response(),
                 false => unauthorized(),
             }
         }
 
-        async fn manifest(headers: HeaderMap, Path(reference): Path<String>, image: Image) -> Response {
-            if !authorized(&headers) {
+        async fn manifest(
+            headers: HeaderMap,
+            Path(reference): Path<String>,
+            image: Image,
+            accepted: String,
+        ) -> Response {
+            if !authorized(&headers, &accepted) {
                 return unauthorized();
             }
             let index = format!(
@@ -438,8 +533,11 @@ mod tests {
             }
         }
 
-        async fn blob(headers: HeaderMap, Path(digest): Path<String>, image: Image) -> Response {
-            match (authorized(&headers), digest == digest_of(image.config.as_bytes())) {
+        async fn blob(headers: HeaderMap, Path(digest): Path<String>, image: Image, accepted: String) -> Response {
+            match (
+                authorized(&headers, &accepted),
+                digest == digest_of(image.config.as_bytes()),
+            ) {
                 (false, _) => unauthorized(),
                 (true, true) => image.config.into_response(),
                 (true, false) => LAYER.to_vec().into_response(),
@@ -498,6 +596,52 @@ mod tests {
             teapot.err().unwrap(),
             format!("failed to pull image '{address}/test/image:teapot': registry returned status code 418")
         );
+    }
+
+    async fn exchange_server(tokens: [&'static str; 2]) -> String {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = std::sync::Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                crate::storage::backend::azure::testing::read_request(&mut connection).await;
+                let token = tokens[served.fetch_add(1, Ordering::SeqCst).min(1)];
+                let body = format!(r#"{{"refresh_token":"{token}"}}"#);
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                connection.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn acr_proxy_retries_once_with_a_fresh_token_after_an_unauthorized_pull() {
+        let registry = fake_registry::serve_accepting(
+            "amd64",
+            fake_registry::basic_header("00000000-0000-0000-0000-000000000000", "fresh"),
+        )
+        .await;
+        let exchange = exchange_server(["dead", "fresh"]).await;
+        let authenticator = AcrAuthenticator::with_base_url(
+            "reg.azurecr.io",
+            exchange,
+            std::sync::Arc::new(DefaultAzureCredential::with_static_token("aad")),
+        );
+        let mut puller = puller("amd64");
+        puller.proxy = DockerHubProxy::Azure {
+            url: registry,
+            authenticator,
+        };
+
+        let image = puller.get_public_image("test/image:latest", None).await.unwrap();
+
+        assert_eq!(image.layers().len(), 1);
     }
 
     #[tokio::test]
