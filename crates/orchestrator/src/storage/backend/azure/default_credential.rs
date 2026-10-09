@@ -10,7 +10,7 @@ use super::aad::{Authority, ClientKind};
 use super::azcore;
 use super::client_certificate::{ClientCertificate, ClientCertificateCredential};
 use super::client_secret::ClientSecretCredential;
-use super::managed_identity::{ManagedIdentitySettings, ManagedIdentitySource};
+use super::managed_identity::{Identity, ManagedIdentitySettings, ManagedIdentitySource};
 use super::msal::CacheKey;
 use super::powershell::PowerShellCredential;
 use super::tenant::TenantPolicy;
@@ -207,7 +207,7 @@ fn password_credential(
 
 fn managed_identity_credential(chained: bool) -> Result<Arc<dyn TokenSource>, String> {
     ManagedIdentitySource::new(ManagedIdentitySettings {
-        client_id: variable(CLIENT_ENV),
+        identity: Identity::from_client_id_variable(std::env::var(CLIENT_ENV).ok()),
         chained,
         env: &variable,
     })

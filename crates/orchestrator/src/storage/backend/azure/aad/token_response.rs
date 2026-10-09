@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::super::token_source::BearerToken;
 
+const LONG_LIVED: Duration = Duration::from_secs(2 * 60 * 60);
 const EXPIRES_ON_FORMATS: [&str; 2] = ["%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"];
 
 pub struct Grant {
@@ -59,6 +60,19 @@ pub fn parse(body: &str, requested_scope: &str) -> Result<Grant, String> {
             refresh_token: Some(decoded.raw.refresh_token).filter(|token| !token.is_empty()),
         }),
     }
+}
+
+pub fn parse_managed_identity(body: &str) -> Result<BearerToken, String> {
+    let decoded = decode(body).map_err(|e| format!("error parsing the json error: {e}"))?;
+    let lifetime = decoded.expires_at.duration_since(SystemTime::now()).unwrap_or_default();
+    let refresh_on = decoded
+        .refresh_on
+        .or_else(|| (lifetime > LONG_LIVED).then(|| SystemTime::now() + lifetime / 2));
+    Ok(BearerToken {
+        secret: decoded.raw.access_token,
+        expires_at: decoded.expires_at,
+        refresh_on,
+    })
 }
 
 struct Decoded {
@@ -181,6 +195,20 @@ mod tests {
         assert_eq!(unix_number.token.expires_at, unix(4_000_000_000));
         assert_eq!(slashed.token.expires_at, dashed.token.expires_at);
         assert!(rfc.token.expires_at > unix(4_000_000_000));
+    }
+
+    #[test]
+    fn managed_identity_tokens_are_not_validated_and_refresh_at_half_of_a_long_lifetime() {
+        let long = parse_managed_identity(r#"{"expires_in":36000}"#).unwrap();
+        let short = parse_managed_identity(r#"{"access_token":"a","expires_in":3600}"#).unwrap();
+
+        assert_eq!(long.secret, "");
+        assert!(long.refresh_on.unwrap() > SystemTime::now() + Duration::from_secs(17_000));
+        assert_eq!(short.refresh_on, None);
+        assert_eq!(
+            parse_managed_identity("{}").err().unwrap(),
+            "error parsing the json error: expires_in and expires_on are both missing or invalid"
+        );
     }
 
     #[test]

@@ -3,14 +3,12 @@ use std::time::Duration;
 use crate::go_url::escape::{Mode, unescape};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 
+use super::retry::{self, RetryPolicy};
 use super::token_source::SourceError;
 
 const SEPARATOR: &str = "--------------------------------------------------------------------------------";
-const RETRIES: u32 = 3;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const MSAL_TIMEOUT: Duration = Duration::from_secs(30);
-const RETRY_DELAY: Duration = Duration::from_millis(800);
-const RETRY_STATUSES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 const TROUBLESHOOT: &str = "To troubleshoot, visit https://aka.ms/azsdk/go/identity/troubleshoot";
 const NO_BODY: &str = "Response contained no body";
 const NO_ERROR_CODE: &str = "ERROR CODE UNAVAILABLE";
@@ -27,19 +25,9 @@ pub fn msal_client() -> Client {
 }
 
 pub async fn send(request: RequestBuilder) -> Result<Response, String> {
-    let mut delay = RETRY_DELAY;
-    for _ in 0..RETRIES {
-        let Some(attempt) = request.try_clone() else {
-            break;
-        };
-        match attempt.send().await {
-            Ok(response) if !RETRY_STATUSES.contains(&response.status().as_u16()) => return Ok(response),
-            _ => {}
-        }
-        tokio::time::sleep(delay).await;
-        delay *= 2;
-    }
-    request.send().await.map_err(|e| e.to_string())
+    retry::send(&RetryPolicy::standard(), request)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub struct ResponseError<'a> {

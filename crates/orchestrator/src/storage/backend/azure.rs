@@ -9,6 +9,7 @@ mod der;
 mod managed_identity;
 mod msal;
 mod powershell;
+mod retry;
 mod sas;
 mod tenant;
 #[cfg(test)]

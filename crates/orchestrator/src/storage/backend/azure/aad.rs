@@ -11,7 +11,7 @@ use crate::go_url::GoUrl;
 pub use endpoints::Endpoints;
 use endpoints::Resolver;
 use region::Region;
-pub use token_response::Grant;
+pub use token_response::{Grant, parse_managed_identity};
 
 const AUTHORITY_HOST_ENV: &str = "AZURE_AUTHORITY_HOST";
 const REGIONAL_AUTHORITY_ENV: &str = "AZURE_REGIONAL_AUTHORITY_NAME";
