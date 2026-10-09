@@ -44,11 +44,7 @@ impl UploadSigner {
         mac.update(path.as_bytes());
         mac.update(&[0]);
         mac.update(expires.to_string().as_bytes());
-        mac.finalize()
-            .into_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        hex::encode(mac.finalize().into_bytes())
     }
 }
 

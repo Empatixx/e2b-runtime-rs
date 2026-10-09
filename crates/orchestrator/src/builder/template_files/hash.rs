@@ -12,7 +12,7 @@ pub fn files_hash() -> String {
     symlinks.sort();
     let digest = symlinks.iter().fold(
         templates.iter().fold(Sha256::new(), |sha, (name, source)| {
-            sha.chain_update(format!("{name}\0{}\0", hex(source.as_bytes())))
+            sha.chain_update(format!("{name}\0{}\0", hex::encode(source)))
         }),
         |sha, (name, target)| sha.chain_update(format!("{name}\0{target}\0")),
     );
@@ -25,10 +25,6 @@ pub fn distro_fingerprint() -> String {
 
 pub fn provision_version() -> String {
     hash_keys(PROVISION_SCRIPT, [files_hash().as_str(), distro_fingerprint().as_str()])
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
