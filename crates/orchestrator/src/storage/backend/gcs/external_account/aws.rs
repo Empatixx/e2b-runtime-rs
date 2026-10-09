@@ -70,9 +70,9 @@ impl AwsSubject {
     }
 
     pub async fn token(&self) -> Result<String, String> {
-        let headers = self.metadata_headers().await?;
-        let keys = self.security_credentials(&headers).await?;
-        let region = self.region(&headers).await?;
+        let session_token = self.session_token().await?;
+        let keys = self.security_credentials(session_token.as_deref()).await?;
+        let region = self.region(session_token.as_deref()).await?;
         let url = self.verification_url.replacen("{region}", &region, 1);
         signed_subject_token(&url, &self.target_resource, &region, &keys, Utc::now())
     }
@@ -89,10 +89,10 @@ impl AwsSubject {
         })
     }
 
-    async fn metadata_headers(&self) -> Result<Vec<(&'static str, String)>, String> {
+    async fn session_token(&self) -> Result<Option<String>, String> {
         let uses_metadata = self.region_from_env().is_none() || self.keys_from_env().is_none();
         if !uses_metadata || self.session_token_url.is_empty() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let response = self
             .client
@@ -104,15 +104,15 @@ impl AwsSubject {
         let status = response.status();
         let body = response.text().await.map_err(|e| e.to_string())?;
         match (status.as_u16(), body.is_empty()) {
-            (200, true) => Ok(Vec::new()),
-            (200, false) => Ok(vec![(SESSION_TOKEN_HEADER, body)]),
+            (200, true) => Ok(None),
+            (200, false) => Ok(Some(body)),
             _ => Err(format!("credentials: unable to retrieve AWS session token: {body}")),
         }
     }
 
-    async fn get(&self, url: &str, headers: &[(&'static str, String)]) -> Result<(u16, String), String> {
-        let request = headers.iter().fold(self.client.get(url), |request, (name, value)| {
-            request.header(*name, value)
+    async fn get(&self, url: &str, session_token: Option<&str>) -> Result<(u16, String), String> {
+        let request = session_token.iter().fold(self.client.get(url), |request, token| {
+            request.header(SESSION_TOKEN_HEADER, *token)
         });
         let response = request.send().await.map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
@@ -120,14 +120,14 @@ impl AwsSubject {
         Ok((status, body))
     }
 
-    async fn region(&self, headers: &[(&'static str, String)]) -> Result<String, String> {
+    async fn region(&self, session_token: Option<&str>) -> Result<String, String> {
         if let Some(region) = self.region_from_env() {
             return Ok(region);
         }
         if self.region_url.is_empty() {
             return Err("credentials: unable to determine AWS region".to_owned());
         }
-        match self.get(&self.region_url, headers).await? {
+        match self.get(&self.region_url, session_token).await? {
             (200, body) => {
                 let mut zone = body;
                 zone.pop();
@@ -137,7 +137,7 @@ impl AwsSubject {
         }
     }
 
-    async fn security_credentials(&self, headers: &[(&'static str, String)]) -> Result<AwsKeys, String> {
+    async fn security_credentials(&self, session_token: Option<&str>) -> Result<AwsKeys, String> {
         if let Some(keys) = self.keys_from_env() {
             return Ok(keys);
         }
@@ -146,12 +146,12 @@ impl AwsSubject {
                 "credentials: unable to determine the AWS metadata server security credentials endpoint".to_owned(),
             );
         }
-        let role = match self.get(&self.metadata_credentials_url, headers).await? {
+        let role = match self.get(&self.metadata_credentials_url, session_token).await? {
             (200, body) => body,
             (_, body) => return Err(format!("credentials: unable to retrieve AWS role name - {body}")),
         };
         let url = format!("{}/{role}", self.metadata_credentials_url);
-        let body = match self.get(&url, headers).await? {
+        let body = match self.get(&url, session_token).await? {
             (200, body) => body,
             (_, body) => {
                 return Err(format!(
