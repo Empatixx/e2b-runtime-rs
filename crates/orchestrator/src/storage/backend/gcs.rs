@@ -7,6 +7,7 @@ mod form;
 pub mod go_json;
 mod key_errors;
 pub mod oauth2;
+pub mod private_key;
 pub mod store;
 pub mod universe;
 
@@ -14,14 +15,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use ring::rand::SystemRandom;
-use ring::signature::RSA_PKCS1_SHA256;
 use serde::Deserialize;
 
 use super::pem;
 use crate::builder::oci::ecr::base64_error;
 use crate::go_url::GoUrl;
 use crate::go_url::query::Query;
+use private_key::sign_rsa;
 
 const SERVICE_ACCOUNT_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_BASE64";
 const EMULATOR_HOST_ENV: &str = "STORAGE_EMULATOR_HOST";
@@ -139,15 +139,7 @@ fn host() -> String {
 fn sign(private_key: &str, message: &str) -> Result<String, String> {
     let der = private_key_der(private_key);
     let key = key_errors::rsa_key(&der)?;
-    let mut signature = vec![0; key.public().modulus_len()];
-    key.sign(
-        &RSA_PKCS1_SHA256,
-        &SystemRandom::new(),
-        message.as_bytes(),
-        &mut signature,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(STANDARD.encode(signature))
+    sign_rsa(&key, message.as_bytes()).map(|signature| STANDARD.encode(signature))
 }
 
 fn private_key_der(private_key: &str) -> Vec<u8> {

@@ -1,14 +1,11 @@
-use p256::pkcs8::DecodePrivateKey;
-use ring::digest::{SHA256, digest};
-use ring::rand::SystemRandom;
-use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
-
+use super::super::key_errors::parse_key_failure;
+use super::super::private_key::PrivateKey;
 use crate::storage::backend::pem;
 
-pub enum ServiceKey {
-    Rsa(RsaKeyPair),
-    P256(p256::ecdsa::SigningKey),
-    P384(p384::ecdsa::SigningKey),
+const NOT_A_SIGNER: &str = "private key is not a signer";
+
+pub struct ServiceKey {
+    key: PrivateKey,
 }
 
 impl ServiceKey {
@@ -17,70 +14,43 @@ impl ServiceKey {
             .into_iter()
             .next()
             .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der);
-        Self::pkcs8(&der)
-            .or_else(|| RsaKeyPair::from_der(&der).ok().map(Self::Rsa))
-            .or_else(|| Self::sec1(&der))
-            .ok_or_else(|| super::super::key_errors::parse_key_failure(&der))
-    }
-
-    fn pkcs8(der: &[u8]) -> Option<Self> {
-        RsaKeyPair::from_pkcs8(der)
-            .ok()
-            .map(Self::Rsa)
-            .or_else(|| p256::ecdsa::SigningKey::from_pkcs8_der(der).ok().map(Self::P256))
-            .or_else(|| p384::ecdsa::SigningKey::from_pkcs8_der(der).ok().map(Self::P384))
-    }
-
-    fn sec1(der: &[u8]) -> Option<Self> {
-        p256::SecretKey::from_sec1_der(der)
-            .ok()
-            .map(|secret| Self::P256(secret.into()))
-            .or_else(|| {
-                p384::SecretKey::from_sec1_der(der)
-                    .ok()
-                    .map(|secret| Self::P384(secret.into()))
-            })
+        let key = PrivateKey::pkcs8(&der)
+            .or_else(|| PrivateKey::pkcs1(&der))
+            .or_else(|| PrivateKey::sec1(&der))
+            .ok_or_else(|| parse_key_failure(&der))?;
+        match key.is_signer() {
+            true => Ok(Self { key }),
+            false => Err(NOT_A_SIGNER.to_owned()),
+        }
     }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, String> {
-        use p256::ecdsa::signature::hazmat::PrehashSigner;
-        let hash = digest(&SHA256, message);
-        match self {
-            Self::Rsa(key) => {
-                let mut signature = vec![0; key.public().modulus_len()];
-                key.sign(&RSA_PKCS1_SHA256, &SystemRandom::new(), message, &mut signature)
-                    .map_err(|e| e.to_string())?;
-                Ok(signature)
-            }
-            Self::P256(key) => key
-                .sign_prehash(hash.as_ref())
-                .map(|signature: p256::ecdsa::Signature| signature.to_der().as_bytes().to_vec())
-                .map_err(|e| e.to_string()),
-            Self::P384(key) => key
-                .sign_prehash(hash.as_ref())
-                .map(|signature: p384::ecdsa::Signature| signature.to_der().as_bytes().to_vec())
-                .map_err(|e| e.to_string()),
-        }
+        self.key.sign_sha256(message)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use p256::ecdsa::signature::hazmat::PrehashVerifier;
-
     use super::*;
 
     const RSA: &str = include_str!("../test_key.pem");
     const P256_SEC1: &str = include_str!("../test_ec_sec1.pem");
     const P256_PKCS8: &str = include_str!("../test_ec_pkcs8.pem");
     const P384_SEC1: &str = include_str!("../test_ec384_sec1.pem");
+    const P224_SEC1: &str = include_str!("../test_ec224_sec1.pem");
+    const P521_PKCS8: &str = include_str!("../test_ec521_pkcs8.pem");
+    const ED25519: &str = include_str!("../test_ed25519.pem");
+    const X25519: &str = include_str!("../test_x25519.pem");
 
     #[test]
-    fn every_go_key_format_parses() {
-        assert!(matches!(ServiceKey::parse(RSA).unwrap(), ServiceKey::Rsa(_)));
-        assert!(matches!(ServiceKey::parse(P256_PKCS8).unwrap(), ServiceKey::P256(_)));
-        assert!(matches!(ServiceKey::parse(P256_SEC1).unwrap(), ServiceKey::P256(_)));
-        assert!(matches!(ServiceKey::parse(P384_SEC1).unwrap(), ServiceKey::P384(_)));
+    fn every_go_key_format_parses_and_signs() {
+        for text in [RSA, P256_PKCS8, P256_SEC1, P384_SEC1, P224_SEC1, P521_PKCS8] {
+            assert!(!ServiceKey::parse(text).unwrap().sign(b"m").unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unparseable_keys_list_every_attempt() {
         assert!(
             ServiceKey::parse("nope")
                 .err()
@@ -90,17 +60,11 @@ mod tests {
     }
 
     #[test]
-    fn ec_keys_sign_the_sha256_digest_as_asn1() {
-        let key = ServiceKey::parse(P256_SEC1).unwrap();
-        let signature = key.sign(b"message").unwrap();
-
-        let ServiceKey::P256(signing) = &key else {
-            panic!("expected a P-256 key");
-        };
-        let parsed = p256::ecdsa::Signature::from_der(&signature).unwrap();
-        signing
-            .verifying_key()
-            .verify_prehash(digest(&SHA256, b"message").as_ref(), &parsed)
-            .unwrap();
+    fn ed25519_parses_but_cannot_sign_a_sha256_digest_and_x25519_is_no_signer() {
+        assert_eq!(
+            ServiceKey::parse(ED25519).unwrap().sign(b"m").unwrap_err(),
+            "ed25519: expected opts.HashFunc() zero (unhashed message, for standard Ed25519) or SHA-512 (for Ed25519ph)"
+        );
+        assert_eq!(ServiceKey::parse(X25519).err().unwrap(), NOT_A_SIGNER);
     }
 }

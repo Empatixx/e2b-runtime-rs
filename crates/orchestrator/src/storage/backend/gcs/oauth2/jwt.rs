@@ -4,14 +4,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::Client;
-use ring::rand::SystemRandom;
-use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+use rsa::RsaPrivateKey;
 use serde::Deserialize;
 
 use super::super::flows::Dialect;
 use super::super::flows::{FlowToken, TokenFlow, default_client, request_error};
 use super::super::form::UrlEncodedForm;
 use super::super::key_errors::oauth2_rsa_key;
+use super::super::private_key::sign_rsa;
 use super::super::{credsfile, go_json};
 use crate::storage::backend::pem;
 
@@ -88,19 +88,12 @@ impl JwtFlow {
             issued + LIFETIME_SECONDS
         );
         let signing_input = format!("{}.{}", URL_SAFE_NO_PAD.encode(header), URL_SAFE_NO_PAD.encode(claims));
-        let mut signature = vec![0; key.public().modulus_len()];
-        key.sign(
-            &RSA_PKCS1_SHA256,
-            &SystemRandom::new(),
-            signing_input.as_bytes(),
-            &mut signature,
-        )
-        .map_err(|e| e.to_string())?;
+        let signature = sign_rsa(&key, signing_input.as_bytes())?;
         Ok(format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature)))
     }
 }
 
-fn parse_key(private_key: &str) -> Result<RsaKeyPair, String> {
+fn parse_key(private_key: &str) -> Result<RsaPrivateKey, String> {
     let der = pem::blocks(private_key)
         .into_iter()
         .next()

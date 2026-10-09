@@ -65,12 +65,19 @@ pub fn gcs(spec: &StorageSpec) -> Result<GcsStore, String> {
     let detected = blocking::run(detect_default(profile))
         .ok_or_else(|| gcs_error("credential detection did not finish"))?
         .map_err(|e| gcs_error(&e))?;
+    let base_url = storage_base_url(&client_universe_domain());
     let default_path = gcs_client(
         spec,
         Arc::new(FlowCredentials::new(detected.flow)),
         detected.quota_project.as_deref(),
+        base_url.as_deref(),
     )?;
-    let multipart_path = gcs_client(spec, Arc::new(MultipartCredentials::new(&[CLOUD_PLATFORM_SCOPE])), None)?;
+    let multipart_path = gcs_client(
+        spec,
+        Arc::new(MultipartCredentials::new(&[CLOUD_PLATFORM_SCOPE])),
+        None,
+        base_url.as_deref(),
+    )?;
     Ok(GcsStore::new(default_path, multipart_path))
 }
 
@@ -78,19 +85,20 @@ fn gcs_client(
     spec: &StorageSpec,
     credentials: GcpCredentialProvider,
     quota_project: Option<&str>,
+    base_url: Option<&str>,
 ) -> Result<GoogleCloudStorage, String> {
     let builder = GoogleCloudStorageBuilder::new()
         .with_bucket_name(&spec.bucket)
         .with_credentials(credentials)
-        .with_client_options(client_options(quota_project)?);
-    let builder = match storage_base_url(&client_universe_domain()) {
-        Some(base_url) => builder.with_base_url(&base_url),
+        .with_client_options(client_options(quota_project, base_url)?);
+    let builder = match base_url {
+        Some(base_url) => builder.with_base_url(base_url),
         None => builder,
     };
     builder.build().map_err(|e| gcs_error(&e.to_string()))
 }
 
-fn client_options(quota_project: Option<&str>) -> Result<ClientOptions, String> {
+fn client_options(quota_project: Option<&str>, base_url: Option<&str>) -> Result<ClientOptions, String> {
     let headers = quota_project
         .map(|project| {
             HeaderValue::from_str(project)
@@ -99,7 +107,10 @@ fn client_options(quota_project: Option<&str>) -> Result<ClientOptions, String> 
         })
         .transpose()?
         .unwrap_or_default();
-    Ok(ClientOptions::new().with_default_headers(headers))
+    let plain_http = base_url.is_some_and(|url| url.starts_with("http://"));
+    Ok(ClientOptions::new()
+        .with_default_headers(headers)
+        .with_allow_http(plain_http))
 }
 
 fn gcs_error(reason: &str) -> String {
@@ -120,6 +131,50 @@ mod tests {
             use_path_style: path_style,
             ..StorageSpec::local("")
         }
+    }
+
+    fn gcs_spec() -> StorageSpec {
+        StorageSpec {
+            provider: Provider::Gcp,
+            bucket: "bucket".to_owned(),
+            ..StorageSpec::local("")
+        }
+    }
+
+    async fn request_sent_with(quota_project: Option<&str>) -> String {
+        use object_store::gcp::GcpCredential;
+        use object_store::{ObjectStoreExt, StaticCredentialProvider};
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let request = crate::storage::backend::azure::testing::read_request(&mut connection).await;
+            connection
+                .write_all(b"HTTP/1.1 404 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            request
+        });
+        let credentials = Arc::new(StaticCredentialProvider::new(GcpCredential {
+            bearer: "token".to_owned(),
+        }));
+        let client = gcs_client(&gcs_spec(), credentials, quota_project, Some(&base_url)).unwrap();
+
+        let _ = client.head(&object_store::path::Path::from("x")).await;
+
+        server.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_quota_project_rides_every_request_as_x_goog_user_project() {
+        let with = request_sent_with(Some("billing-project")).await;
+        let without = request_sent_with(None).await;
+
+        assert!(with.contains("x-goog-user-project: billing-project"), "{with}");
+        assert!(with.contains("authorization: Bearer token"), "{with}");
+        assert!(!without.contains("x-goog-user-project"), "{without}");
     }
 
     #[test]

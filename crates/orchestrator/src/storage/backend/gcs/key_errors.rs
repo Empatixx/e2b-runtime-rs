@@ -1,4 +1,6 @@
-use ring::signature::RsaKeyPair;
+use rsa::RsaPrivateKey;
+
+use super::private_key::PrivateKey;
 
 const PARAMS: &str = "{optional:false explicit:false application:false private:false defaultValue:<nil> tag:<nil> stringType:0 timeType:0 set:false omitEmpty:false}";
 const SEQUENCE: u8 = 0x30;
@@ -149,30 +151,27 @@ pub fn parse_key_failure(der: &[u8]) -> String {
     )
 }
 
-pub fn oauth2_rsa_key(der: &[u8]) -> Result<RsaKeyPair, String> {
-    RsaKeyPair::from_pkcs8(der)
-        .or_else(|_| RsaKeyPair::from_der(der))
-        .map_err(|_| match is_non_rsa_pkcs8(der) {
-            true => "private key is invalid".to_owned(),
-            false => format!(
+pub fn oauth2_rsa_key(der: &[u8]) -> Result<RsaPrivateKey, String> {
+    match PrivateKey::pkcs8(der) {
+        Some(key) => key.into_rsa().ok_or_else(|| "private key is invalid".to_owned()),
+        None => PrivateKey::pkcs1(der).and_then(PrivateKey::into_rsa).ok_or_else(|| {
+            format!(
                 "private key should be a PEM or plain PKCS1 or PKCS8; parse error: {}",
                 pkcs1_error(der)
-            ),
-        })
+            )
+        }),
+    }
 }
 
-fn is_non_rsa_pkcs8(der: &[u8]) -> bool {
-    use p256::pkcs8::DecodePrivateKey;
-    p256::SecretKey::from_pkcs8_der(der).is_ok() || p384::SecretKey::from_pkcs8_der(der).is_ok()
-}
-
-pub fn rsa_key(der: &[u8]) -> Result<RsaKeyPair, String> {
-    RsaKeyPair::from_pkcs8(der)
-        .or_else(|_| RsaKeyPair::from_der(der))
-        .map_err(|_| match shape(der) {
-            Shape::Pkcs8 => "oauth2: private key is invalid".to_owned(),
-            _ => pkcs1_error(der),
-        })
+pub fn rsa_key(der: &[u8]) -> Result<RsaPrivateKey, String> {
+    match PrivateKey::pkcs8(der) {
+        Some(key) => key
+            .into_rsa()
+            .ok_or_else(|| "oauth2: private key is invalid".to_owned()),
+        None => PrivateKey::pkcs1(der)
+            .and_then(PrivateKey::into_rsa)
+            .ok_or_else(|| pkcs1_error(der)),
+    }
 }
 
 #[cfg(test)]
