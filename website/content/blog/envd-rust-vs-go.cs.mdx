@@ -15,6 +15,68 @@ V každém E2B sandboxu běží **envd**, malý daemon, se kterým SDK mluví po
 - Na 8 CPU má envd v Rustu **vyšší nebo stejnou propustnost ve všech sedmi benchmarcích** a **nižší p99 latenci ve všech sedmi**, často několikanásobně.
 - V klidu zabírá **~6 MB RSS** (Go ~11 MB) a binárka má **6,3 MB** (Go 10,3 MB).
 
+## Výsledky na první pohled
+
+<CompareChart
+  title="Propustnost, 8 CPU"
+  unit="req/s"
+  note="delší je lepší"
+  rows={[
+    { label: 'health', rust: 361285, go: 257347 },
+    { label: 'stat', rust: 101106, go: 50669 },
+    { label: 'výpis složky (~625 položek)', rust: 1012, go: 466 },
+    { label: 'download 1 MiB', rust: 492, go: 501 },
+    { label: 'upload 1 MiB multipart', rust: 10409, go: 7080 },
+    { label: 'upload 1 MiB raw', rust: 13687, go: 9076 },
+    { label: 'spuštění procesu', rust: 6057, go: 5450 },
+  ]}
+/>
+
+<CompareChart
+  title="p99 latence, 8 CPU"
+  unit="ms"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: 'health', rust: 0.72, go: 2.34 },
+    { label: 'stat', rust: 2.3, go: 15.7 },
+    { label: 'výpis složky (~625 položek)', rust: 417, go: 785 },
+    { label: 'download 1 MiB', rust: 515, go: 1016 },
+    { label: 'upload 1 MiB multipart', rust: 25, go: 103 },
+    { label: 'upload 1 MiB raw', rust: 19, go: 67 },
+    { label: 'spuštění procesu', rust: 47, go: 59 },
+  ]}
+/>
+
+<CompareChart
+  title="Špičková paměť pod zátěží, 8 CPU"
+  unit="MB"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: 'health', rust: 9, go: 20 },
+    { label: 'stat', rust: 10, go: 60 },
+    { label: 'výpis složky (~625 položek)', rust: 105, go: 130 },
+    { label: 'download 1 MiB', rust: 116, go: 141 },
+    { label: 'upload 1 MiB multipart', rust: 59, go: 23 },
+    { label: 'upload 1 MiB raw', rust: 32, go: 24 },
+    { label: 'spuštění procesu', rust: 51, go: 126 },
+  ]}
+/>
+
+<CompareChart
+  title="Nároky v klidu"
+  unit="MB"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: 'velikost binárky', rust: 6.3, go: 10.3 },
+    { label: 'RSS po /init', rust: 6, go: 11 },
+  ]}
+/>
+
+Popisek vpravo u každého testu říká, kdo vyhrává a o kolik; `≈` znamená, že rozdíl je v rámci šumu ±10 % mezi běhy. Přesná čísla, výsledky na 2 CPU a metodika jsou níž.
+
 ## Část 1: důkaz, že se chová stejně
 
 „Přímá náhrada“ je silné tvrzení. Klient nesmí výměnu poznat, ani podle textu chyby. Testujeme to ve čtyřech vrstvách, od rychlých po realistické.

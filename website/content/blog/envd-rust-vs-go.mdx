@@ -15,6 +15,68 @@ This post covers two questions: **does it really behave the same**, and **is it 
 - On 8 CPUs, Rust envd has **higher or equal throughput in all seven benchmarks** and **lower p99 latency in all seven**, often several times lower.
 - It idles at **~6 MB RSS** (Go ~11 MB), and the binary is **6.3 MB** (Go 10.3 MB).
 
+## Results at a glance
+
+<CompareChart
+  title="Throughput, 8 CPUs"
+  unit="req/s"
+  note="longer is better"
+  rows={[
+    { label: 'health', rust: 361285, go: 257347 },
+    { label: 'stat', rust: 101106, go: 50669 },
+    { label: 'list dir (~625 entries)', rust: 1012, go: 466 },
+    { label: 'download 1 MiB', rust: 492, go: 501 },
+    { label: 'upload 1 MiB multipart', rust: 10409, go: 7080 },
+    { label: 'upload 1 MiB raw', rust: 13687, go: 9076 },
+    { label: 'process start', rust: 6057, go: 5450 },
+  ]}
+/>
+
+<CompareChart
+  title="p99 latency, 8 CPUs"
+  unit="ms"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: 'health', rust: 0.72, go: 2.34 },
+    { label: 'stat', rust: 2.3, go: 15.7 },
+    { label: 'list dir (~625 entries)', rust: 417, go: 785 },
+    { label: 'download 1 MiB', rust: 515, go: 1016 },
+    { label: 'upload 1 MiB multipart', rust: 25, go: 103 },
+    { label: 'upload 1 MiB raw', rust: 19, go: 67 },
+    { label: 'process start', rust: 47, go: 59 },
+  ]}
+/>
+
+<CompareChart
+  title="Peak memory under load, 8 CPUs"
+  unit="MB"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: 'health', rust: 9, go: 20 },
+    { label: 'stat', rust: 10, go: 60 },
+    { label: 'list dir (~625 entries)', rust: 105, go: 130 },
+    { label: 'download 1 MiB', rust: 116, go: 141 },
+    { label: 'upload 1 MiB multipart', rust: 59, go: 23 },
+    { label: 'upload 1 MiB raw', rust: 32, go: 24 },
+    { label: 'process start', rust: 51, go: 126 },
+  ]}
+/>
+
+<CompareChart
+  title="Idle footprint"
+  unit="MB"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: 'binary size', rust: 6.3, go: 10.3 },
+    { label: 'RSS after /init', rust: 6, go: 11 },
+  ]}
+/>
+
+The label on the right of each test says who wins and by how much; `≈` means the difference is within the ±10 % run-to-run noise. Exact numbers, 2-CPU results and the method follow below.
+
 ## Part 1: proving it behaves the same
 
 "Drop-in replacement" is a strong claim. A client must not notice the swap, not even in an error message. We test that in four layers, from fast to realistic.
