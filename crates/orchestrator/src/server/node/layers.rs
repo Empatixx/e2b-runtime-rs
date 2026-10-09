@@ -122,6 +122,8 @@ impl Node {
             .build_sandbox(layer.sandbox_id, layer.template_id)
             .rootfs(self.layer_overlay(&layer.source.build, &work_dir)?)
             .memfile(memfile)
+            .prefetch(layer.source.metadata.memory_prefetch().cloned())
+            .prefetch_settings(self.layer_prefetch_settings(layer))
             .use_memfd(
                 supports_memfd(layer.firecracker_version)
                     && self.runtime_flags.use_memfd(FlagContext::sandbox_runtime(

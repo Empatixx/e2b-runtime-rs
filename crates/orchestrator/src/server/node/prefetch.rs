@@ -7,7 +7,8 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use super::{Lifetime, Node, StartRequest};
+use super::layers::LayerSandbox;
+use super::{BUILD_SANDBOX_TYPE, Lifetime, Node, StartRequest};
 use crate::featureflags::{FlagContext, FlagContextBuilder};
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::memory::trace::Trace;
@@ -35,6 +36,21 @@ pub struct PausedBuild {
 impl Node {
     pub(super) fn prefetch_settings(&self, config: &SandboxConfig) -> PrefetchSettings {
         let flags = self.feature_flags.scoped(resume_contexts(config));
+        PrefetchSettings::from_flags(&flags)
+    }
+
+    pub(super) fn layer_prefetch_settings(&self, layer: &LayerSandbox) -> PrefetchSettings {
+        let sandbox = FlagContext::sandbox_runtime(
+            layer.sandbox_id,
+            layer.template_id,
+            &layer.source.metadata.template.kernel_version,
+            layer.firecracker_version,
+            "",
+            BUILD_SANDBOX_TYPE,
+        );
+        let flags = self
+            .feature_flags
+            .scoped(vec![sandbox, FlagContext::template(layer.template_id)]);
         PrefetchSettings::from_flags(&flags)
     }
 
