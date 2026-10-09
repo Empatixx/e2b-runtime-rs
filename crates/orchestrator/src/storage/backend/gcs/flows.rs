@@ -4,6 +4,7 @@ mod gdch;
 mod impersonated;
 mod response;
 mod service_account;
+mod service_key;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
