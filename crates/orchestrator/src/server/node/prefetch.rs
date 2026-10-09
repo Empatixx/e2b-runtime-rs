@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::layers::LayerSandbox;
 use super::{BUILD_SANDBOX_TYPE, Lifetime, Node, StartRequest};
+use crate::featureflags::flag_context_builder::{SetKey, SetKind};
 use crate::featureflags::{FlagContext, FlagContextBuilder};
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::memory::trace::Trace;
@@ -90,7 +91,7 @@ impl Node {
     }
 }
 
-fn sandbox_attributes(config: &SandboxConfig) -> FlagContextBuilder {
+fn sandbox_attributes(config: &SandboxConfig) -> FlagContextBuilder<SetKey<SetKind>> {
     FlagContext::builder()
         .kind("sandbox")
         .key(&config.sandbox_id)

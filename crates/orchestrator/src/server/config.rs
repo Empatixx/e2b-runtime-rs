@@ -10,7 +10,8 @@ use super::services::Services;
 use super::upload::UploadHandler;
 use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
-use crate::featureflags::{FeatureFlags, FeatureFlagsBuilder, FlagContext};
+use crate::featureflags::feature_flags_builder::{SetApiKey, SetDeploymentName};
+use crate::featureflags::{FeatureFlags, FeatureFlagsBuilder, FlagContext, LAUNCH_DARKLY_API_KEY};
 use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
 use crate::routing::redis::RedisSettings;
@@ -144,9 +145,9 @@ impl NodeConfig {
         })
     }
 
-    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder {
+    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder<SetDeploymentName<SetApiKey>> {
         FeatureFlags::builder()
-            .api_key_from_env()
+            .api_key(std::env::var(LAUNCH_DARKLY_API_KEY).unwrap_or_default())
             .deployment_name(self.domain_name.as_str())
             .context_provider(FlagContext::orchestrator(&self.node_id, commit))
             .context_provider(FlagContext::instance_group(self.instance_group_name.trim()))

@@ -67,47 +67,22 @@ pub struct FeatureFlags {
     connection: Arc<Connection>,
 }
 
-#[derive(Default)]
-pub struct FeatureFlagsBuilder {
-    api_key: String,
-    deployment_name: String,
-    service_name: String,
+#[derive(bon::Builder)]
+#[builder(builder_type = FeatureFlagsBuilder, state_mod(vis = "pub"), on(String, into))]
+pub struct FlagSettings {
+    #[builder(field)]
     context_providers: Vec<FlagContext>,
+    #[builder(field)]
     overrides: HashMap<String, Value>,
+    #[builder(default)]
+    api_key: String,
+    #[builder(default)]
+    deployment_name: String,
+    #[builder(default)]
+    service_name: String,
 }
 
-impl std::fmt::Debug for FeatureFlagsBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FeatureFlagsBuilder")
-            .field("api_key", &(!self.api_key.is_empty()).then_some("<redacted>"))
-            .field("deployment_name", &self.deployment_name)
-            .field("service_name", &self.service_name)
-            .field("context_providers", &self.context_providers)
-            .field("overrides", &self.overrides)
-            .finish()
-    }
-}
-
-impl FeatureFlagsBuilder {
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = api_key.into();
-        self
-    }
-
-    pub fn api_key_from_env(self) -> Self {
-        self.api_key(std::env::var(LAUNCH_DARKLY_API_KEY).unwrap_or_default())
-    }
-
-    pub fn deployment_name(mut self, deployment_name: impl Into<String>) -> Self {
-        self.deployment_name = deployment_name.into();
-        self
-    }
-
-    pub fn service_name(mut self, service_name: impl Into<String>) -> Self {
-        self.service_name = service_name.into();
-        self
-    }
-
+impl<S: feature_flags_builder::State> FeatureFlagsBuilder<S> {
     pub fn context_provider(mut self, context: FlagContext) -> Self {
         self.context_providers.push(context);
         self
@@ -117,7 +92,19 @@ impl FeatureFlagsBuilder {
         self.overrides.insert(key.to_owned(), value.into());
         self
     }
+}
 
+impl<S: feature_flags_builder::IsComplete> FeatureFlagsBuilder<S> {
+    pub async fn connect(self) -> Result<FeatureFlags, String> {
+        self.build().connect().await
+    }
+
+    pub fn offline(self) -> FeatureFlags {
+        self.build().offline()
+    }
+}
+
+impl FlagSettings {
     pub async fn connect(self) -> Result<FeatureFlags, String> {
         match self.api_key.as_str() {
             "" => Ok(self.offline()),
@@ -169,7 +156,7 @@ async fn start(api_key: &str) -> Result<Client, String> {
 
 impl FeatureFlags {
     pub fn builder() -> FeatureFlagsBuilder {
-        FeatureFlagsBuilder::default()
+        FlagSettings::builder()
     }
 
     pub fn offline() -> Self {

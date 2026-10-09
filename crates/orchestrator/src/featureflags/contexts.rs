@@ -5,58 +5,24 @@ use launchdarkly_server_sdk::{Context, ContextBuilder, MultiContextBuilder};
 const NONE_KIND: &str = "none";
 const ORCHESTRATOR_COMMIT_ATTRIBUTE: &str = "commit";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+#[builder(state_mod(vis = "pub"), on(_, into))]
 pub struct FlagContext {
+    #[builder(field)]
+    attributes: BTreeMap<String, String>,
     kind: String,
     key: String,
     name: Option<String>,
-    attributes: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default)]
-pub struct FlagContextBuilder {
-    kind: String,
-    key: String,
-    name: Option<String>,
-    attributes: BTreeMap<String, String>,
-}
-
-impl FlagContextBuilder {
-    pub fn kind(mut self, kind: impl Into<String>) -> Self {
-        self.kind = kind.into();
-        self
-    }
-
-    pub fn key(mut self, key: impl Into<String>) -> Self {
-        self.key = key.into();
-        self
-    }
-
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
+impl<S: flag_context_builder::State> FlagContextBuilder<S> {
     pub fn attribute(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.attributes.insert(name.into(), value.into());
         self
     }
-
-    pub fn build(self) -> FlagContext {
-        FlagContext {
-            kind: self.kind,
-            key: self.key,
-            name: self.name,
-            attributes: self.attributes,
-        }
-    }
 }
 
 impl FlagContext {
-    pub fn builder() -> FlagContextBuilder {
-        FlagContextBuilder::default()
-    }
-
     fn of_kind(kind: &str, key: impl Into<String>) -> Self {
         Self::builder().kind(kind).key(key).build()
     }
