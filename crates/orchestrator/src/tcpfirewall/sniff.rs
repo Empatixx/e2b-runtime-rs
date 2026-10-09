@@ -1,12 +1,18 @@
+use httparse::{EMPTY_HEADER, Request};
+use tls_parser::{SNIType, TlsExtension, TlsMessage, TlsMessageHandshake};
+
+const MAX_HEADERS: usize = 128;
+
 pub fn http_host(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let head = text.split("\r\n\r\n").next()?;
-    let mut lines = head.split("\r\n");
-    lines.next().filter(|request| request.split(' ').count() == 3)?;
-    lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("host"))
-        .map(|(_, value)| strip_port(value.trim()).to_owned())
+    let mut headers = [EMPTY_HEADER; MAX_HEADERS];
+    let mut request = Request::new(&mut headers);
+    request.parse(bytes).ok()?.is_complete().then_some(())?;
+    request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("host"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .map(|value| strip_port(value.trim()).to_owned())
         .filter(|host| !host.is_empty())
 }
 
@@ -19,62 +25,25 @@ pub fn tls_record_complete(bytes: &[u8]) -> bool {
 }
 
 pub fn tls_sni(bytes: &[u8]) -> Option<String> {
-    let mut reader = Reader { bytes, position: 0 };
-    (reader.u8()? == 0x16).then_some(())?;
-    reader.skip(4)?;
-    (reader.u8()? == 0x01).then_some(())?;
-    reader.skip(3 + 2 + 32)?;
-    let session = reader.u8()? as usize;
-    reader.skip(session)?;
-    let ciphers = reader.u16()? as usize;
-    reader.skip(ciphers)?;
-    let compression = reader.u8()? as usize;
-    reader.skip(compression)?;
-    let extensions_end = reader.u16()? as usize + reader.position;
-    while reader.position < extensions_end {
-        let kind = reader.u16()?;
-        let length = reader.u16()? as usize;
-        if kind != 0 {
-            reader.skip(length)?;
-            continue;
-        }
-        reader.skip(2)?;
-        (reader.u8()? == 0).then_some(())?;
-        let name = reader.u16()? as usize;
-        return reader.take(name).and_then(|name| String::from_utf8(name.to_vec()).ok());
-    }
-    None
+    let (_, record) = tls_parser::parse_tls_plaintext(bytes).ok()?;
+    let extensions = record.msg.into_iter().find_map(|message| match message {
+        TlsMessage::Handshake(TlsMessageHandshake::ClientHello(hello)) => hello.ext,
+        _ => None,
+    })?;
+    let (_, extensions) = tls_parser::parse_tls_client_hello_extensions(extensions).ok()?;
+    extensions
+        .into_iter()
+        .find_map(|extension| match extension {
+            TlsExtension::SNI(names) => names.into_iter().find(|(kind, _)| *kind == SNIType::HostName),
+            _ => None,
+        })
+        .and_then(|(_, name)| String::from_utf8(name.to_vec()).ok())
 }
 
 fn strip_port(host: &str) -> &str {
     match host.rsplit_once(':') {
         Some((name, port)) if !name.contains(']') && port.chars().all(|c| c.is_ascii_digit()) => name,
         _ => host,
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, length: usize) -> Option<&'a [u8]> {
-        let slice = self.bytes.get(self.position..self.position + length)?;
-        self.position += length;
-        Some(slice)
-    }
-
-    fn skip(&mut self, length: usize) -> Option<()> {
-        self.take(length).map(|_| ())
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        self.take(1).map(|bytes| bytes[0])
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        self.take(2).map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 }
 
