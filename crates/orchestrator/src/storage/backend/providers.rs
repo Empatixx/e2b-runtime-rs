@@ -4,6 +4,8 @@ use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder};
 
 use super::aws::{AwsDefaults, DefaultChainCredentials};
+use super::gcs::adc::AdcFile;
+use super::gcs::external_account::{ExternalAccountCredentials, is_external_account};
 use crate::go_url::GoUrl;
 use crate::storage::spec::StorageSpec;
 
@@ -43,16 +45,28 @@ fn endpoint_for(spec: &StorageSpec, endpoint: &str) -> String {
     }
 }
 
+const GCS_SCOPES: [&str; 2] = [
+    "https://www.googleapis.com/auth/devstorage.full_control",
+    "https://www.googleapis.com/auth/cloud-platform",
+];
+
 pub fn gcs(spec: &StorageSpec) -> Result<GoogleCloudStorage, String> {
     let builder = GoogleCloudStorageBuilder::new().with_bucket_name(&spec.bucket);
-    let builder = match std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-        .ok()
-        .filter(|path| !path.is_empty())
-    {
-        Some(path) => builder.with_application_credentials(path),
-        None => builder,
+    let adc = AdcFile::locate(&|name| std::env::var(name).ok()).map_err(|e| gcs_error(&e))?;
+    let builder = match adc {
+        Some(file) if is_external_account(&file.bytes) => {
+            let credentials =
+                ExternalAccountCredentials::from_json(&file.bytes, &GCS_SCOPES).map_err(|e| gcs_error(&e))?;
+            builder.with_credentials(Arc::new(credentials))
+        }
+        Some(file) if file.from_environment => builder.with_application_credentials(file.path.display().to_string()),
+        _ => builder,
     };
-    builder.build().map_err(|e| format!("failed to create GCS client: {e}"))
+    builder.build().map_err(|e| gcs_error(&e.to_string()))
+}
+
+fn gcs_error(reason: &str) -> String {
+    format!("failed to create GCS client: {reason}")
 }
 
 #[cfg(test)]

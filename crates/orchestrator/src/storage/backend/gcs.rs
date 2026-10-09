@@ -1,3 +1,6 @@
+pub mod adc;
+pub mod external_account;
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -6,6 +9,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde::Deserialize;
 
+use super::pem;
 use crate::builder::oci::ecr::base64_error;
 use crate::go_url::GoUrl;
 use crate::go_url::query::Query;
@@ -13,9 +17,6 @@ use crate::go_url::query::Query;
 const SERVICE_ACCOUNT_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_BASE64";
 const EMULATOR_HOST_ENV: &str = "STORAGE_EMULATOR_HOST";
 const DEFAULT_HOST: &str = "storage.googleapis.com";
-const PEM_BEGIN: &str = "-----BEGIN ";
-const PEM_END: &str = "-----END ";
-const PEM_DASHES: &str = "-----";
 const SERVICE_ACCOUNT_TYPE: &str = "storage.gcpServiceToken";
 const KEY_SYNTAX_ERROR: &str = "asn1: syntax error: sequence truncated";
 const MISSING_ACCESS_ID: &str = "storage: missing required GoogleAccessID";
@@ -118,16 +119,10 @@ fn sign(private_key: &str, message: &str) -> Result<String, String> {
 }
 
 fn private_key_der(private_key: &str) -> Vec<u8> {
-    pem_body(private_key)
-        .and_then(|body| STANDARD.decode(body).ok())
-        .unwrap_or_else(|| private_key.as_bytes().to_vec())
-}
-
-fn pem_body(text: &str) -> Option<String> {
-    let begin = text.find(PEM_BEGIN)?;
-    let after_label = text[begin + PEM_BEGIN.len()..].split_once(PEM_DASHES)?.1;
-    let body = after_label.split_once(PEM_END)?.0;
-    Some(body.split_whitespace().collect())
+    pem::blocks(private_key)
+        .into_iter()
+        .next()
+        .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der)
 }
 
 fn json_error(error: &serde_json::Error) -> String {
