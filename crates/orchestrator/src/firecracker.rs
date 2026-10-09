@@ -2,6 +2,7 @@ pub mod client;
 pub mod config;
 #[cfg(target_os = "linux")]
 pub mod console;
+pub mod exit;
 pub mod kernel_args;
 pub mod launch;
 pub mod memory_info;

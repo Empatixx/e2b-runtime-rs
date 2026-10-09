@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
+use opentelemetry::KeyValue;
 use tokio::sync::oneshot;
 use tonic::Status;
 use uuid::Uuid;
@@ -16,9 +18,14 @@ use crate::server::registry::{Lifecycle, StopReserved};
 use crate::server::scheduling::from_headers;
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
+use crate::telemetry::report::{ReportStatus, report_critical_error};
+use crate::telemetry::server::sandbox::CheckpointOutcome;
+use crate::telemetry::server::spans;
 
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 const BUILD_ORIGIN: &str = "snapshot_template";
+const ROUTE_FLAG_OFF: &str = "flag_off";
+const BALLOON_MODE_UNKNOWN: &str = "unknown";
 
 pub struct CheckpointRequest {
     pub build_id: String,
@@ -36,13 +43,37 @@ impl Node {
         let _permit = self.admission.acquire().await?;
         let lifecycle = handle.lifecycle();
         let id = lifecycle.sandbox_id.clone();
-        if request.filesystem_only {
+        let fs_only = request.filesystem_only;
+        if fs_only {
             return Err(filesystem_only_checkpoint_disabled(&id));
         }
+        let started = Instant::now();
+        spans::record_checkpoint_route(ROUTE_FLAG_OFF, BALLOON_MODE_UNKNOWN);
+        let checkpointed = self.checkpoint_routed(handle, request, lifecycle).await;
+        CheckpointOutcome {
+            in_place: false,
+            fs_only,
+            route: ROUTE_FLAG_OFF.to_owned(),
+            balloon_mode: BALLOON_MODE_UNKNOWN.to_owned(),
+            deferred: false,
+            success: checkpointed.is_ok(),
+        }
+        .record(started.elapsed());
+        checkpointed
+    }
+
+    async fn checkpoint_routed(
+        self: &Arc<Self>,
+        handle: SandboxHandle,
+        request: CheckpointRequest,
+        lifecycle: Lifecycle,
+    ) -> Result<SchedulingMetadata, Status> {
+        let id = lifecycle.sandbox_id.clone();
         let stopped = self
             .registry
             .stop_reserved(&lifecycle)
-            .map_err(|stopped| stop_reserved_status(stopped, &id))?;
+            .map_err(|stopped| stop_reserved_status(stopped, &id))
+            .inspect_err(|status| report_marking_failure(status, &id))?;
         let routed = routed_sandbox(&stopped.info.lock());
         self.routing.on_stopping(&routed).await;
         let checkpointed = self.resume_fresh(handle, request).await;
@@ -67,18 +98,24 @@ impl Node {
                 )));
             }
         };
-        let local = snapshot(&handle, build_id).await.map_err(snapshot_error)?;
+        let attributes = [KeyValue::new("sandbox.id", id.clone())];
+        let local = snapshot(&handle, build_id)
+            .await
+            .map_err(snapshot_error)
+            .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
         let resumed = self
             .resume_checkpoint(&parent, build_id)
             .await
-            .inspect_err(|_| self.store.unpin(build_id))?;
+            .inspect_err(|_| self.store.unpin(build_id))
+            .report_critical("error resuming sandbox after checkpoint", &attributes)?;
         self.embed_prefetch(&resumed, &local).await;
         let object_metadata = object_metadata(request.provenance, &parent);
         if let Err(e) = self.upload_now(local.clone(), object_metadata).await {
             self.kill(&resumed).await;
             return Err(Status::internal(format!(
                 "error uploading snapshot for checkpoint '{id}': {e}"
-            )));
+            )))
+            .report_critical("error uploading snapshot for checkpoint", &attributes);
         }
         let info = resumed.info.lock().clone();
         self.events
@@ -178,6 +215,16 @@ fn object_metadata(provenance: HashMap<String, String>, parent: &SandboxInfo) ->
     }
     .with("team_id", &parent.config.team_id)
     .with("build_origin", BUILD_ORIGIN)
+}
+
+fn report_marking_failure(status: &Status, sandbox_id: &str) {
+    if status.code() != tonic::Code::FailedPrecondition {
+        report_critical_error(
+            "failed to mark sandbox as stopping",
+            Some(status.message()),
+            &[KeyValue::new("sandbox.id", sandbox_id.to_owned())],
+        );
+    }
 }
 
 fn stop_reserved_status(stopped: StopReserved, id: &str) -> Status {

@@ -13,11 +13,17 @@ use tokio::task::JoinHandle;
 
 use super::client::FirecrackerClient;
 use super::console::ConsoleTap;
+use super::exit::ExitInfo;
 use super::launch::Launch;
 
 const READY_POLLS: u32 = 500;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CONSOLE_DRAIN: Duration = Duration::from_secs(1);
+
+pub struct FirecrackerExit {
+    pub message: String,
+    pub info: Option<ExitInfo>,
+}
 
 pub struct FirecrackerProcess {
     child: Child,
@@ -61,13 +67,15 @@ impl FirecrackerProcess {
         Ok(process)
     }
 
-    pub async fn exited(&mut self) -> String {
-        let status = self
-            .child
-            .wait()
-            .await
+    pub async fn exited(&mut self) -> FirecrackerExit {
+        let status = self.child.wait().await;
+        let described = status
+            .as_ref()
             .map_or_else(|e| format!("wait failed: {e}"), |status| status.to_string());
-        format!("firecracker exited: {status}: {}", self.drained_tail().await)
+        FirecrackerExit {
+            message: format!("firecracker exited: {described}: {}", self.drained_tail().await),
+            info: status.ok().and_then(ExitInfo::from_status),
+        }
     }
 
     pub fn console_lines(&self) -> UnboundedReceiver<String> {

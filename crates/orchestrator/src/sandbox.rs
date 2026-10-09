@@ -19,11 +19,18 @@ use crate::envd::{self, ENVD_PORT};
 use crate::exposure::nbd::expose;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::config::VmConfig;
+use crate::firecracker::exit::{CrashCause, ExitInfo};
 use crate::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::prefetch::PrefetchStats;
 use crate::phases::PhaseTimer;
+
+pub struct Death {
+    pub reason: String,
+    pub cause: CrashCause,
+    pub exit: Option<ExitInfo>,
+}
 
 pub struct Sandbox {
     config: SandboxConfig,
@@ -86,16 +93,24 @@ impl Sandbox {
             .map_or(0, |memory| memory.faults_served())
     }
 
-    pub async fn died(&mut self) -> String {
+    pub async fn died(&mut self) -> Death {
         let Resources { vm, memory, disk, .. } = &mut self.resources;
         tokio::select! {
-            exited = async { match vm.as_mut() { Some(vm) => vm.exited().await, None => std::future::pending().await } } => exited,
-            () = async { match memory.as_ref() { Some(memory) => memory.ended().await, None => std::future::pending().await } } => {
-                "the memory server stopped".to_owned()
-            }
-            () = async { match disk.as_ref() { Some(disk) => disk.ended().await, None => std::future::pending().await } } => {
-                "the rootfs nbd server stopped".to_owned()
-            }
+            exited = async { match vm.as_mut() { Some(vm) => vm.exited().await, None => std::future::pending().await } } => Death {
+                cause: CrashCause::classify(exited.info.as_ref()),
+                reason: exited.message,
+                exit: exited.info,
+            },
+            () = async { match memory.as_ref() { Some(memory) => memory.ended().await, None => std::future::pending().await } } => Death {
+                reason: "the memory server stopped".to_owned(),
+                cause: CrashCause::RequestedSignal.with_memory_handler(true),
+                exit: None,
+            },
+            () = async { match disk.as_ref() { Some(disk) => disk.ended().await, None => std::future::pending().await } } => Death {
+                reason: "the rootfs nbd server stopped".to_owned(),
+                cause: CrashCause::RequestedSignal,
+                exit: None,
+            },
         }
     }
 
@@ -243,7 +258,7 @@ impl Sandbox {
         let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;
         let initialised = tokio::select! {
             initialised = envd::init(address, &self.config.envd, deadline) => initialised,
-            exited = vm.exited() => return Err(exited),
+            exited = vm.exited() => return Err(exited.message),
         };
         let attempts = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
         self.phases.note("envd_attempts", attempts);

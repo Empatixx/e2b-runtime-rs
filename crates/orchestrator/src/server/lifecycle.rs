@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use tracing::Instrument;
+use tracing::{Instrument, Span};
 use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
@@ -16,11 +16,12 @@ use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
+use crate::firecracker::exit::{CrashCause, ExitInfo};
 use crate::memory::trace::Trace;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
-use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
+use crate::sandbox::{Death, Sandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::server::sandbox::{record_crash, record_execution};
 use crate::template::Template;
@@ -48,6 +49,7 @@ pub enum Command {
     Pause {
         build_id: Uuid,
         template_id: String,
+        span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
     },
     Checkpoint {
@@ -83,11 +85,12 @@ enum Ending {
         reason: String,
     },
     Crashed {
-        reason: String,
+        death: Death,
     },
     Pause {
         build_id: Uuid,
         template_id: String,
+        span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
     },
     Checkpoint {
@@ -100,8 +103,6 @@ const STOP_REASON_KILLED: &str = "killed";
 const STOP_REASON_PAUSED: &str = "paused";
 const STOP_REASON_CHECKPOINTING: &str = "checkpointing";
 const STOP_REASON_CRASHED: &str = "crashed";
-const CRASH_CAUSE_MEMORY_HANDLER_FAILED: &str = "memory_handler_failed";
-const CRASH_CAUSE_UNKNOWN: &str = "unknown";
 
 impl Ending {
     fn stop_reason(&self) -> &'static str {
@@ -113,18 +114,25 @@ impl Ending {
         }
     }
 
-    fn record_metrics(&self, ran_for: Duration) {
-        record_execution(ran_for, self.stop_reason());
-        if let Self::Crashed { reason } = self {
-            record_crash(crash_cause(reason));
+    fn record_metrics(&self, sandbox_id: &str, ran_for: Duration) {
+        if let Self::Crashed { death } = self {
+            record_crash(death.cause.as_str());
+            log_crash(sandbox_id, death);
         }
+        record_execution(ran_for, self.stop_reason());
     }
 }
 
-fn crash_cause(reason: &str) -> &'static str {
-    match reason.contains("memory server") {
-        true => CRASH_CAUSE_MEMORY_HANDLER_FAILED,
-        false => CRASH_CAUSE_UNKNOWN,
+fn log_crash(sandbox_id: &str, death: &Death) {
+    let exit_fields = death.exit.as_ref().map(ExitInfo::log_fields).unwrap_or_default();
+    let crash_cause = death.cause.as_str();
+    match death.cause == CrashCause::CleanExit {
+        true => {
+            tracing::warn!(sandbox = %sandbox_id, %crash_cause, %exit_fields, "sandbox stopped without a stop reason")
+        }
+        false => {
+            tracing::error!(sandbox = %sandbox_id, %crash_cause, %exit_fields, reason = %death.reason, "sandbox crashed")
+        }
     }
 }
 
@@ -184,17 +192,23 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
 }
 
 impl Running {
-    async fn run(mut self) {
-        let ending = self.wait_for_ending().await;
-        let lifecycle = self.info.lock().lifecycle.clone();
+    async fn run(self) {
         match self.throwaway {
-            true => self.tear_down(ending, lifecycle).await,
+            true => self.run_to_the_end().await,
             false => {
-                ending.record_metrics(self.ran_for());
                 let span = tracing::info_span!(parent: None, "stop sandbox-lifecycle");
-                self.tear_down(ending, lifecycle).instrument(span).await;
+                self.run_to_the_end().instrument(span).await;
             }
         }
+    }
+
+    async fn run_to_the_end(mut self) {
+        let ending = self.wait_for_ending().await;
+        let lifecycle = self.info.lock().lifecycle.clone();
+        if !self.throwaway {
+            ending.record_metrics(self.sandbox.id(), self.ran_for());
+        }
+        self.tear_down(ending, lifecycle).await;
     }
 
     async fn tear_down(mut self, ending: Ending, lifecycle: Lifecycle) {
@@ -205,12 +219,12 @@ impl Running {
             Ending::Pause {
                 build_id,
                 template_id,
+                span,
                 reply,
-            } => self.pause(build_id, template_id, reply).await,
+            } => self.pause(build_id, template_id, span, reply).await,
             Ending::Checkpoint { build_id, reply } => self.checkpoint(build_id, reply).await,
-            Ending::Stop { reason } | Ending::Crashed { reason } => {
-                tracing::info!(sandbox = %id, %reason, "stopping sandbox")
-            }
+            Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
+            Ending::Crashed { death } => tracing::info!(sandbox = %id, reason = %death.reason, "stopping sandbox"),
         }
         if let Some(collector) = self.host_stats.take() {
             collector.stop().await;
@@ -227,7 +241,13 @@ impl Running {
         self.node.registry.finish(&lifecycle);
     }
 
-    async fn pause(&self, build_id: Uuid, template_id: String, reply: oneshot::Sender<Result<Snapshot, String>>) {
+    async fn pause(
+        &self,
+        build_id: Uuid,
+        template_id: String,
+        span: Span,
+        reply: oneshot::Sender<Result<Snapshot, String>>,
+    ) {
         let parent = self.info.lock().clone();
         let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
         if snapshotted.is_ok() {
@@ -240,7 +260,7 @@ impl Running {
                 .with("template_id", template_id)
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
-            self.node.upload(local.clone(), object_metadata.clone());
+            span.in_scope(|| self.node.upload(local.clone(), object_metadata.clone()));
             self.node.harvest_after_pause(PausedBuild {
                 parent: parent.clone(),
                 build_id,
@@ -263,11 +283,11 @@ impl Running {
                     Some(Command::Extend) => continue,
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
                     Some(Command::Checkpoint { build_id, reply }) => return Ending::Checkpoint { build_id, reply },
-                    Some(Command::Pause { build_id, template_id, reply }) => return Ending::Pause { build_id, template_id, reply },
+                    Some(Command::Pause { build_id, template_id, span, reply }) => return Ending::Pause { build_id, template_id, span, reply },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },
                 () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },
-                reason = self.sandbox.died() => return Ending::Crashed { reason },
+                death = self.sandbox.died() => return Ending::Crashed { death },
             }
         }
     }

@@ -17,6 +17,7 @@ macro_rules! sandbox_span {
             "sandbox.kernel.version" = Empty,
             "envd.version" = Empty,
             "balloon_mode" = Empty,
+            route = Empty,
         )
     };
 }
@@ -56,6 +57,16 @@ pub fn sandbox_checkpoint(request: &SandboxCheckpointRequest) -> Span {
     record(&span, "sandbox.id", &request.sandbox_id);
     record(&span, "build.id", &request.build_id);
     span
+}
+
+pub fn record_balloon_mode() {
+    record(&Span::current(), "balloon_mode", BALLOON_MODE_UNKNOWN);
+}
+
+pub fn record_checkpoint_route(route: &str, balloon_mode: &str) {
+    let span = Span::current();
+    record(&span, "balloon_mode", balloon_mode);
+    record(&span, "route", route);
 }
 
 pub fn record_running(config: &SandboxConfig) {
