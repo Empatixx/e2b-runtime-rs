@@ -1,3 +1,8 @@
+pub mod flags;
+pub mod last_cycle;
+pub mod plan;
+pub mod source;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -93,6 +98,51 @@ pub async fn prefetch<I: Installer>(
     Ok(())
 }
 
+fn fetched_blocks(
+    indices: Vec<u64>,
+    block_size: u64,
+    memfile: Arc<BuildFile>,
+) -> impl futures::Stream<Item = Result<u64, String>> {
+    let size = memfile.size();
+    futures::stream::iter(indices)
+        .filter_map(move |index| {
+            std::future::ready(
+                index
+                    .checked_mul(block_size)
+                    .filter(|offset| offset.checked_add(block_size).is_some_and(|end| end <= size)),
+            )
+        })
+        .map(move |offset| {
+            let memfile = memfile.clone();
+            async move {
+                let mut data = vec![0; block_size as usize];
+                memfile.read_at(offset, &mut data).await.map(|()| offset)
+            }
+        })
+        .buffered(FETCH_WORKERS)
+}
+
+pub async fn fetch_only(mapping: MemoryPrefetch, memfile: Arc<BuildFile>, stats: Arc<PrefetchStats>) {
+    let Ok(block_size) = u64::try_from(mapping.block_size) else {
+        return;
+    };
+    let reads = fetched_blocks(mapping.indices, block_size, memfile);
+    futures::pin_mut!(reads);
+    while let Some(read) = reads.next().await {
+        record_fetch(&read, &stats);
+    }
+}
+
+fn record_fetch(read: &Result<u64, String>, stats: &PrefetchStats) {
+    match read {
+        Ok(_) => stats.fetched.fetch_add(1, Ordering::Relaxed),
+        Err(e) => {
+            tracing::warn!(error = %e, "prefetch read failed");
+            stats.skipped.fetch_add(1, Ordering::Relaxed)
+        }
+    };
+}
+
 async fn warm(
     indices: Vec<u64>,
     block_size: u64,
@@ -100,36 +150,14 @@ async fn warm(
     warmed: mpsc::UnboundedSender<u64>,
     stats: Arc<PrefetchStats>,
 ) {
-    let size = memfile.size();
-    let reads = futures::stream::iter(indices)
-        .filter_map(|index| {
-            std::future::ready(
-                index
-                    .checked_mul(block_size)
-                    .filter(|offset| offset.checked_add(block_size).is_some_and(|end| end <= size)),
-            )
-        })
-        .map(|offset| {
-            let memfile = memfile.clone();
-            async move {
-                let mut data = vec![0; block_size as usize];
-                memfile.read_at(offset, &mut data).await.map(|()| offset)
-            }
-        })
-        .buffered(FETCH_WORKERS);
+    let reads = fetched_blocks(indices, block_size, memfile);
     futures::pin_mut!(reads);
     while let Some(read) = reads.next().await {
-        match read {
-            Ok(offset) => {
-                stats.fetched.fetch_add(1, Ordering::Relaxed);
-                if warmed.send(offset).is_err() {
-                    return;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "prefetch read failed");
-                stats.skipped.fetch_add(1, Ordering::Relaxed);
-            }
+        record_fetch(&read, &stats);
+        if let Ok(offset) = read
+            && warmed.send(offset).is_err()
+        {
+            return;
         }
     }
 }
@@ -337,5 +365,32 @@ mod tests {
         assert!(guest.attempts.load(Ordering::SeqCst) <= 2 * COPY_WORKERS);
         assert_eq!(stats.installed(), 0);
         assert_eq!(stats.skipped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_only_reads_the_traced_blocks_without_an_installer() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats = Arc::new(PrefetchStats::default());
+
+        fetch_only(
+            mapping(vec![3, 2, 0, 99, u64::MAX], PAGE as i64),
+            memfile(&dir, 4).await,
+            stats.clone(),
+        )
+        .await;
+
+        assert_eq!(stats.fetched.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.installed(), 0);
+        assert_eq!(stats.skipped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_only_ignores_a_negative_block_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats = Arc::new(PrefetchStats::default());
+
+        fetch_only(mapping(vec![0], -1), memfile(&dir, 1).await, stats.clone()).await;
+
+        assert_eq!(stats.fetched.load(Ordering::Relaxed), 0);
     }
 }

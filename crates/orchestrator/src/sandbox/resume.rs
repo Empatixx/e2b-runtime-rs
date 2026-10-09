@@ -11,7 +11,8 @@ use crate::block::build_file::BuildFile;
 use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
 use crate::memory::handshake::UffdListener;
-use crate::memory::prefetch::prefetch;
+use crate::memory::prefetch::plan::PrefetchPlan;
+use crate::memory::prefetch::{PrefetchStats, fetch_only, prefetch};
 use crate::memory::server::{MemoryServer, MemoryWatch, Prefaulter};
 use crate::memory::trace::Trace;
 use crate::system::all_ok;
@@ -89,14 +90,23 @@ impl Sandbox {
     }
 
     fn start_prefetch(&mut self, memfile: Arc<BuildFile>) -> Option<oneshot::Sender<Arc<Prefaulter>>> {
-        let mapping = self.config.prefetch.clone()?;
+        let plan = PrefetchPlan::resolve(
+            self.config.prefetch_settings,
+            self.config.prefetch.clone(),
+            memfile.header(),
+        );
+        tracing::debug!(
+            sandbox = %self.config.id,
+            init_blocks = plan.init_blocks(),
+            last_cycle_blocks = plan.last_cycle_blocks(),
+            "resolved the resume prefetch"
+        );
+        if plan.is_empty() {
+            return None;
+        }
         let (prefaulter, installer) = oneshot::channel();
         let stats = self.prefetch_stats.clone();
-        self.resources.prefetch = Some(tokio::spawn(async move {
-            prefetch(mapping, memfile, async { installer.await.ok() }, stats)
-                .await
-                .inspect_err(|e| tracing::warn!(error = %e, "memory prefetch failed"))
-        }));
+        self.resources.prefetch = Some(tokio::spawn(replay(plan, memfile, installer, stats)));
         Some(prefaulter)
     }
 
@@ -147,6 +157,23 @@ fn point_link(link: &Path, target: &Path) -> io::Result<()> {
     let _ = std::fs::remove_file(&staged);
     std::os::unix::fs::symlink(target, &staged)?;
     std::fs::rename(&staged, link)
+}
+
+async fn replay(
+    plan: PrefetchPlan,
+    memfile: Arc<BuildFile>,
+    installer: oneshot::Receiver<Arc<Prefaulter>>,
+    stats: Arc<PrefetchStats>,
+) -> Result<(), String> {
+    if let Some(init) = plan.init {
+        let _ = prefetch(init, memfile.clone(), async { installer.await.ok() }, stats.clone())
+            .await
+            .inspect_err(|e| tracing::error!(error = %e, "failed to start init prefetcher"));
+    }
+    if let Some(last_cycle) = plan.last_cycle {
+        fetch_only(last_cycle, memfile, stats).await;
+    }
+    Ok(())
 }
 
 async fn memory_failure(watch: Option<MemoryWatch>) -> String {

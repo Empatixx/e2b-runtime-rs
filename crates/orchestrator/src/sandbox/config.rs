@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::envd::EnvdInit;
 use crate::firecracker::kernel_args::BootOptions;
+use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::slot::Slot;
 use crate::template::metadata::MemoryPrefetch;
 
@@ -51,6 +52,7 @@ pub struct SandboxConfig {
     pub envd: EnvdInit,
     pub envd_timeout: Duration,
     pub prefetch: Option<MemoryPrefetch>,
+    pub prefetch_settings: PrefetchSettings,
     pub use_memfd: bool,
     pub hyperloop_ip: Option<String>,
     pub cgroup_name: String,
@@ -91,6 +93,7 @@ pub struct SandboxBuilder {
     envd: EnvdInit,
     envd_timeout: Option<Duration>,
     prefetch: Option<MemoryPrefetch>,
+    prefetch_settings: PrefetchSettings,
     use_memfd: Option<bool>,
     hyperloop_ip: Option<String>,
 }
@@ -222,6 +225,11 @@ impl SandboxBuilder {
         self
     }
 
+    pub fn prefetch_settings(mut self, prefetch_settings: PrefetchSettings) -> Self {
+        self.prefetch_settings = prefetch_settings;
+        self
+    }
+
     pub fn use_memfd(mut self, use_memfd: bool) -> Self {
         self.use_memfd = Some(use_memfd);
         self
@@ -262,6 +270,7 @@ impl SandboxBuilder {
             envd: self.envd,
             envd_timeout: self.envd_timeout.unwrap_or(DEFAULT_ENVD_TIMEOUT),
             prefetch: self.prefetch,
+            prefetch_settings: self.prefetch_settings,
             use_memfd: self.use_memfd.unwrap_or(true),
             hyperloop_ip: self.hyperloop_ip,
         })

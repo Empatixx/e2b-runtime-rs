@@ -1,4 +1,5 @@
 pub mod config;
+pub mod harvest;
 pub mod resources;
 pub mod resume;
 pub mod snapshot;
