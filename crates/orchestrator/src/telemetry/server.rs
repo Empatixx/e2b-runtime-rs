@@ -2,6 +2,7 @@ pub mod envd_upgrade;
 pub mod gauges;
 pub mod prefetch;
 pub mod sandbox;
+pub mod spans;
 
 use std::sync::LazyLock;
 

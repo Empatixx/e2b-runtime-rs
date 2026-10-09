@@ -1,11 +1,12 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
@@ -21,6 +22,7 @@ use crate::proto::{SandboxConfig, SchedulingMetadata};
 use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
 use crate::storage::backend::ObjectMetadata;
+use crate::telemetry::server::sandbox::{record_crash, record_execution};
 use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
 
@@ -80,6 +82,9 @@ enum Ending {
     Stop {
         reason: String,
     },
+    Crashed {
+        reason: String,
+    },
     Pause {
         build_id: Uuid,
         template_id: String,
@@ -89,6 +94,38 @@ enum Ending {
         build_id: Uuid,
         reply: oneshot::Sender<Result<LocalSnapshot, String>>,
     },
+}
+
+const STOP_REASON_KILLED: &str = "killed";
+const STOP_REASON_PAUSED: &str = "paused";
+const STOP_REASON_CHECKPOINTING: &str = "checkpointing";
+const STOP_REASON_CRASHED: &str = "crashed";
+const CRASH_CAUSE_MEMORY_HANDLER_FAILED: &str = "memory_handler_failed";
+const CRASH_CAUSE_UNKNOWN: &str = "unknown";
+
+impl Ending {
+    fn stop_reason(&self) -> &'static str {
+        match self {
+            Self::Stop { .. } => STOP_REASON_KILLED,
+            Self::Crashed { .. } => STOP_REASON_CRASHED,
+            Self::Pause { .. } => STOP_REASON_PAUSED,
+            Self::Checkpoint { .. } => STOP_REASON_CHECKPOINTING,
+        }
+    }
+
+    fn record_metrics(&self, ran_for: Duration) {
+        record_execution(ran_for, self.stop_reason());
+        if let Self::Crashed { reason } = self {
+            record_crash(crash_cause(reason));
+        }
+    }
+}
+
+fn crash_cause(reason: &str) -> &'static str {
+    match reason.contains("memory server") {
+        true => CRASH_CAUSE_MEMORY_HANDLER_FAILED,
+        false => CRASH_CAUSE_UNKNOWN,
+    }
 }
 
 struct Running {
@@ -144,9 +181,15 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
 
 impl Running {
     async fn run(mut self) {
-        let id = self.sandbox.id().to_owned();
         let ending = self.wait_for_ending().await;
         let lifecycle = self.info.lock().lifecycle.clone();
+        ending.record_metrics(self.ran_for());
+        let span = tracing::info_span!(parent: None, "stop sandbox-lifecycle");
+        self.tear_down(ending, lifecycle).instrument(span).await;
+    }
+
+    async fn tear_down(mut self, ending: Ending, lifecycle: Lifecycle) {
+        let id = self.sandbox.id().to_owned();
         self.cleanup.store(true, Ordering::SeqCst);
         self.node.mark_stopping(&lifecycle).await;
         match ending {
@@ -156,7 +199,9 @@ impl Running {
                 reply,
             } => self.pause(build_id, template_id, reply).await,
             Ending::Checkpoint { build_id, reply } => self.checkpoint(build_id, reply).await,
-            Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
+            Ending::Stop { reason } | Ending::Crashed { reason } => {
+                tracing::info!(sandbox = %id, %reason, "stopping sandbox")
+            }
         }
         if let Some(collector) = self.host_stats.take() {
             collector.stop().await;
@@ -216,9 +261,15 @@ impl Running {
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },
                 () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },
-                reason = self.sandbox.died() => return Ending::Stop { reason },
+                reason = self.sandbox.died() => return Ending::Crashed { reason },
             }
         }
+    }
+
+    fn ran_for(&self) -> Duration {
+        SystemTime::now()
+            .duration_since(self.info.lock().started_at)
+            .unwrap_or_default()
     }
 
     fn deadline(&self) -> Option<Instant> {

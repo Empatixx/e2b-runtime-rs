@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
 use super::build_id;
 use super::lifecycle::{Command, SandboxHandle};
@@ -16,8 +17,13 @@ use crate::proto::{
     SandboxDeleteRequest, SandboxListResponse, SandboxPauseRequest, SandboxPauseResponse, SandboxUpdateRequest,
 };
 use crate::sandbox::snapshot::Snapshot;
+use crate::telemetry::server::sandbox::{CheckpointOutcome, CreateOutcome, PauseOutcome, record_kill};
+use crate::telemetry::server::spans;
 use serde_json::json;
 
+const FS_RECOVERY_NONE: &str = "none";
+const ROUTE_FLAG_OFF: &str = "flag_off";
+const BALLOON_MODE_UNKNOWN: &str = "unknown";
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 
 pub struct SandboxServer {
@@ -33,6 +39,87 @@ impl SandboxServer {
 #[tonic::async_trait]
 impl SandboxService for SandboxServer {
     async fn create(&self, request: Request<SandboxCreateRequest>) -> Result<Response<SandboxCreateResponse>, Status> {
+        let span = spans::sandbox_create(request.get_ref().sandbox.as_ref());
+        let started = Instant::now();
+        let resume = request
+            .get_ref()
+            .sandbox
+            .as_ref()
+            .is_some_and(|sandbox| sandbox.snapshot);
+        let fs_boot_requested = request.get_ref().filesystem_boot.unwrap_or_default();
+        let created = self.create_sandbox(request).instrument(span).await;
+        CreateOutcome {
+            resume,
+            fs_only: false,
+            fs_boot_requested,
+            success: created.is_ok(),
+            envd_upgraded: false,
+            fs_recovery: FS_RECOVERY_NONE.to_owned(),
+        }
+        .record(started.elapsed());
+        created
+    }
+
+    async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
+        let span = spans::sandbox_update(&request.get_ref().sandbox_id);
+        self.update_sandbox(request).instrument(span).await
+    }
+
+    async fn list(&self, request: Request<()>) -> Result<Response<SandboxListResponse>, Status> {
+        self.list_sandboxes(request).instrument(spans::sandbox_list()).await
+    }
+
+    async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
+        let span = spans::sandbox_delete(&request.get_ref().sandbox_id);
+        let kill_reason = request.get_ref().kill_reason.clone().unwrap_or_default();
+        let deleted = self.delete_sandbox(request).instrument(span).await;
+        if deleted.is_ok() {
+            record_kill(&kill_reason);
+        }
+        deleted
+    }
+
+    async fn pause(&self, request: Request<SandboxPauseRequest>) -> Result<Response<SandboxPauseResponse>, Status> {
+        let span = spans::sandbox_pause(request.get_ref());
+        let started = Instant::now();
+        let fs_only = request.get_ref().filesystem_only;
+        let paused = self.pause_sandbox(request).instrument(span).await;
+        PauseOutcome {
+            fs_only,
+            success: paused.is_ok(),
+        }
+        .record(started.elapsed());
+        paused
+    }
+
+    async fn checkpoint(
+        &self,
+        request: Request<SandboxCheckpointRequest>,
+    ) -> Result<Response<SandboxCheckpointResponse>, Status> {
+        let span = spans::sandbox_checkpoint(request.get_ref());
+        let started = Instant::now();
+        let fs_only = request.get_ref().filesystem_only;
+        let checkpointed = self.checkpoint_sandbox(request).instrument(span).await;
+        if checkpointed.as_ref().err().is_none_or(is_routed_failure) {
+            CheckpointOutcome {
+                in_place: false,
+                fs_only,
+                route: ROUTE_FLAG_OFF.to_owned(),
+                balloon_mode: BALLOON_MODE_UNKNOWN.to_owned(),
+                deferred: false,
+                success: checkpointed.is_ok(),
+            }
+            .record(started.elapsed());
+        }
+        checkpointed
+    }
+}
+
+impl SandboxServer {
+    async fn create_sandbox(
+        &self,
+        request: Request<SandboxCreateRequest>,
+    ) -> Result<Response<SandboxCreateResponse>, Status> {
         let request = request.into_inner();
         let config = request
             .sandbox
@@ -53,9 +140,10 @@ impl SandboxService for SandboxServer {
         }))
     }
 
-    async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
+    async fn update_sandbox(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let handle = self.running(&request.sandbox_id, "sandbox not found")?;
+        spans::record_running(&handle.info.lock().config);
         let _serialised = handle.updates.lock().await;
         let rules = request
             .egress
@@ -118,7 +206,7 @@ impl SandboxService for SandboxServer {
         Ok(Response::new(()))
     }
 
-    async fn list(&self, _request: Request<()>) -> Result<Response<SandboxListResponse>, Status> {
+    async fn list_sandboxes(&self, _request: Request<()>) -> Result<Response<SandboxListResponse>, Status> {
         let sandboxes = self
             .node
             .registry
@@ -129,10 +217,12 @@ impl SandboxService for SandboxServer {
         Ok(Response::new(SandboxListResponse { sandboxes }))
     }
 
-    async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
+    async fn delete_sandbox(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
-        let lifecycle = self.running(&id, &format!("sandbox '{id}' not found"))?.lifecycle();
+        let running = self.running(&id, &format!("sandbox '{id}' not found"))?;
+        spans::record_running(&running.info.lock().config);
+        let lifecycle = running.lifecycle();
         let handle = self
             .node
             .mark_stopping(&lifecycle)
@@ -149,10 +239,15 @@ impl SandboxService for SandboxServer {
         Ok(Response::new(()))
     }
 
-    async fn pause(&self, request: Request<SandboxPauseRequest>) -> Result<Response<SandboxPauseResponse>, Status> {
+    async fn pause_sandbox(
+        &self,
+        request: Request<SandboxPauseRequest>,
+    ) -> Result<Response<SandboxPauseResponse>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
-        let lifecycle = self.running(&id, "sandbox not found")?.lifecycle();
+        let running = self.running(&id, "sandbox not found")?;
+        spans::record_running(&running.info.lock().config);
+        let lifecycle = running.lifecycle();
         let handle = self
             .node
             .mark_stopping(&lifecycle)
@@ -175,13 +270,14 @@ impl SandboxService for SandboxServer {
             .map_err(|e| Status::internal(format!("error snapshotting sandbox '{id}': {e}")))
     }
 
-    async fn checkpoint(
+    async fn checkpoint_sandbox(
         &self,
         request: Request<SandboxCheckpointRequest>,
     ) -> Result<Response<SandboxCheckpointResponse>, Status> {
         let request = request.into_inner();
         let id = request.sandbox_id;
         let handle = self.running(&id, &format!("sandbox '{id}' not found"))?;
+        spans::record_running(&handle.info.lock().config);
         let envd_version = handle.info.lock().config.envd_version.clone();
         check_for_snapshot(&envd_version).map_err(Status::failed_precondition)?;
         let checkpoint = CheckpointRequest {
@@ -243,6 +339,10 @@ async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> 
         .await
         .map_err(|_| STOPPED.to_owned())?;
     snapshot.await.map_err(|_| STOPPED.to_owned())?
+}
+
+fn is_routed_failure(status: &Status) -> bool {
+    !matches!(status.code(), tonic::Code::NotFound | tonic::Code::FailedPrecondition)
 }
 
 fn system_time(timestamp: prost_types::Timestamp) -> SystemTime {

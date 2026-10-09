@@ -112,7 +112,10 @@ impl PauseOutcome {
     pub fn record(&self, took: Duration) {
         PAUSE_DURATION.record(
             millis(took),
-            &[KeyValue::new("fs_only", self.fs_only), KeyValue::new("success", self.success)],
+            &[
+                KeyValue::new("fs_only", self.fs_only),
+                KeyValue::new("success", self.success),
+            ],
         );
     }
 }
@@ -171,7 +174,10 @@ pub fn record_pause_admission(rpc: &str, outcome: &str, waited: Duration) {
     }
     PAUSE_ADMISSION.add(
         1,
-        &[KeyValue::new("outcome", outcome.to_owned()), KeyValue::new("rpc", rpc.to_owned())],
+        &[
+            KeyValue::new("outcome", outcome.to_owned()),
+            KeyValue::new("rpc", rpc.to_owned()),
+        ],
     );
     if matches!(outcome, "ready_after_wait" | "refused") {
         PAUSE_ADMISSION_WAIT_DURATION.record(millis(waited), &[KeyValue::new("outcome", outcome.to_owned())]);
@@ -199,11 +205,22 @@ mod tests {
             fs_recovery: "none".to_owned(),
         };
 
-        let keys: Vec<_> = outcome.attributes().iter().map(|attribute| attribute.key.to_string()).collect();
+        let keys: Vec<_> = outcome
+            .attributes()
+            .iter()
+            .map(|attribute| attribute.key.to_string())
+            .collect();
 
         assert_eq!(
             keys,
-            ["sandbox.resume", "fs_only", "fs_boot_requested", "success", "envd.upgraded", "fs_recovery"]
+            [
+                "sandbox.resume",
+                "fs_only",
+                "fs_boot_requested",
+                "success",
+                "envd.upgraded",
+                "fs_recovery"
+            ]
         );
     }
 
@@ -218,8 +235,15 @@ mod tests {
             success: true,
         };
 
-        let keys: Vec<_> = outcome.attributes().iter().map(|attribute| attribute.key.to_string()).collect();
+        let keys: Vec<_> = outcome
+            .attributes()
+            .iter()
+            .map(|attribute| attribute.key.to_string())
+            .collect();
 
-        assert_eq!(keys, ["in_place", "fs_only", "route", "balloon_mode", "deferred", "success"]);
+        assert_eq!(
+            keys,
+            ["in_place", "fs_only", "route", "balloon_mode", "deferred", "success"]
+        );
     }
 }

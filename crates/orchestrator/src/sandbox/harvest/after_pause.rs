@@ -12,6 +12,7 @@ use crate::memory::prefetch::flags::PrefetchFlags;
 use crate::proto::SandboxConfig;
 use crate::sandbox::config::Held;
 use crate::storage::backend::ObjectMetadata;
+use crate::telemetry::server::prefetch::record_seal_wait;
 use crate::template::metadata::TemplateMetadata;
 
 pub struct PauseHarvest {
@@ -59,7 +60,9 @@ async fn harvest(
 ) -> HarvestReport {
     let _work = pause.work.take();
     let deadline = Instant::now() + timeout;
+    let seal_started = Instant::now();
     let sealed = within(deadline, pause.memfile_ready.clone()).await;
+    record_seal_wait(seal_started.elapsed());
     let sandbox_id = pause.config.sandbox_id.clone();
     let build_id = pause.build_id;
     let report = match sealed {
@@ -69,6 +72,7 @@ async fn harvest(
             format!("waiting for rootfs seal: {e}"),
         ),
     };
+    report.run.record_metrics();
     log_failure(&sandbox_id, build_id, &report);
     report
 }

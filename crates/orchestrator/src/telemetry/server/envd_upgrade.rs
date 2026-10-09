@@ -72,7 +72,10 @@ impl UpgradeAttempt {
 pub fn record_phase(phase: &str, result: &str, took: Duration) {
     PHASE_DURATION.record(
         millis(took),
-        &[KeyValue::new("phase", phase.to_owned()), KeyValue::new("result", result.to_owned())],
+        &[
+            KeyValue::new("phase", phase.to_owned()),
+            KeyValue::new("result", result.to_owned()),
+        ],
     );
 }
 

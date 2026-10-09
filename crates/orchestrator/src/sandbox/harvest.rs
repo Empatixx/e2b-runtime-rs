@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::proto::SandboxConfig;
 use crate::storage::backend::ObjectMetadata;
+use crate::telemetry::server::prefetch as telemetry;
 use crate::template::Template;
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata};
 
@@ -62,6 +63,16 @@ impl HarvestRun {
             persist_wait: Duration::ZERO,
             persist_attempted: false,
         }
+    }
+
+    pub fn record_metrics(&self) {
+        telemetry::HarvestRun {
+            result: self.outcome.as_str().to_owned(),
+            slot_hold: self.slot_hold,
+            persist_wait: self.persist_attempted.then_some(self.persist_wait),
+            pages: matches!(self.outcome, HarvestOutcome::Success).then_some(self.pages as u64),
+        }
+        .record();
     }
 
     pub fn succeeded(pages: usize, slot_hold: Duration) -> Self {

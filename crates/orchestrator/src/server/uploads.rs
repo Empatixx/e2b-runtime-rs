@@ -6,6 +6,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::retry::{Failure, retry};
@@ -38,7 +39,8 @@ impl Uploads {
     {
         let sender = self.register(build_id);
         let uploads = self.clone();
-        self.tasks.spawn(async move {
+        self.tasks.spawn(
+            async move {
             let uploaded = uploads.upload(build_id, &parents, attempt).await;
             if let Err(e) = &uploaded {
                 tracing::error!(build = %build_id, error = %e, "snapshot upload failed; the build stays only in this node's cache");
@@ -46,7 +48,9 @@ impl Uploads {
             let outcome = settle(&sender, &uploaded);
             uploads.forget_landed(build_id, outcome);
             finished(outcome);
-        });
+            }
+            .instrument(tracing::info_span!("upload snapshot")),
+        );
     }
 
     pub async fn run<Fut>(&self, build_id: Uuid, parents: Vec<Uuid>, attempt: Fut) -> Result<(), String>
