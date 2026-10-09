@@ -28,6 +28,16 @@ pub const FREE_PAGE_HINTING_CONFIG: JsonFlag = Flag::new("free-page-hinting-conf
 pub const MAX_SANDBOXES_PER_NODE: IntFlag = Flag::new("max-sandboxes-per-node", 200);
 pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-instances-per-node", 3);
 
+pub const PAUSE_RESUME_PREFETCH_HARVEST: BoolFlag = Flag::new("pause-resume-prefetch-harvest", false);
+pub const PAUSE_RESUME_PREFETCH_CONSUME: BoolFlag = Flag::new("pause-resume-prefetch-consume", false);
+pub const PAUSE_RESUME_PREFETCH_HARVEST_TIMEOUT_MS: IntFlag =
+    Flag::new("pause-resume-prefetch-harvest-timeout-ms", 15000);
+pub const RESUME_LAST_CYCLE_PREFETCH_MAX_MIB: IntFlag = Flag::new("resume-last-cycle-prefetch-max-mib", -1);
+
+pub fn resume_prefetch_source() -> StringFlag {
+    Flag::new("resume-prefetch-source", "init".to_owned())
+}
+
 pub fn build_kernel_version(fallback: &str) -> StringFlag {
     Flag::new("build-kernel-version", fallback.to_owned())
 }
