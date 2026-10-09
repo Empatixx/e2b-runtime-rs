@@ -3170,6 +3170,7 @@ dependencies = [
  "p384",
  "p521",
  "parking_lot",
+ "pkcs8 0.11.0",
  "prost",
  "prost-types",
  "quick-xml",
@@ -3198,6 +3199,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots 1.0.9",
+ "x509-cert",
  "xattr",
  "zstd",
 ]

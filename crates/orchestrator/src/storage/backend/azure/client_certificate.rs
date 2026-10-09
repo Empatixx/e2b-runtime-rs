@@ -3,15 +3,17 @@ use std::path::Path;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
+use pkcs8::der::Decode;
+use pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
 use reqwest::Client;
 use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RSA_PSS_SHA256, RsaEncoding, RsaKeyPair};
 use tokio::sync::Mutex;
+use x509_cert::Certificate;
 
 use super::super::pem::{self, PemBlock};
 use super::aad::{Authority, Exchange};
-use super::der;
 use super::msal::{self, CacheKey, TokenCache};
 use super::tenant::TenantPolicy;
 use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource};
@@ -19,6 +21,7 @@ use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource};
 const CREDENTIAL: &str = "ClientCertificateCredential";
 const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const ASSERTION_LIFETIME_SECONDS: u64 = 600;
+const RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
 
 pub struct ClientCertificate {
     signing: Vec<u8>,
@@ -132,7 +135,8 @@ impl ClientCertificate {
 
     fn matching(certificates: &[&[u8]], key: RsaKeyPair) -> Result<Self, String> {
         let public = key.public().as_ref().to_vec();
-        let matches = |certificate: &&[u8]| der::certificate_rsa_public_key(certificate) == Some(public.as_slice());
+        let matches =
+            |certificate: &&[u8]| certificate_rsa_public_key(certificate).as_deref() == Some(public.as_slice());
         let signing = certificates
             .iter()
             .rev()
@@ -204,12 +208,24 @@ impl ClientCertificate {
 }
 
 fn rsa_key_pair(key: &PemBlock) -> Result<RsaKeyPair, String> {
-    if key.label == "PRIVATE KEY" && !der::pkcs8_is_rsa(&key.der) && RsaKeyPair::from_der(&key.der).is_err() {
+    if key.label == "PRIVATE KEY" && !pkcs8_is_rsa(&key.der) && RsaKeyPair::from_der(&key.der).is_err() {
         return Err("key must be an RSA key".to_owned());
     }
     RsaKeyPair::from_pkcs8(&key.der)
         .or_else(|_| RsaKeyPair::from_der(&key.der))
         .map_err(|e| e.to_string())
+}
+
+fn certificate_rsa_public_key(certificate: &[u8]) -> Option<Vec<u8>> {
+    Certificate::from_der(certificate)
+        .ok()
+        .map(|certificate| certificate.tbs_certificate().subject_public_key_info().clone())
+        .filter(|info| info.algorithm.oid == RSA_ENCRYPTION)
+        .and_then(|info| info.subject_public_key.as_bytes().map(<[u8]>::to_vec))
+}
+
+fn pkcs8_is_rsa(private_key_info: &[u8]) -> bool {
+    PrivateKeyInfoRef::from_der(private_key_info).is_ok_and(|info| info.algorithm.oid == RSA_ENCRYPTION)
 }
 
 fn json_string(text: &str) -> String {
@@ -403,6 +419,16 @@ mod tests {
 
         assert_eq!(loaded.signing, certificate.der);
         assert_eq!(loaded.chain, vec![certificate.der, other.der]);
+    }
+
+    #[test]
+    fn non_rsa_pkcs8_keys_are_rejected() {
+        let ed25519 = PemBlock {
+            label: "PRIVATE KEY".to_owned(),
+            der: vec![0x30, 0x0A, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70],
+        };
+
+        assert_eq!(rsa_key_pair(&ed25519).err().unwrap(), "key must be an RSA key");
     }
 
     #[test]

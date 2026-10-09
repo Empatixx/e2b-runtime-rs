@@ -7,7 +7,6 @@ mod client_secret;
 mod connection_string;
 pub mod default_credential;
 mod delegation;
-mod der;
 mod dev_tool;
 mod managed_identity;
 mod msal;
