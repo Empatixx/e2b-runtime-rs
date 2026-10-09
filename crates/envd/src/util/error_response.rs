@@ -9,51 +9,28 @@ pub struct ErrorResponse {
     pub body: String,
 }
 
-pub struct ErrorResponseBuilder {
-    status: StatusCode,
-    message: String,
-    plain_text: bool,
-}
-
+#[bon::bon]
 impl ErrorResponse {
-    pub fn builder() -> ErrorResponseBuilder {
-        ErrorResponseBuilder {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: String::new(),
-            plain_text: false,
-        }
-    }
-}
-
-impl ErrorResponseBuilder {
-    pub fn status(mut self, status: StatusCode) -> Self {
-        self.status = status;
-        self
-    }
-
-    pub fn message(mut self, message: impl Display) -> Self {
-        self.message = message.to_string();
-        self
-    }
-
-    pub fn plain_text(mut self) -> Self {
-        self.plain_text = true;
-        self
-    }
-
-    pub fn build(self) -> ErrorResponse {
-        if self.plain_text {
-            return ErrorResponse {
-                status: self.status,
+    #[builder]
+    pub fn new(
+        #[builder(default = StatusCode::INTERNAL_SERVER_ERROR)] status: StatusCode,
+        #[builder(default, with = |message: impl Display| message.to_string())] message: String,
+        #[builder(default, with = || true)] plain_text: bool,
+    ) -> Self {
+        match plain_text {
+            true => ErrorResponse {
+                status,
                 content_type: "text/plain; charset=utf-8",
-                body: format!("{}\n", self.message),
-            };
-        }
-        let body = serde_json::json!({ "code": self.status.as_u16(), "message": self.message });
-        ErrorResponse {
-            status: self.status,
-            content_type: "application/json; charset=utf-8",
-            body: format!("{body}\n"),
+                body: format!("{message}\n"),
+            },
+            false => ErrorResponse {
+                status,
+                content_type: "application/json; charset=utf-8",
+                body: format!(
+                    "{}\n",
+                    serde_json::json!({ "code": status.as_u16(), "message": message })
+                ),
+            },
         }
     }
 }
