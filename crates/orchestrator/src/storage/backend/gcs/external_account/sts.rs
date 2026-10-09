@@ -31,6 +31,8 @@ struct StsResponse {
     #[serde(default)]
     access_token: String,
     #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
     expires_in: i64,
 }
 
@@ -81,20 +83,7 @@ impl Exchange<'_> {
             let basic = STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret));
             request = request.header("Authorization", format!("Basic {basic}"));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("credentials: invalid response from Secure Token Server: {e}"))?;
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("credentials: invalid response from Secure Token Server: {e}"))?;
-        if !(200..=300).contains(&status) {
-            return Err(format!("credentials: status code {status}: {body}"));
-        }
-        let parsed: StsResponse = serde_json::from_str(&body)
-            .map_err(|e| format!("credentials: failed to unmarshal response body from Secure Token Server: {e}"))?;
+        let parsed = send(request).await?;
         match parsed.expires_in {
             seconds if seconds <= 0 => Err("credentials: got invalid expiry from security token service".to_owned()),
             seconds => Ok((
@@ -102,6 +91,52 @@ impl Exchange<'_> {
                 SystemTime::now() + Duration::from_secs(u64::try_from(seconds).unwrap_or(0)),
             )),
         }
+    }
+}
+
+async fn send(request: reqwest::RequestBuilder) -> Result<StsResponse, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("credentials: invalid response from Secure Token Server: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("credentials: invalid response from Secure Token Server: {e}"))?;
+    if !(200..=300).contains(&status) {
+        return Err(format!("credentials: status code {status}: {body}"));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| format!("credentials: failed to unmarshal response body from Secure Token Server: {e}"))
+}
+
+pub struct Refreshed {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expiry: SystemTime,
+}
+
+pub async fn refresh(
+    client: &Client,
+    endpoint: &str,
+    refresh_token: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<Refreshed, String> {
+    let basic = STANDARD.encode(format!("{client_id}:{client_secret}"));
+    let request = client
+        .post(endpoint)
+        .header("Authorization", format!("Basic {basic}"))
+        .form(&[("grant_type", "refresh_token"), ("refresh_token", refresh_token)]);
+    let parsed = send(request).await?;
+    match u64::try_from(parsed.expires_in) {
+        Err(_) => Err("credentials: invalid expiry from security token service".to_owned()),
+        Ok(seconds) => Ok(Refreshed {
+            access_token: parsed.access_token,
+            refresh_token: parsed.refresh_token,
+            expiry: SystemTime::now() + Duration::from_secs(seconds),
+        }),
     }
 }
 

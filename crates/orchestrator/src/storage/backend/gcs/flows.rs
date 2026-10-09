@@ -1,4 +1,5 @@
 mod authorized_user;
+mod external_account_user;
 mod impersonated;
 mod response;
 mod service_account;
@@ -38,6 +39,9 @@ pub fn build(json: &[u8], scopes: &[&str]) -> Result<Arc<dyn TokenFlow>, String>
         "service_account" => service_account::ServiceAccountFlow::from_json(json, scopes).map(|flow| flow as _),
         "authorized_user" => authorized_user::AuthorizedUserFlow::from_json(json).map(|flow| flow as _),
         "external_account" => ExternalAccount::from_json(json, scopes).map(|flow| Arc::new(flow) as _),
+        "external_account_authorized_user" => {
+            external_account_user::ExternalAccountUserFlow::from_json(json).map(|flow| flow as _)
+        }
         "impersonated_service_account" => impersonated::ImpersonatedFlow::from_json(json, scopes).map(|flow| flow as _),
         other => Err(format!(
             "credentials: unsupported filetype {}",

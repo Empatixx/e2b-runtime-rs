@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
 
-pub use sts::impersonate;
+pub use sts::{Refreshed, impersonate, refresh};
 
 use super::flows::TokenFlow;
 use config::ExternalAccountFile;
