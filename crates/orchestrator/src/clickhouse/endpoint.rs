@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use klickhouse::{Client, ClientOptions, Row};
+use percent_encoding::percent_decode_str;
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -17,30 +19,20 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn parse(dsn: &str) -> Result<Self, String> {
-        let rest = dsn.strip_prefix("clickhouse://").ok_or("parse DSN")?;
-        let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let (credentials, location) = rest.rsplit_once('@').unwrap_or(("", rest));
-        let (username, password) = credentials.split_once(':').unwrap_or((credentials, ""));
-        let (address, database) = location.split_once('/').unwrap_or((location, ""));
-        if address.is_empty() {
-            return Err("DSN has no addresses".to_owned());
-        }
-        let address = match address.contains(':') {
-            true => address.to_owned(),
-            false => format!("{address}:9000"),
-        };
+        let url = Url::parse(dsn)
+            .ok()
+            .filter(|url| url.scheme() == "clickhouse")
+            .ok_or("parse DSN")?;
+        let host = url
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or("DSN has no addresses")?;
         Ok(Self {
-            address,
-            username: match username {
-                "" => "default".to_owned(),
-                user => user.to_owned(),
-            },
-            password: password.to_owned(),
-            database: match database {
-                "" => "default".to_owned(),
-                database => database.to_owned(),
-            },
-            secure: query.split('&').any(|pair| pair == "secure=true"),
+            address: format!("{host}:{}", url.port().unwrap_or(9000)),
+            username: or_default(&decode(url.username())),
+            password: decode(url.password().unwrap_or_default()),
+            database: or_default(url.path().trim_start_matches('/')),
+            secure: url.query_pairs().any(|(key, value)| key == "secure" && value == "true"),
         })
     }
 
@@ -118,6 +110,17 @@ impl Writer {
     }
 }
 
+fn decode(text: &str) -> String {
+    percent_decode_str(text).decode_utf8_lossy().into_owned()
+}
+
+fn or_default(text: &str) -> String {
+    match text {
+        "" => "default".to_owned(),
+        text => text.to_owned(),
+    }
+}
+
 fn tls_connector() -> TlsConnector {
     let roots = RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -145,7 +148,19 @@ mod tests {
             }
         );
         assert_eq!(Endpoint::parse("http://x").unwrap_err(), "parse DSN");
+        assert_eq!(Endpoint::parse("clickhouse://host").unwrap().address, "host:9000");
         assert_eq!(Endpoint::parse("clickhouse:///db").unwrap_err(), "DSN has no addresses");
+    }
+
+    #[test]
+    fn credentials_are_percent_decoded() {
+        let endpoint = Endpoint::parse("clickhouse://us%65r:p%40ss@host:9440").unwrap();
+
+        assert_eq!(
+            (endpoint.username.as_str(), endpoint.password.as_str()),
+            ("user", "p@ss")
+        );
+        assert_eq!(endpoint.database, "default");
     }
 
     #[test]
