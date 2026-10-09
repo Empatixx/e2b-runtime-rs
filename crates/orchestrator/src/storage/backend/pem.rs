@@ -1,9 +1,4 @@
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-
 const BEGIN: &str = "-----BEGIN ";
-const END: &str = "-----END ";
-const DASHES: &str = "-----";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PemBlock {
@@ -12,18 +7,20 @@ pub struct PemBlock {
 }
 
 pub fn blocks(text: &str) -> Vec<PemBlock> {
-    text.split(BEGIN)
-        .skip(1)
-        .filter_map(|section| {
-            let (label, rest) = section.split_once(DASHES)?;
-            let body = rest.split_once(END)?.0;
-            let encoded: String = body.split_whitespace().collect();
-            Some(PemBlock {
-                label: label.to_owned(),
-                der: STANDARD.decode(encoded).ok()?,
-            })
+    text.match_indices(BEGIN)
+        .filter_map(|(start, _)| ::pem::parse(&text[start..]).ok())
+        .map(|block| PemBlock {
+            label: block.tag().to_owned(),
+            der: block.into_contents(),
         })
         .collect()
+}
+
+pub fn first_der_or_raw(text: &str) -> Vec<u8> {
+    blocks(text)
+        .into_iter()
+        .next()
+        .map_or_else(|| text.as_bytes().to_vec(), |block| block.der)
 }
 
 #[cfg(test)]

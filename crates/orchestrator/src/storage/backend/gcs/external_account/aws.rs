@@ -1,19 +1,20 @@
-use std::collections::BTreeMap;
+use std::borrow::Cow;
 
+use aws_credential_types::Credentials;
+use aws_sigv4::http_request::{PercentEncodingMode, SignableBody, SignableRequest, SigningSettings, sign};
+use aws_sigv4::sign::v4;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::super::{credsfile, go_json};
 use super::config::{CredentialSource, ExternalAccountFile};
 use crate::go_url::GoUrl;
 use crate::go_url::escape::{Mode, escape};
-use crate::go_url::query::Query;
 
-const ALGORITHM: &str = "AWS4-HMAC-SHA256";
-const REQUEST_TYPE: &str = "aws4_request";
+const PROVIDER: &str = "external-account";
+const AUTHORIZATION: &str = "authorization";
+const AMZ_DATE: &str = "x-amz-date";
 const DEFAULT_VERIFICATION_URL: &str = "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15";
 const SESSION_TOKEN_HEADER: &str = "X-aws-ec2-metadata-token";
 const SESSION_TTL_HEADER: &str = "X-aws-ec2-metadata-token-ttl-seconds";
@@ -200,37 +201,48 @@ pub struct UnsignedRequest<'a> {
     pub headers: &'a [(String, String)],
 }
 
-pub fn authorization(request: &UnsignedRequest, keys: &AwsKeys, region: &str, now: DateTime<Utc>) -> String {
-    let (columns, data) = canonical_headers(request.headers);
-    let date_stamp = now.format("%Y%m%d").to_string();
-    let service = request.url.host.split('.').next().unwrap_or_default();
-    let scope = [date_stamp.as_str(), region, service, REQUEST_TYPE].join("/");
-    let canonical = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        request.method,
-        canonical_path(request.url),
-        canonical_query(request.url),
-        data,
-        columns,
-        sha256_hex(b"")
-    );
-    let to_sign = [
-        ALGORITHM,
-        &now.format("%Y%m%dT%H%M%SZ").to_string(),
-        &scope,
-        &sha256_hex(canonical.as_bytes()),
-    ]
-    .join("\n");
-    let key = [date_stamp.as_str(), region, service, REQUEST_TYPE, to_sign.as_str()]
+pub fn authorization(
+    request: &UnsignedRequest,
+    keys: &AwsKeys,
+    region: &str,
+    now: DateTime<Utc>,
+) -> Result<String, String> {
+    let identity = Credentials::new(&keys.access_key_id, &keys.secret_access_key, None, None, PROVIDER).into();
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name(request.url.host.split('.').next().unwrap_or_default())
+        .time(now.into())
+        .settings(signing_settings(request.headers))
+        .build()
+        .map_err(|e| e.to_string())?
+        .into();
+    let headers = request
+        .headers
         .iter()
-        .fold(format!("AWS4{}", keys.secret_access_key).into_bytes(), |key, input| {
-            hmac(&key, input.as_bytes())
-        });
-    format!(
-        "{ALGORITHM} Credential={}/{scope}, SignedHeaders={columns}, Signature={}",
-        keys.access_key_id,
-        hex(&key)
+        .map(|(key, value)| (key.as_str(), value.as_str()));
+    let signable = SignableRequest::new(
+        request.method,
+        request.url.to_string(),
+        headers,
+        SignableBody::Bytes(&[]),
     )
+    .map_err(|e| e.to_string())?;
+    let (instructions, _) = sign(signable, &params).map_err(|e| e.to_string())?.into_parts();
+    instructions
+        .headers()
+        .find_map(|(key, value)| (key == AUTHORIZATION).then(|| value.to_owned()))
+        .ok_or_else(|| "aws: missing authorization header".to_owned())
+}
+
+fn signing_settings(headers: &[(String, String)]) -> SigningSettings {
+    let mut settings = SigningSettings::default();
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.excluded_headers = headers
+        .iter()
+        .all(|(key, _)| !key.eq_ignore_ascii_case(AMZ_DATE))
+        .then(|| vec![Cow::Borrowed(AMZ_DATE)]);
+    settings
 }
 
 fn signed_subject_token(
@@ -245,7 +257,7 @@ fn signed_subject_token(
     if !keys.session_token.is_empty() {
         headers.push(("x-amz-security-token".to_owned(), keys.session_token.clone()));
     }
-    headers.push(("x-amz-date".to_owned(), now.format("%Y%m%dT%H%M%SZ").to_string()));
+    headers.push((AMZ_DATE.to_owned(), now.format("%Y%m%dT%H%M%SZ").to_string()));
     if !target_resource.is_empty() {
         headers.push(("x-goog-cloud-target-resource".to_owned(), target_resource.to_owned()));
     }
@@ -258,8 +270,8 @@ fn signed_subject_token(
         keys,
         region,
         now,
-    );
-    headers.push(("authorization".to_owned(), signature));
+    )?;
+    headers.push((AUTHORIZATION.to_owned(), signature));
     let mut signed: Vec<SignedHeader> = headers
         .into_iter()
         .map(|(key, value)| SignedHeader {
@@ -288,66 +300,6 @@ fn canonical_header_key(key: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("-")
-}
-
-fn canonical_headers(headers: &[(String, String)]) -> (String, String) {
-    let mut merged: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-    for (key, value) in headers {
-        merged.entry(key.to_ascii_lowercase()).or_default().push(value);
-    }
-    let columns = merged.keys().cloned().collect::<Vec<_>>().join(";");
-    let data = merged
-        .iter()
-        .map(|(key, values)| format!("{key}:{}\n", values.join(",")))
-        .collect();
-    (columns, data)
-}
-
-fn canonical_path(url: &GoUrl) -> String {
-    match url.escaped_path().as_str() {
-        "" => "/".to_owned(),
-        path => clean_path(path),
-    }
-}
-
-fn clean_path(path: &str) -> String {
-    let rooted = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." if parts.last().is_some_and(|last| *last != "..") => {
-                parts.pop();
-            }
-            ".." if rooted => {}
-            other => parts.push(other),
-        }
-    }
-    match (rooted, parts.is_empty()) {
-        (true, _) => format!("/{}", parts.join("/")),
-        (false, true) => ".".to_owned(),
-        (false, false) => parts.join("/"),
-    }
-}
-
-fn canonical_query(url: &GoUrl) -> String {
-    let mut query = Query::parse(&url.raw_query);
-    query.values.values_mut().for_each(|values| values.sort());
-    query.encode()
-}
-
-fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    hex(&Sha256::digest(data))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -381,19 +333,13 @@ mod tests {
             &keys(),
             "us-east-1",
             Utc.with_ymd_and_hms(2011, 9, 9, 23, 36, 0).unwrap(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             signature,
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20110909/us-east-1/host/aws4_request, SignedHeaders=date;host, Signature=b27ccfbfa7df52a200ff74193ca6e32d4b48b8856fab7ebf1c595d0670a7e470"
         );
-    }
-
-    #[test]
-    fn paths_are_cleaned_like_go() {
-        assert_eq!(clean_path("/foo/bar/../.."), "/");
-        assert_eq!(clean_path("/./"), "/");
-        assert_eq!(clean_path("/a//b/./c"), "/a/b/c");
     }
 
     #[test]

@@ -137,16 +137,9 @@ fn host() -> String {
 }
 
 fn sign(private_key: &str, message: &str) -> Result<String, String> {
-    let der = private_key_der(private_key);
+    let der = pem::first_der_or_raw(private_key);
     let key = key_errors::rsa_key(&der)?;
     sign_rsa(&key, message.as_bytes()).map(|signature| STANDARD.encode(signature))
-}
-
-fn private_key_der(private_key: &str) -> Vec<u8> {
-    pem::blocks(private_key)
-        .into_iter()
-        .next()
-        .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der)
 }
 
 #[cfg(test)]
@@ -229,7 +222,7 @@ mod tests {
     #[test]
     fn signatures_verify_against_the_public_key() {
         use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaKeyPair, UnparsedPublicKey};
-        let der = private_key_der(TEST_KEY);
+        let der = pem::first_der_or_raw(TEST_KEY);
         let key = RsaKeyPair::from_pkcs8(&der).unwrap();
         let message = string_to_sign(1_700_000_000, "/bucket/t/memfile");
 

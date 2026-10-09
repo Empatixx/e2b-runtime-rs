@@ -94,11 +94,7 @@ impl JwtFlow {
 }
 
 fn parse_key(private_key: &str) -> Result<RsaPrivateKey, String> {
-    let der = pem::blocks(private_key)
-        .into_iter()
-        .next()
-        .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der);
-    oauth2_rsa_key(&der)
+    oauth2_rsa_key(&pem::first_der_or_raw(private_key))
 }
 
 fn json(text: &str) -> String {
