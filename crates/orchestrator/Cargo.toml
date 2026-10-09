@@ -50,6 +50,7 @@ xattr = "1"
 flate2 = "1"
 zstd = "0.13"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt", "io", "io-util"] }
 opentelemetry = { version = "0.31", features = ["metrics", "trace", "logs"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "gzip-tonic", "metrics", "trace", "logs"] }
@@ -75,4 +76,3 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-stream = { version = "0.1", features = ["net"] }

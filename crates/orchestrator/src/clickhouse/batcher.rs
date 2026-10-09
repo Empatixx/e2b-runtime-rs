@@ -1,10 +1,12 @@
 use std::future::Future;
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 
 pub const DEFAULT_QUEUE_SIZE: usize = 1000;
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 1000;
@@ -28,8 +30,7 @@ impl Default for BatcherOptions {
 }
 
 pub struct Batcher<T> {
-    sender: mpsc::Sender<T>,
-    closing: CancellationToken,
+    sender: Mutex<Option<mpsc::Sender<T>>>,
     flusher: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -40,25 +41,27 @@ impl<T: Send + 'static> Batcher<T> {
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel(options.queue_size.max(1));
-        let name = name.to_owned();
-        let closing = CancellationToken::new();
-        let flusher = tokio::spawn(run(name, options, receiver, closing.clone(), flush));
+        let flusher = tokio::spawn(run(name.to_owned(), options, receiver, flush));
         Self {
-            sender,
-            closing,
+            sender: Mutex::new(Some(sender)),
             flusher: Mutex::new(Some(flusher)),
         }
     }
 
     pub fn push(&self, item: T) -> Result<(), String> {
-        self.sender.try_send(item).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => "batcher queue is full".to_owned(),
-            mpsc::error::TrySendError::Closed(_) => "batcher is not started".to_owned(),
-        })
+        self.sender
+            .lock()
+            .as_ref()
+            .ok_or("batcher is not started")?
+            .try_send(item)
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => "batcher queue is full".to_owned(),
+                mpsc::error::TrySendError::Closed(_) => "batcher is not started".to_owned(),
+            })
     }
 
     pub async fn stop(&self) {
-        self.closing.cancel();
+        self.sender.lock().take();
         let flusher = self.flusher.lock().take();
         if let Some(flusher) = flusher {
             let _ = flusher.await;
@@ -66,58 +69,19 @@ impl<T: Send + 'static> Batcher<T> {
     }
 }
 
-async fn run<T, F, Fut>(
-    name: String,
-    options: BatcherOptions,
-    mut receiver: mpsc::Receiver<T>,
-    closing: CancellationToken,
-    flush: F,
-) where
-    F: Fn(Vec<T>) -> Fut,
-    Fut: Future<Output = Result<(), String>>,
-{
-    let mut batch = Vec::new();
-    let mut ticks = tokio::time::interval(options.max_delay);
-    ticks.tick().await;
-    loop {
-        tokio::select! {
-            item = receiver.recv() => match item {
-                Some(item) => {
-                    batch.push(item);
-                    if batch.len() >= options.max_batch_size {
-                        send(&name, &flush, &mut batch).await;
-                        ticks.reset();
-                    }
-                }
-                None => {
-                    send(&name, &flush, &mut batch).await;
-                    return;
-                }
-            },
-            _ = ticks.tick() => send(&name, &flush, &mut batch).await,
-            () = closing.cancelled() => {
-                receiver.close();
-                while let Some(item) = receiver.recv().await {
-                    batch.push(item);
-                }
-                send(&name, &flush, &mut batch).await;
-                return;
-            }
-        }
-    }
-}
-
-async fn send<T, F, Fut>(name: &str, flush: &F, batch: &mut Vec<T>)
+async fn run<T, F, Fut>(name: String, options: BatcherOptions, receiver: mpsc::Receiver<T>, flush: F)
 where
     F: Fn(Vec<T>) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    if batch.is_empty() {
-        return;
-    }
-    if let Err(e) = flush(std::mem::take(batch)).await {
-        tracing::error!(batcher = name, error = %e, "error batching items");
-    }
+    ReceiverStream::new(receiver)
+        .chunks_timeout(options.max_batch_size.max(1), options.max_delay)
+        .for_each(|batch| async {
+            if let Err(e) = flush(batch).await {
+                tracing::error!(batcher = name, error = %e, "error batching items");
+            }
+        })
+        .await;
 }
 
 #[cfg(test)]
