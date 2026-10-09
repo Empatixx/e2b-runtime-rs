@@ -1,14 +1,15 @@
 use std::path::Path;
 
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
 use pkcs8::der::Decode;
 use pkcs8::{ObjectIdentifier, PrivateKeyInfoRef};
 use reqwest::Client;
-use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
-use ring::rand::SystemRandom;
-use ring::signature::{RSA_PKCS1_SHA256, RSA_PSS_SHA256, RsaEncoding, RsaKeyPair};
+use ring::digest::{Algorithm as DigestAlgorithm, SHA1_FOR_LEGACY_USE_ONLY, SHA256, digest};
+use ring::signature::RsaKeyPair;
+use serde::Serialize;
 use tokio::sync::Mutex;
 use x509_cert::Certificate;
 
@@ -26,7 +27,17 @@ const RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.1
 pub struct ClientCertificate {
     signing: Vec<u8>,
     chain: Vec<Vec<u8>>,
-    key: RsaKeyPair,
+    key: EncodingKey,
+}
+
+#[derive(Serialize)]
+struct Claims<'a> {
+    aud: &'a str,
+    exp: u64,
+    iss: &'a str,
+    jti: String,
+    nbf: u64,
+    sub: &'a str,
 }
 
 pub struct ClientCertificateCredential {
@@ -53,34 +64,22 @@ impl Signing {
         }
     }
 
-    fn algorithm(self) -> &'static str {
+    fn header(self, certificate: &[u8]) -> Header {
         match self {
-            Self::Pss256 => "PS256",
-            Self::Rs256 => "RS256",
+            Self::Pss256 => Header {
+                x5t_s256: Some(thumbprint(&SHA256, certificate)),
+                ..Header::new(Algorithm::PS256)
+            },
+            Self::Rs256 => Header {
+                x5t: Some(thumbprint(&SHA1_FOR_LEGACY_USE_ONLY, certificate)),
+                ..Header::new(Algorithm::RS256)
+            },
         }
     }
+}
 
-    fn thumbprint_header(self) -> &'static str {
-        match self {
-            Self::Pss256 => "x5t#S256",
-            Self::Rs256 => "x5t",
-        }
-    }
-
-    fn thumbprint(self, certificate: &[u8]) -> String {
-        let algorithm = match self {
-            Self::Pss256 => &SHA256,
-            Self::Rs256 => &SHA1_FOR_LEGACY_USE_ONLY,
-        };
-        STANDARD.encode(digest(algorithm, certificate))
-    }
-
-    fn padding(self) -> &'static dyn RsaEncoding {
-        match self {
-            Self::Pss256 => &RSA_PSS_SHA256,
-            Self::Rs256 => &RSA_PKCS1_SHA256,
-        }
-    }
+fn thumbprint(algorithm: &'static DigestAlgorithm, certificate: &[u8]) -> String {
+    STANDARD.encode(digest(algorithm, certificate))
 }
 
 impl ClientCertificate {
@@ -129,14 +128,12 @@ impl ClientCertificate {
             return Err("found no certificate".to_owned());
         }
         let key = key.ok_or_else(|| "found no private key".to_owned())?;
-        let pair = rsa_key_pair(key)?;
-        Self::matching(&certificates, pair)
+        let public = rsa_key_pair(key)?.public().as_ref().to_vec();
+        Self::matching(&certificates, &public, rsa_encoding_key(&key.der))
     }
 
-    fn matching(certificates: &[&[u8]], key: RsaKeyPair) -> Result<Self, String> {
-        let public = key.public().as_ref().to_vec();
-        let matches =
-            |certificate: &&[u8]| certificate_rsa_public_key(certificate).as_deref() == Some(public.as_slice());
+    fn matching(certificates: &[&[u8]], public: &[u8], key: EncodingKey) -> Result<Self, String> {
+        let matches = |certificate: &&[u8]| certificate_rsa_public_key(certificate).as_deref() == Some(public);
         let signing = certificates
             .iter()
             .rev()
@@ -156,20 +153,6 @@ impl ClientCertificate {
         })
     }
 
-    fn chain_header(&self, send_chain: bool) -> String {
-        match send_chain {
-            true => format!(
-                r#""x5c":[{}],"#,
-                self.chain
-                    .iter()
-                    .map(|certificate| format!("\"{}\"", STANDARD.encode(certificate)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            false => String::new(),
-        }
-    }
-
     pub fn assertion(
         &self,
         audience: &str,
@@ -178,32 +161,24 @@ impl ClientCertificate {
         now_unix: u64,
         signing: Signing,
     ) -> Result<String, String> {
-        let header = format!(
-            r#"{{"alg":"{}","typ":"JWT",{}"{}":"{}"}}"#,
-            signing.algorithm(),
-            self.chain_header(send_chain),
-            signing.thumbprint_header(),
-            signing.thumbprint(&self.signing)
-        );
-        let claims = format!(
-            r#"{{"aud":{},"exp":{},"iss":{},"jti":"{}","nbf":{now_unix},"sub":{}}}"#,
-            json_string(audience),
-            now_unix + ASSERTION_LIFETIME_SECONDS,
-            json_string(client_id),
-            uuid::Uuid::new_v4(),
-            json_string(client_id)
-        );
-        let signing_input = format!("{}.{}", URL_SAFE_NO_PAD.encode(header), URL_SAFE_NO_PAD.encode(claims));
-        let mut signature = vec![0; self.key.public().modulus_len()];
-        self.key
-            .sign(
-                signing.padding(),
-                &SystemRandom::new(),
-                signing_input.as_bytes(),
-                &mut signature,
-            )
-            .map_err(|e| format!("unable to sign JWT token: {e}"))?;
-        Ok(format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature)))
+        let header = Header {
+            x5c: send_chain.then(|| {
+                self.chain
+                    .iter()
+                    .map(|certificate| STANDARD.encode(certificate))
+                    .collect()
+            }),
+            ..signing.header(&self.signing)
+        };
+        let claims = Claims {
+            aud: audience,
+            exp: now_unix + ASSERTION_LIFETIME_SECONDS,
+            iss: client_id,
+            jti: uuid::Uuid::new_v4().to_string(),
+            nbf: now_unix,
+            sub: client_id,
+        };
+        jsonwebtoken::encode(&header, &claims, &self.key).map_err(|e| format!("unable to sign JWT token: {e}"))
     }
 }
 
@@ -224,12 +199,12 @@ fn certificate_rsa_public_key(certificate: &[u8]) -> Option<Vec<u8>> {
         .and_then(|info| info.subject_public_key.as_bytes().map(<[u8]>::to_vec))
 }
 
-fn pkcs8_is_rsa(private_key_info: &[u8]) -> bool {
-    PrivateKeyInfoRef::from_der(private_key_info).is_ok_and(|info| info.algorithm.oid == RSA_ENCRYPTION)
+fn rsa_encoding_key(der: &[u8]) -> EncodingKey {
+    EncodingKey::from_rsa_der(PrivateKeyInfoRef::from_der(der).map_or(der, |info| info.private_key.as_bytes()))
 }
 
-fn json_string(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_default()
+fn pkcs8_is_rsa(private_key_info: &[u8]) -> bool {
+    PrivateKeyInfoRef::from_der(private_key_info).is_ok_and(|info| info.algorithm.oid == RSA_ENCRYPTION)
 }
 
 fn pkcs12_blocks(data: &[u8], password: &str) -> Result<Vec<PemBlock>, String> {
@@ -303,6 +278,7 @@ impl TokenSource for ClientCertificateCredential {
 
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256, UnparsedPublicKey};
 
     use super::*;
@@ -377,7 +353,7 @@ mod tests {
         let parts: Vec<&str> = jwt.split('.').collect();
 
         let header = decoded(parts[0]);
-        assert!(header.starts_with(r#"{"alg":"PS256","typ":"JWT","x5c":[""#));
+        assert!(header.starts_with(r#"{"typ":"JWT","alg":"PS256","x5c":[""#));
         let thumbprint = STANDARD.encode(digest(&SHA256, &certificate.chain[0]));
         assert!(header.ends_with(&format!(r#""x5t#S256":"{thumbprint}"}}"#)));
         let claims = decoded(parts[1]);
@@ -386,13 +362,17 @@ mod tests {
         );
         assert!(claims.ends_with(r#"","nbf":1700000000,"sub":"client"}"#));
         let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
-        UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, certificate.key.public().as_ref())
+        UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, &public_key())
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
             .unwrap();
         let without_chain = certificate.assertion("a", "c", false, 1, Signing::Pss256).unwrap();
         assert!(
-            decoded(without_chain.split('.').next().unwrap()).starts_with(r#"{"alg":"PS256","typ":"JWT","x5t#S256""#)
+            decoded(without_chain.split('.').next().unwrap()).starts_with(r#"{"typ":"JWT","alg":"PS256","x5t#S256""#)
         );
+    }
+
+    fn public_key() -> Vec<u8> {
+        rsa_key_pair(&pem_blocks().1).unwrap().public().as_ref().to_vec()
     }
 
     fn pem_blocks() -> (PemBlock, PemBlock, PemBlock) {
@@ -453,10 +433,10 @@ mod tests {
         let thumbprint = STANDARD.encode(digest(&SHA1_FOR_LEGACY_USE_ONLY, &certificate.signing));
         assert_eq!(
             decoded(parts[0]),
-            format!(r#"{{"alg":"RS256","typ":"JWT","x5t":"{thumbprint}"}}"#)
+            format!(r#"{{"typ":"JWT","alg":"RS256","x5t":"{thumbprint}"}}"#)
         );
         let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
-        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, certificate.key.public().as_ref())
+        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, &public_key())
             .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
             .unwrap();
     }
@@ -504,7 +484,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split('&').next())
             .unwrap();
-        assert!(decoded(assertion.split('.').next().unwrap()).starts_with(r#"{"alg":"RS256""#));
+        assert!(decoded(assertion.split('.').next().unwrap()).starts_with(r#"{"typ":"JWT","alg":"RS256""#));
         assert!(
             decoded(assertion.split('.').nth(1).unwrap()).contains(&format!(r#""aud":"{base}/adfs/oauth2/token""#))
         );

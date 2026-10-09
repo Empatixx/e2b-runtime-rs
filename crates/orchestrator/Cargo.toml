@@ -15,6 +15,7 @@ aws-sdk-ecr = { version = "1", default-features = false, features = ["behavior-v
 base64 = "0.22"
 futures = "0.3"
 hex = "0.4"
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
