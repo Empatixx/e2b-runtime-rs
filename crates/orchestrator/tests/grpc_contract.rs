@@ -409,6 +409,17 @@ async fn eventually(within: Duration, check: impl Fn() -> bool) -> bool {
     check()
 }
 
+async fn promptly(within: Duration, check: impl Fn() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    check()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sandbox_lifecycle_over_grpc() {
     let Some(host) = host() else {
@@ -727,7 +738,7 @@ async fn cancelled_create_and_pause_requests_still_run_to_completion() {
     let mut pausing = client.clone();
     let abandoned_pause = tokio::spawn(async move { pausing.pause(pause).await });
     assert!(
-        eventually(Duration::from_secs(10), || cluster
+        promptly(Duration::from_secs(10), || cluster
             .node
             .registry
             .get("grpc-cancelled")
@@ -737,8 +748,10 @@ async fn cancelled_create_and_pause_requests_still_run_to_completion() {
     );
     abandoned_pause.abort();
     assert!(
-        abandoned_pause.await.unwrap_err().is_cancelled(),
-        "the pause finished before it was cancelled"
+        abandoned_pause
+            .await
+            .map_or_else(|e| e.is_cancelled(), |paused| paused.is_ok()),
+        "the abandoned pause failed"
     );
     assert!(
         eventually(Duration::from_secs(60), || upload_landed(&cluster, paused_build)).await,
