@@ -3143,6 +3143,7 @@ dependencies = [
  "aws-credential-types",
  "aws-runtime",
  "aws-sdk-ecr",
+ "aws-sigv4",
  "axum",
  "base64 0.22.1",
  "bytes",
