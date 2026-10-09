@@ -3122,6 +3122,7 @@ dependencies = [
  "hyper-util",
  "klickhouse",
  "launchdarkly-server-sdk",
+ "moka",
  "nix 0.29.0",
  "object_store",
  "opentelemetry",

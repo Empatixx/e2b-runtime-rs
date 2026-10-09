@@ -65,7 +65,6 @@ impl App {
     pub fn start_background(&self) {
         self.node.start_background();
         tokio::spawn(self.metrics.clone().run());
-        tokio::spawn(self.builds.clone().run_eviction());
     }
 
     pub async fn wait_for_templates(&self, force_stop: bool, local: bool) -> Result<(), String> {

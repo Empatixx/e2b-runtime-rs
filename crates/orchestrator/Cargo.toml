@@ -59,6 +59,7 @@ tracing-opentelemetry = { version = "0.32", default-features = false }
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["serde", "v4"] }
 launchdarkly-server-sdk = { version = "3.3.0", default-features = false, features = ["hyper-rustls-webpki-roots", "event-compression"] }
+moka = { version = "0.12.16", features = ["sync"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
