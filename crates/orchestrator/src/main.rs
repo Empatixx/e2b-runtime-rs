@@ -117,11 +117,14 @@ mod serve {
                 "Starting sandbox drain phase"
             );
             drain(|| node.registry.is_empty(), std::future::pending()).await;
+            node.shutdown().await;
         }
-        node.shutdown().await;
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
-        node.close().await;
+        match config.force_stop {
+            true => node.close_forced().await,
+            false => node.close().await,
+        }
         feature_flags.close().await;
         if let Some((events, host_stats)) = &clickhouse {
             tokio::join!(events.stop(), host_stats.stop());

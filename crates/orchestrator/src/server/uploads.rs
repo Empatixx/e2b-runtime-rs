@@ -93,6 +93,10 @@ impl Uploads {
         }
     }
 
+    pub fn in_flight(&self) -> usize {
+        self.tasks.len()
+    }
+
     pub async fn wait_all(&self) {
         self.tasks.close();
         self.tasks.wait().await;
@@ -209,6 +213,17 @@ mod tests {
         assert_eq!(uploads.outcome(id(1)), None);
         assert_eq!(uploads.outcome(id(2)), Some(Outcome::Failed));
         assert_eq!(uploads.wait(id(1)).await, Outcome::Landed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn in_flight_counts_the_uploads_that_have_not_ended() {
+        let uploads = Arc::new(Uploads::default());
+        uploads.start(id(1), Vec::new(), std::future::pending, |_| {});
+        uploads.start(id(2), Vec::new(), || async { Ok(()) }, |_| {});
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert_eq!(uploads.in_flight(), 1);
     }
 
     #[tokio::test(start_paused = true)]

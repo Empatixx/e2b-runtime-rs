@@ -211,6 +211,7 @@ impl SandboxServer {
     fn describe(&self, handle: &SandboxHandle) -> RunningSandbox {
         let info = handle.info.lock().clone();
         RunningSandbox {
+            config: Some(info.config.clone()),
             client_id: self.node.node_id.clone(),
             start_time: Some(info.start.into()),
             end_time: Some(info.end.into()),
@@ -219,7 +220,6 @@ impl SandboxServer {
             execution_id: info.config.execution_id,
             vcpu: info.config.vcpu,
             ram_mb: info.config.ram_mb,
-            ..RunningSandbox::default()
         }
     }
 }

@@ -19,20 +19,21 @@ use super::build_id;
 use super::config::NodeConfig;
 use super::config::binaries::Binaries;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
+use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::scheduling::from_headers;
 use super::services::Services;
 use super::status::NodeStatus;
-use super::uploads::Uploads;
+use super::uploads::{Outcome, Uploads};
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
-use crate::firecracker::version::supports_memfd;
 use crate::featureflags::FeatureFlags;
+use crate::firecracker::version::supports_memfd;
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
 use crate::network::firewall::EgressRules;
@@ -151,9 +152,9 @@ pub struct Lifetime {
 impl Node {
     pub fn new(config: &NodeConfig) -> Result<Self, String> {
         let storage = config.open_template_storage()?;
-        Ok(Self {
         let admission = Admission::from_flags(&config.feature_flags)?;
         let max_sandboxes = admission.max_sandboxes();
+        Ok(Self {
             node_id: config.node_id.clone(),
             store: Arc::new(DiffStore::new(storage.clone(), config.cache_dir.clone())),
             labels: config.labels.clone(),
@@ -185,9 +186,9 @@ impl Node {
     }
 
     pub fn start_background(&self) {
-        self.network.start();
         self.admission
             .start_refresh(self.feature_flags.clone(), LIMIT_REFRESH_INTERVAL);
+        self.network.start();
         tokio::spawn(self.templates.clone().run_eviction());
         tokio::spawn(self.store.clone().run_eviction(self.build_cache_max_usage));
     }
@@ -225,10 +226,14 @@ impl Node {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
         let store = self.store.clone();
+        let filesystem_only = build.memfile.metadata.size == 0;
         let attempt = move || upload_attempt(local.clone(), storage.clone(), object_metadata.clone());
         self.uploads
             .start(build.build_id, parents(&build), attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
+                if outcome == Outcome::Failed {
+                    count_failed_snapshot_upload(filesystem_only);
+                }
                 store.unpin(build.build_id);
             });
     }
@@ -352,6 +357,14 @@ impl Node {
 
     pub async fn close(&self) {
         self.uploads.wait_all().await;
+        self.network.close().await;
+    }
+
+    pub async fn close_forced(&self) {
+        tracing::warn!(
+            uploads = self.uploads.in_flight(),
+            "shutting down with snapshot uploads still in flight"
+        );
         self.network.close().await;
     }
 
