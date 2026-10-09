@@ -36,8 +36,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
                        pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
-  src/network/         slot.rs (netns, veth, tap, host REDIRECTs per slot; HostSlots), pool.rs (NetworkPool: 32 new,
-                       100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
+  src/network/         slot.rs (slot addressing), slot/host.rs (Linux: netns, veth, tap via rtnetlink/tun,
+                       iptables REDIRECTs; HostSlots), pool.rs (NetworkPool: 32 new, 100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
                        leaked namespaces), firewall.rs (nftables slot-firewall: sets, DSCP, EgressRules),
                        settings.rs (SANDBOX_* network env), prerequisites.rs (NETWORK_VERSION=2 checks)
   src/tcpfirewall/     egress TCP proxy on 5016/5017/5018: rules.rs (domain/CIDR allow-deny), sniff.rs (HTTP Host,

@@ -492,14 +492,12 @@ impl Node {
     }
 
     pub async fn sweep(&self) {
-        let namespaces = crate::system::output("ip", &["netns", "list"])
-            .await
-            .unwrap_or_default();
-        let slots: Vec<Slot> = namespaces
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .filter_map(|name| name.strip_prefix("ns-"))
-            .filter_map(|index| index.parse().ok())
+        let slots: Vec<Slot> = std::fs::read_dir("/var/run/netns")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| name.strip_prefix("ns-")?.parse().ok())
             .filter_map(|index| Slot::new(index).ok())
             .collect();
         for slot in slots {
