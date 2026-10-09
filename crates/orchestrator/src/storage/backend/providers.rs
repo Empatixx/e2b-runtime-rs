@@ -5,7 +5,7 @@ use object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder};
 
 use super::aws::{AwsDefaults, DefaultChainCredentials};
 use super::gcs::adc::AdcFile;
-use super::gcs::external_account::{ExternalAccountCredentials, is_external_account};
+use super::gcs::flows::FlowCredentials;
 use crate::go_url::GoUrl;
 use crate::storage::spec::StorageSpec;
 
@@ -54,13 +54,11 @@ pub fn gcs(spec: &StorageSpec) -> Result<GoogleCloudStorage, String> {
     let builder = GoogleCloudStorageBuilder::new().with_bucket_name(&spec.bucket);
     let adc = AdcFile::locate(&|name| std::env::var(name).ok()).map_err(|e| gcs_error(&e))?;
     let builder = match adc {
-        Some(file) if is_external_account(&file.bytes) => {
-            let credentials =
-                ExternalAccountCredentials::from_json(&file.bytes, &GCS_SCOPES).map_err(|e| gcs_error(&e))?;
+        Some(file) => {
+            let credentials = FlowCredentials::from_json(&file.bytes, &GCS_SCOPES).map_err(|e| gcs_error(&e))?;
             builder.with_credentials(Arc::new(credentials))
         }
-        Some(file) if file.from_environment => builder.with_application_credentials(file.path.display().to_string()),
-        _ => builder,
+        None => builder,
     };
     builder.build().map_err(|e| gcs_error(&e.to_string()))
 }

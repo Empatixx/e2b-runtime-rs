@@ -36,6 +36,8 @@ struct StsResponse {
 
 #[derive(Serialize)]
 struct GenerateAccessToken<'a> {
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    delegates: &'a [String],
     lifetime: String,
     scope: &'a [String],
 }
@@ -108,6 +110,7 @@ pub async fn impersonate(
     url: &str,
     source_token: &str,
     scopes: &[String],
+    delegates: &[String],
     lifetime_seconds: i64,
 ) -> Result<(String, SystemTime), String> {
     let lifetime = match lifetime_seconds {
@@ -115,6 +118,7 @@ pub async fn impersonate(
         seconds => format!("{seconds}s"),
     };
     let body = serde_json::to_string(&GenerateAccessToken {
+        delegates,
         lifetime,
         scope: scopes,
     })

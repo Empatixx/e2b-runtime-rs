@@ -5,22 +5,19 @@ mod sts;
 mod subject;
 mod x509;
 
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use object_store::gcp::GcpCredential;
-use object_store::{CredentialProvider, Error as StoreError};
 use reqwest::Client;
 
-use super::super::credential_cache::CredentialCache;
+pub use sts::impersonate;
+
+use super::flows::TokenFlow;
 use config::ExternalAccountFile;
 use subject::Subject;
 
-const STORE: &str = "GoogleCloudStorage";
-const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-const EARLY_REFRESH: Duration = Duration::from_secs(165);
+use super::flows::CLOUD_PLATFORM_SCOPE;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const FILE_TYPE: &str = "external_account";
 
 pub struct ExternalAccount {
     file: ExternalAccountFile,
@@ -29,33 +26,11 @@ pub struct ExternalAccount {
     scopes: Vec<String>,
 }
 
-#[derive(Debug)]
-pub struct ExternalAccountCredentials {
-    account: Arc<ExternalAccount>,
-    cache: CredentialCache<GcpCredential>,
-}
-
 impl std::fmt::Debug for ExternalAccount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExternalAccount")
             .field("audience", &self.file.audience)
             .finish_non_exhaustive()
-    }
-}
-
-pub fn is_external_account(json: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(json)
-        .ok()
-        .and_then(|value| value.get("type").and_then(|kind| kind.as_str().map(str::to_owned)))
-        .is_some_and(|kind| kind == FILE_TYPE)
-}
-
-impl ExternalAccountCredentials {
-    pub fn from_json(json: &[u8], scopes: &[&str]) -> Result<Self, String> {
-        ExternalAccount::from_json(json, scopes).map(|account| Self {
-            account: Arc::new(account),
-            cache: CredentialCache::default(),
-        })
     }
 }
 
@@ -80,7 +55,7 @@ impl ExternalAccount {
         })
     }
 
-    pub async fn token(&self) -> Result<(String, SystemTime), String> {
+    async fn exchange(&self) -> Result<(String, SystemTime), String> {
         let subject_token = self.subject.token().await?;
         let impersonation_url = self.file.service_account_impersonation_url.as_str();
         let sts_scopes = match impersonation_url.is_empty() {
@@ -111,6 +86,7 @@ impl ExternalAccount {
                     impersonation_url,
                     &token,
                     &self.scopes,
+                    &[],
                     self.file.impersonation_lifetime_seconds(),
                 )
                 .await
@@ -120,29 +96,18 @@ impl ExternalAccount {
 }
 
 #[async_trait::async_trait]
-impl CredentialProvider for ExternalAccountCredentials {
-    type Credential = GcpCredential;
-
-    async fn get_credential(&self) -> object_store::Result<Arc<GcpCredential>> {
-        self.cache
-            .get_or_fetch(|| async {
-                self.account
-                    .token()
-                    .await
-                    .map(|(bearer, expiry)| (GcpCredential { bearer }, expiry.checked_sub(EARLY_REFRESH)))
-                    .map_err(|source| StoreError::Generic {
-                        store: STORE,
-                        source: source.into(),
-                    })
-            })
-            .await
+impl TokenFlow for ExternalAccount {
+    async fn token(&self) -> Result<(String, Option<SystemTime>), String> {
+        self.exchange().await.map(|(token, expiry)| (token, Some(expiry)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use object_store::CredentialProvider;
     use tokio::io::AsyncWriteExt;
 
+    use super::super::flows::FlowCredentials;
     use super::*;
     use crate::storage::backend::azure::testing::read_request;
 
@@ -171,13 +136,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn external_account_files_are_recognised_by_type() {
-        assert!(is_external_account(br#"{"type":"external_account"}"#));
-        assert!(!is_external_account(br#"{"type":"service_account"}"#));
-        assert!(!is_external_account(b"nope"));
-    }
-
     #[tokio::test]
     async fn the_subject_token_is_exchanged_at_the_sts_endpoint() {
         let dir = tempfile::tempdir().unwrap();
@@ -189,7 +147,7 @@ mod tests {
         )])
         .await;
         let json = account_json(token_file.to_str().unwrap(), &sts, "");
-        let credentials = ExternalAccountCredentials::from_json(json.as_bytes(), &["scope-a", "scope-b"]).unwrap();
+        let credentials = FlowCredentials::from_json(json.as_bytes(), &["scope-a", "scope-b"]).unwrap();
 
         let credential = credentials.get_credential().await.unwrap();
         credentials.get_credential().await.unwrap();
@@ -223,7 +181,7 @@ mod tests {
         let json = account_json(token_file.to_str().unwrap(), &server, &extra);
         let account = ExternalAccount::from_json(json.as_bytes(), &["scope-a"]).unwrap();
 
-        let (token, _) = account.token().await.unwrap();
+        let (token, _) = account.exchange().await.unwrap();
         let requests = handle.await.unwrap();
 
         assert_eq!(token, "sa-token");
@@ -244,7 +202,7 @@ mod tests {
         let account = ExternalAccount::from_json(json.as_bytes(), &["s"]).unwrap();
 
         assert_eq!(
-            account.token().await.unwrap_err(),
+            account.exchange().await.unwrap_err(),
             r#"credentials: status code 400: {"error":"invalid_grant"}"#
         );
     }
