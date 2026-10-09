@@ -31,8 +31,8 @@ impl UsernamePasswordCredential {
         ]
     }
 
-    async fn managed(&self, scope: &str) -> Result<BearerToken, SourceError> {
-        self.authority
+    async fn managed(&self, authority: &Authority, scope: &str) -> Result<BearerToken, SourceError> {
+        authority
             .request_token(&self.client, CREDENTIAL, "", scope, self.form("password"))
             .await
     }
@@ -64,12 +64,16 @@ impl UsernamePasswordCredential {
 #[async_trait::async_trait]
 impl TokenSource for UsernamePasswordCredential {
     async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
+        if self.authority.is_adfs() {
+            let resolved = self.authority.discover_adfs(&self.client).await.map_err(Self::failed)?;
+            return self.managed(&resolved, scope).await;
+        }
         let realm = ws_trust::user_realm(&self.client, self.authority.base_url(), &self.username)
             .await
             .map_err(|e| Self::failed(format!("problem getting user realm from authority: {e}")))?;
         match realm.account_type.as_str() {
             "Federated" => self.federated(&realm, scope).await,
-            "Managed" => self.managed(scope).await,
+            "Managed" => self.managed(&self.authority, scope).await,
             _ => Err(Self::failed("unknown account type".to_owned())),
         }
     }
@@ -198,6 +202,41 @@ mod tests {
             SourceError::Failed(format!(
                 "UsernamePasswordCredential: problem getting mex doc from federated url({base}/mex): http call({base}/mex)(GET) error: reply status code was 404:\ngone"
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn adfs_authorities_discover_the_token_endpoint_and_skip_the_user_realm() {
+        let (base, handle) = serve(vec![
+            (
+                200,
+                "application/json",
+                r#"{"authorization_endpoint":"{BASE}/adfs/oauth2/authorize","token_endpoint":"{BASE}/adfs/oauth2/token","issuer":"{BASE}/adfs"}"#.to_owned(),
+            ),
+            (200, "application/json", r#"{"access_token":"aad","expires_in":3600}"#.to_owned()),
+        ])
+        .await;
+        let mut credential = credential(&base);
+        credential.authority = Authority::local_adfs(&base);
+
+        let token = credential.token("s").await.unwrap();
+        let requests = handle.await.unwrap();
+
+        assert_eq!(token.secret, "aad");
+        assert!(requests[0].starts_with("GET /adfs/.well-known/openid-configuration HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /adfs/oauth2/token HTTP/1.1"));
+        assert!(requests[1].contains("grant_type=password"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_adfs_discovery_documents_are_rejected() {
+        let (base, _handle) = serve(vec![(200, "application/json", r#"{"issuer":"x"}"#.to_owned())]).await;
+        let mut credential = credential(&base);
+        credential.authority = Authority::local_adfs(&base);
+
+        assert_eq!(
+            credential.token("s").await.unwrap_err(),
+            SourceError::Failed("UsernamePasswordCredential: unable to resolve an endpoint: ResolveEndpoints(): TenantDiscoveryResponse: authorize endpoint was not found in the openid configuration".to_owned())
         );
     }
 }

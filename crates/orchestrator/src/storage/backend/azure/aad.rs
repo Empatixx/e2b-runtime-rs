@@ -14,8 +14,35 @@ const TROUBLESHOOT: &str = "To troubleshoot, visit https://aka.ms/azsdk/go/ident
 
 #[derive(Clone)]
 pub struct Authority {
+    adfs: bool,
     base_url: String,
     token_endpoint: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Discovery {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    issuer: String,
+}
+
+impl Discovery {
+    fn validate(&self) -> Result<(), String> {
+        let missing = [
+            (&self.authorization_endpoint, "authorize endpoint"),
+            (&self.token_endpoint, "token endpoint"),
+            (&self.issuer, "issuer"),
+        ]
+        .into_iter()
+        .find(|(value, _)| value.is_empty());
+        match missing {
+            Some((_, name)) => Err(format!(
+                "TenantDiscoveryResponse: {name} was not found in the openid configuration"
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -47,6 +74,7 @@ impl Authority {
             .unwrap_or_else(|| PUBLIC_CLOUD.to_owned());
         let base_url = host.trim_end_matches('/').to_owned();
         Self {
+            adfs: tenant == "adfs",
             token_endpoint: format!("{base_url}/{tenant}/oauth2/v2.0/token"),
             base_url,
         }
@@ -55,9 +83,47 @@ impl Authority {
     #[cfg(test)]
     pub fn local(base_url: &str) -> Self {
         Self {
+            adfs: false,
             base_url: base_url.to_owned(),
             token_endpoint: format!("{base_url}/t/oauth2/v2.0/token"),
         }
+    }
+
+    #[cfg(test)]
+    pub fn local_adfs(base_url: &str) -> Self {
+        Self {
+            adfs: true,
+            ..Self::local(base_url)
+        }
+    }
+
+    pub fn is_adfs(&self) -> bool {
+        self.adfs
+    }
+
+    pub async fn discover_adfs(&self, client: &Client) -> Result<Self, String> {
+        let wrap = |e: String| format!("unable to resolve an endpoint: {e}");
+        let url = format!("{}/adfs/.well-known/openid-configuration", self.base_url);
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| wrap(format!("server response error:\n {e}")))?;
+        let status = response.status().as_u16();
+        let body = response.text().await.map_err(|e| wrap(e.to_string()))?;
+        if !matches!(status, 200 | 201) {
+            return Err(wrap(super::ws_trust::call_error("GET", &url, status, &body)));
+        }
+        let discovery: Discovery = serde_json::from_str(&body)
+            .map_err(|e| wrap(format!("json decode error: {e}\njson message bytes were: {body}")))?;
+        discovery
+            .validate()
+            .map_err(|e| wrap(format!("ResolveEndpoints(): {e}")))?;
+        Ok(Self {
+            adfs: true,
+            base_url: self.base_url.clone(),
+            token_endpoint: discovery.token_endpoint,
+        })
     }
 
     pub fn base_url(&self) -> &str {
