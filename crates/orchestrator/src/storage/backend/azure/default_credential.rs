@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use azure_core::credentials::TokenCredential;
-use azure_identity::{AzureCliCredential, AzureDeveloperCliCredential, WorkloadIdentityCredential};
 use tokio::sync::Mutex;
 
 use super::aad::{Authority, ClientKind};
 use super::azcore;
+use super::azure_cli::AzureCliCredential;
+use super::azure_developer_cli::AzureDeveloperCliCredential;
 use super::client_certificate::{ClientCertificate, ClientCertificateCredential};
 use super::client_secret::ClientSecretCredential;
 use super::managed_identity::{Identity, ManagedIdentitySettings, ManagedIdentitySource};
@@ -15,8 +15,9 @@ use super::msal::CacheKey;
 use super::powershell::PowerShellCredential;
 use super::tenant::TenantPolicy;
 pub use super::token_source::BearerToken;
-use super::token_source::{SdkSource, SourceError, TokenRequest, TokenSource};
+use super::token_source::{SourceError, TokenRequest, TokenSource};
 use super::username_password::UsernamePasswordCredential;
+use super::workload_identity::WorkloadIdentityCredential;
 
 const CHAIN_NAME: &str = "DefaultAzureCredential";
 const TOKEN_CREDENTIALS_ENV: &str = "AZURE_TOKEN_CREDENTIALS";
@@ -98,17 +99,12 @@ impl Kind {
     fn build(self, chained: bool) -> Result<Arc<dyn TokenSource>, String> {
         match self {
             Kind::Environment => environment_credential(),
-            Kind::WorkloadIdentity => WorkloadIdentityCredential::new(None)
-                .map(|credential| sdk_source(self.name(), credential))
-                .map_err(|e| e.to_string()),
+            Kind::WorkloadIdentity => WorkloadIdentityCredential::from_environment(&raw_variable)
+                .map(|credential| Arc::new(credential) as Arc<dyn TokenSource>),
             Kind::ManagedIdentity => managed_identity_credential(chained),
-            Kind::AzureCli => AzureCliCredential::new(None)
-                .map(|credential| sdk_source(self.name(), credential))
-                .map_err(|e| e.to_string()),
-            Kind::AzureDeveloperCli => AzureDeveloperCliCredential::new(None)
-                .map(|credential| sdk_source(self.name(), credential))
-                .map_err(|e| e.to_string()),
-            Kind::AzurePowerShell => Ok(Arc::new(PowerShellCredential::default())),
+            Kind::AzureCli => Ok(Arc::new(AzureCliCredential::new(developer_tenants()))),
+            Kind::AzureDeveloperCli => Ok(Arc::new(AzureDeveloperCliCredential::new(developer_tenants()))),
+            Kind::AzurePowerShell => Ok(Arc::new(PowerShellCredential::new(developer_tenants()))),
         }
     }
 }
@@ -135,8 +131,12 @@ fn variable(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn sdk_source<T: TokenCredential + 'static>(name: &'static str, credential: Arc<T>) -> Arc<dyn TokenSource> {
-    Arc::new(SdkSource::new(name, credential))
+fn raw_variable(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn developer_tenants() -> TenantPolicy {
+    TenantPolicy::from_environment("", &variable)
 }
 
 fn environment_credential() -> Result<Arc<dyn TokenSource>, String> {

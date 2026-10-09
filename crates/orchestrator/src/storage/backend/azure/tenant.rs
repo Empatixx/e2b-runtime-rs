@@ -37,6 +37,7 @@ impl TenantPolicy {
 
     pub fn from_environment(default: &str, env: &dyn Fn(&str) -> Option<String>) -> Self {
         let additional: Vec<String> = env(ADDITIONAL_TENANTS_ENV)
+            .filter(|tenants| !tenants.is_empty())
             .map(|tenants| tenants.split(';').map(str::to_owned).collect())
             .unwrap_or_default();
         Self::new(default, &additional)

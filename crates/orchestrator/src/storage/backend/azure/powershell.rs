@@ -1,22 +1,20 @@
-use std::process::Output;
-use std::time::Duration;
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use super::dev_tool::{ExecFailure, ShellExec, valid_scope};
+use super::tenant::TenantPolicy;
 use super::token_source::{BearerToken, SourceError, TokenRequest, TokenSource, expiry};
 
 const CREDENTIAL: &str = "AzurePowerShellCredential";
 const MODULE_NOT_FOUND: &str = "Az.Accounts module not found";
-const TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_SUFFIX: &str = "/.default";
 const SCRIPT: &str = include_str!("powershell/script.ps1");
 
 pub struct PowerShellCredential {
-    shell: String,
+    shell: ShellExec,
+    tenants: TenantPolicy,
     lock: Mutex<()>,
 }
 
@@ -27,81 +25,40 @@ struct PowerShellToken {
     expires_on: i64,
 }
 
-impl Default for PowerShellCredential {
-    fn default() -> Self {
-        Self::with_shell("/bin/sh")
-    }
-}
-
 impl PowerShellCredential {
-    fn with_shell(shell: &str) -> Self {
+    pub fn new(tenants: TenantPolicy) -> Self {
+        Self::with_shell(ShellExec::default(), tenants)
+    }
+
+    fn with_shell(shell: ShellExec, tenants: TenantPolicy) -> Self {
         Self {
-            shell: shell.to_owned(),
+            shell,
+            tenants,
             lock: Mutex::new(()),
         }
     }
-
-    async fn run(&self, command: &str) -> Result<Vec<u8>, String> {
-        let child = Command::new(&self.shell)
-            .args(["-c", command])
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .output();
-        let output = tokio::time::timeout(TIMEOUT, child)
-            .await
-            .map_err(|_| "signal: killed".to_owned())?
-            .map_err(|e| e.to_string())?;
-        outcome(output)
-    }
 }
 
-fn outcome(output: Output) -> Result<Vec<u8>, String> {
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    match output.status.success() {
-        true => Ok(output.stdout),
-        false if output.status.code() == Some(127) || stderr.contains("' is not recognized") => {
-            Err("executable not found on path".to_owned())
+fn failure_message(failure: &ExecFailure) -> String {
+    match failure {
+        ExecFailure::Failed { stderr, .. } if stderr.contains(MODULE_NOT_FOUND) => MODULE_NOT_FOUND.to_owned(),
+        ExecFailure::Failed { stderr, .. } if stderr.contains("Connect-AzAccount") => {
+            "Please run \"Connect-AzAccount\" to set up an account".to_owned()
         }
-        false => Err(failure_message(&stderr, &status_text(&output))),
+        other => other.message(),
     }
-}
-
-fn status_text(output: &Output) -> String {
-    output
-        .status
-        .code()
-        .map_or_else(|| "signal: killed".to_owned(), |code| format!("exit status {code}"))
-}
-
-fn failure_message(stderr: &str, status: &str) -> String {
-    match (
-        stderr.contains(MODULE_NOT_FOUND),
-        stderr.contains("Connect-AzAccount"),
-        stderr.is_empty(),
-    ) {
-        (true, _, _) => MODULE_NOT_FOUND.to_owned(),
-        (false, true, _) => "Please run \"Connect-AzAccount\" to set up an account".to_owned(),
-        (false, false, true) => status.to_owned(),
-        (false, false, false) => stderr.to_owned(),
-    }
-}
-
-fn valid_scope(scope: &str) -> bool {
-    scope
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | ':'))
 }
 
 fn utf16le_base64(text: &str) -> String {
     STANDARD.encode(text.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>())
 }
 
-fn command_for(scope: &str) -> String {
+fn command_for(scope: &str, tenant: &str) -> String {
     let resource = scope.strip_suffix(DEFAULT_SUFFIX).unwrap_or(scope);
     let script = SCRIPT
         .replace("{MODULE_NOT_FOUND}", MODULE_NOT_FOUND)
         .replace("{RESOURCE}", resource)
-        .replace("{TENANT}", "");
+        .replace("{TENANT}", tenant);
     format!(
         "pwsh -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand {}",
         utf16le_base64(&script)
@@ -122,8 +79,16 @@ impl TokenSource for PowerShellCredential {
                 crate::go_strconv::quote(scope)
             )));
         }
+        let tenant = self
+            .tenants
+            .resolve(CREDENTIAL, request.tenant)
+            .map_err(SourceError::Failed)?;
         let _serial = self.lock.lock().await;
-        let stdout = self.run(&command_for(scope)).await.map_err(unavailable)?;
+        let stdout = self
+            .shell
+            .run(&command_for(scope, &tenant))
+            .await
+            .map_err(|failure| unavailable(failure_message(&failure)))?;
         serde_json::from_slice::<PowerShellToken>(&stdout)
             .map(|token| BearerToken::without_refresh(token.token, expiry(token.expires_on)))
             .map_err(unavailable)
@@ -132,23 +97,21 @@ impl TokenSource for PowerShellCredential {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
+    use super::super::dev_tool::fake_shell as fake;
     use super::*;
 
     fn fake_shell(body: &str) -> (tempfile::TempDir, PowerShellCredential) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("sh");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let credential = PowerShellCredential::with_shell(path.to_str().unwrap());
-        (directory, credential)
+        let (directory, shell) = fake(body);
+        (
+            directory,
+            PowerShellCredential::with_shell(shell, TenantPolicy::new("", &[])),
+        )
     }
 
     #[test]
     fn the_command_encodes_the_script_as_utf16_little_endian() {
         assert_eq!(utf16le_base64("a\u{e9}"), "YQDpAA==");
-        let command = command_for("https://storage.azure.com/.default");
+        let command = command_for("https://storage.azure.com/.default", "tid");
         assert!(command.starts_with("pwsh -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand "));
         let encoded = command.rsplit(' ').next().unwrap();
         let bytes = STANDARD.decode(encoded).unwrap();
@@ -159,28 +122,38 @@ mod tests {
         let script = String::from_utf16(&units).unwrap();
         assert!(script.contains("ResourceUrl   = 'https://storage.azure.com'"));
         assert!(script.contains("Write-Error 'Az.Accounts module not found'"));
-        assert!(script.contains("$tenantId = ''"));
+        assert!(script.contains("$tenantId = 'tid'"));
     }
 
     #[test]
     fn failures_are_summarised_like_the_sdk() {
+        let failed = |stderr: &str| ExecFailure::Failed {
+            stderr: stderr.to_owned(),
+            status: "exit status 1".to_owned(),
+        };
+
         assert_eq!(
-            failure_message("x Az.Accounts module not found y", "exit status 1"),
+            failure_message(&failed("x Az.Accounts module not found y")),
             MODULE_NOT_FOUND
         );
         assert_eq!(
-            failure_message("Run Connect-AzAccount", "exit status 1"),
+            failure_message(&failed("Run Connect-AzAccount")),
             "Please run \"Connect-AzAccount\" to set up an account"
         );
-        assert_eq!(failure_message("", "exit status 1"), "exit status 1");
-        assert_eq!(failure_message("boom", "exit status 1"), "boom");
+        assert_eq!(failure_message(&failed("")), "exit status 1");
+        assert_eq!(failure_message(&failed("boom")), "boom");
     }
 
-    #[test]
-    fn scopes_are_restricted_to_url_characters() {
-        assert!(valid_scope("https://storage.azure.com/.default"));
-        assert!(!valid_scope("a b"));
-        assert!(!valid_scope("a'b"));
+    #[tokio::test]
+    async fn other_tenants_need_the_allow_list() {
+        let (_directory, credential) = fake_shell("exit 0");
+
+        let error = credential
+            .token_for(&TokenRequest::new("https://storage.azure.com/.default").with_tenant("bad tenant"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, SourceError::Failed(_)));
     }
 
     #[tokio::test]

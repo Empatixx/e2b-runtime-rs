@@ -1,10 +1,6 @@
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EARLY_REFRESH: Duration = Duration::from_secs(5 * 60);
-
-use azure_core::credentials::TokenCredential;
-use azure_core::error::ErrorKind;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct BearerToken {
@@ -82,36 +78,6 @@ pub trait TokenSource: Send + Sync {
     #[cfg(test)]
     async fn token(&self, scope: &str) -> Result<BearerToken, SourceError> {
         self.token_for(&TokenRequest::new(scope)).await
-    }
-}
-
-pub struct SdkSource {
-    name: &'static str,
-    credential: Arc<dyn TokenCredential>,
-}
-
-impl SdkSource {
-    pub fn new(name: &'static str, credential: Arc<dyn TokenCredential>) -> Self {
-        Self { name, credential }
-    }
-}
-
-#[async_trait::async_trait]
-impl TokenSource for SdkSource {
-    async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
-        self.credential
-            .get_token(&[request.scope], None)
-            .await
-            .map(|token| {
-                BearerToken::without_refresh(
-                    token.token.secret().to_owned(),
-                    expiry(token.expires_on.unix_timestamp()),
-                )
-            })
-            .map_err(|e| match e.kind() {
-                ErrorKind::HttpResponse { .. } => SourceError::Failed(e.to_string()),
-                _ => SourceError::Unavailable(format!("{}: {e}", self.name)),
-            })
     }
 }
 

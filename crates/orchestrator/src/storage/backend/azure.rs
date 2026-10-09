@@ -1,11 +1,14 @@
 mod aad;
 pub mod azcore;
+mod azure_cli;
+mod azure_developer_cli;
 mod client_certificate;
 mod client_secret;
 mod connection_string;
 pub mod default_credential;
 mod delegation;
 mod der;
+mod dev_tool;
 mod managed_identity;
 mod msal;
 mod powershell;
@@ -16,6 +19,7 @@ mod tenant;
 pub mod testing;
 mod token_source;
 mod username_password;
+mod workload_identity;
 mod ws_trust;
 mod xml;
 
