@@ -49,6 +49,7 @@ async fn an_alpine_image_becomes_an_ext4_with_the_injected_files() {
             from_image: "alpine:3.20",
             registry: None,
             disk_size_mb: DISK_SIZE_MB,
+            max_rootfs_size_mb: 25_000,
             injected: InjectedSources {
                 envd: envd_file,
                 busybox: busybox_file,
