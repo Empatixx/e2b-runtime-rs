@@ -29,6 +29,10 @@ impl AwsDefaults {
         }
     }
 
+    pub fn sdk_config(&self) -> &SdkConfig {
+        &self.config
+    }
+
     pub fn region(&self) -> Option<String> {
         self.config.region().map(|region| region.to_string())
     }

@@ -1,4 +1,4 @@
-use super::ecr::{AwsCredentials, BasicCredentials, TokenError};
+use super::ecr::{BasicCredentials, EcrClient, TokenError};
 use crate::proto::FromImageRegistry;
 use crate::proto::from_image_registry::Type;
 
@@ -9,16 +9,14 @@ pub async fn auth_option(registry: Option<&FromImageRegistry>) -> Result<Option<
         return Ok(None);
     };
     match kind {
-        Type::Aws(aws) => AwsCredentials {
-            access_key_id: aws.aws_access_key_id.clone(),
-            secret_access_key: aws.aws_secret_access_key.clone(),
-            session_token: None,
-            region: aws.aws_region.clone(),
+        Type::Aws(aws) => {
+            EcrClient::static_credentials(&aws.aws_access_key_id, &aws.aws_secret_access_key, &aws.aws_region)
+                .await
+                .basic_auth()
+                .await
+                .map(Some)
+                .map_err(|e| format!("error getting auth option: {}", ecr_error(e)))
         }
-        .ecr_basic_auth()
-        .await
-        .map(Some)
-        .map_err(|e| format!("error getting auth option: {}", ecr_error(e))),
         Type::Gcp(gcp) => Ok(Some(basic(GCP_JSON_KEY_USER, &gcp.service_account_json))),
         Type::General(general) => Ok(Some(basic(&general.username, &general.password))),
     }

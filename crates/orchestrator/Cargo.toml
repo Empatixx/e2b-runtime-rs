@@ -10,6 +10,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait = "0.1"
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls", "credentials-process", "sso"] }
 aws-credential-types = "1"
+aws-sdk-ecr = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 azure_core = "1"
 azure_identity = "1"
 base64 = "0.22"

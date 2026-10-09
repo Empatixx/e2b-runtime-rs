@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::acr::AcrAuthenticator;
 use super::auth::{auth_option, basic};
-use super::ecr::{AwsCredentials, BasicCredentials, TokenError};
+use super::ecr::{BasicCredentials, DefaultChainEcr, TokenError};
 use super::reference::{ImageReference, Repository};
 use super::registry::{Descriptor, ImageManifest, Platform, RegistryError, RegistrySession};
 use crate::builder::config::BuilderConfig;
@@ -26,6 +26,7 @@ pub enum DockerHubProxy {
     },
     Aws {
         url: String,
+        ecr: DefaultChainEcr,
     },
     Azure {
         url: String,
@@ -86,7 +87,10 @@ impl DockerHubProxy {
             "GCP_REMOTE_REPOSITORY" => gcp_credentials()
                 .map(|credentials| DockerHubProxy::Gcp { url, credentials })
                 .map_err(|e| format!("error getting auth token: {e}")),
-            "AWS_ECR" => Ok(DockerHubProxy::Aws { url }),
+            "AWS_ECR" => Ok(DockerHubProxy::Aws {
+                url,
+                ecr: DefaultChainEcr::default(),
+            }),
             "AZURE_ACR" => azure_proxy(url),
             "Local" => Ok(DockerHubProxy::Noop),
             other => Err(format!("unknown dockerhub remote repository provider: {other}")),
@@ -185,9 +189,9 @@ impl Puller {
                 return self.through_acr(reference, url, authenticator).await;
             }
             DockerHubProxy::Gcp { url, credentials } => (url, credentials.clone()),
-            DockerHubProxy::Aws { url } => (
+            DockerHubProxy::Aws { url, ecr } => (
                 url,
-                AwsCredentials::default_chain_basic_auth()
+                ecr.basic_auth()
                     .await
                     .map_err(|e| RegistryError::Other(format!("error getting auth token: {}", proxy_token_error(e))))?,
             ),
@@ -395,7 +399,8 @@ mod tests {
         assert_eq!(
             DockerHubProxy::from_config(&config("AWS_ECR", "1.dkr.ecr")),
             Ok(DockerHubProxy::Aws {
-                url: "1.dkr.ecr".to_owned()
+                url: "1.dkr.ecr".to_owned(),
+                ecr: DefaultChainEcr::default(),
             })
         );
         assert!(matches!(

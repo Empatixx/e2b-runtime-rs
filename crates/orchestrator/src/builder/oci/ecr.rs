@@ -1,44 +1,22 @@
+use aws_config::SdkConfig;
+use aws_credential_types::Credentials;
+use aws_sdk_ecr::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_ecr::operation::get_authorization_token::GetAuthorizationTokenError;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use tokio::sync::OnceCell;
 
 use crate::storage::backend::aws::AwsDefaults;
 
-const SERVICE: &str = "ecr";
-const TARGET: &str = "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken";
-const CONTENT_TYPE: &str = "application/x-amz-json-1.1";
-const BODY: &str = "{}";
-const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 const MISSING_REGION: &str = "failed to resolve service endpoint, an AWS region is required, but was not found";
-const CREDENTIALS_REFRESH: &str = "get identity: get credentials: failed to refresh cached credentials";
+const EMPTY_STATIC_CREDENTIALS: &str =
+    "get identity: get credentials: failed to refresh cached credentials, static credentials are empty";
 const REDACTED: &str = "<redacted>";
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct AwsCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
-    pub region: String,
-}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct BasicCredentials {
     pub username: String,
     pub password: String,
-}
-
-impl std::fmt::Debug for AwsCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsCredentials")
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &REDACTED)
-            .field("session_token", &self.session_token.as_ref().map(|_| REDACTED))
-            .field("region", &self.region)
-            .finish()
-    }
 }
 
 impl std::fmt::Debug for BasicCredentials {
@@ -58,65 +36,64 @@ pub enum TokenError {
     Format,
 }
 
-#[derive(Deserialize)]
-struct TokenResponse {
-    #[serde(rename = "authorizationData", default)]
-    authorization_data: Vec<AuthorizationData>,
+#[derive(Debug, Clone)]
+pub struct EcrClient {
+    client: aws_sdk_ecr::Client,
+    has_region: bool,
+    credentials_empty: bool,
 }
 
-#[derive(Deserialize)]
-struct AuthorizationData {
-    #[serde(rename = "authorizationToken", default)]
-    authorization_token: Option<String>,
+#[derive(Debug, Clone, Default)]
+pub struct DefaultChainEcr {
+    client: std::sync::Arc<OnceCell<EcrClient>>,
 }
 
-#[derive(Deserialize)]
-struct ApiError {
-    #[serde(rename = "__type", default)]
-    kind: String,
-    #[serde(alias = "Message", default)]
-    message: String,
-}
-
-struct SignedRequest {
-    url: String,
-    headers: Vec<(String, String)>,
-}
-
-impl AwsCredentials {
-    pub async fn default_chain_basic_auth() -> Result<BasicCredentials, TokenError> {
-        Self::from_default_chain().await?.ecr_basic_auth().await
+impl PartialEq for DefaultChainEcr {
+    fn eq(&self, _: &Self) -> bool {
+        true
     }
+}
 
-    async fn from_default_chain() -> Result<Self, TokenError> {
-        let defaults = AwsDefaults::load().await;
-        let region = defaults.region().unwrap_or_default();
-        match region.is_empty() {
-            true => Err(TokenError::Request(operation_error(MISSING_REGION))),
-            false => Self::resolved(&defaults, region).await,
+impl Eq for DefaultChainEcr {}
+
+impl DefaultChainEcr {
+    pub async fn basic_auth(&self) -> Result<BasicCredentials, TokenError> {
+        self.client
+            .get_or_init(|| async { EcrClient::from_config(AwsDefaults::load().await.sdk_config()) })
+            .await
+            .basic_auth()
+            .await
+    }
+}
+
+impl EcrClient {
+    pub async fn static_credentials(access_key_id: &str, secret_access_key: &str, region: &str) -> Self {
+        let credentials = Credentials::new(access_key_id, secret_access_key, None, None, "static");
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.to_owned()))
+            .credentials_provider(credentials)
+            .load()
+            .await;
+        Self {
+            credentials_empty: access_key_id.is_empty() || secret_access_key.is_empty(),
+            ..Self::from_config(&config)
         }
     }
 
-    async fn resolved(defaults: &AwsDefaults, region: String) -> Result<Self, TokenError> {
-        defaults
-            .credentials()
-            .await
-            .map(|credentials| Self {
-                access_key_id: credentials.access_key_id().to_owned(),
-                secret_access_key: credentials.secret_access_key().to_owned(),
-                session_token: credentials.session_token().map(str::to_owned),
-                region,
-            })
-            .map_err(|e| TokenError::Request(operation_error(&format!("{CREDENTIALS_REFRESH}, {e}"))))
+    pub fn from_config(config: &SdkConfig) -> Self {
+        Self {
+            client: aws_sdk_ecr::Client::new(config),
+            has_region: config.region().is_some_and(|region| !region.as_ref().is_empty()),
+            credentials_empty: false,
+        }
     }
 
-    pub async fn ecr_basic_auth(&self) -> Result<BasicCredentials, TokenError> {
+    pub async fn basic_auth(&self) -> Result<BasicCredentials, TokenError> {
         let token = self.authorization_token().await?;
         let decoded = STANDARD
             .decode(&token)
             .map_err(|e| TokenError::Decode(base64_error(&token, e)))?;
-        let decoded = String::from_utf8_lossy(&decoded).into_owned();
-        decoded
+        String::from_utf8_lossy(&decoded)
             .split_once(':')
             .map(|(username, password)| BasicCredentials {
                 username: username.to_owned(),
@@ -126,95 +103,23 @@ impl AwsCredentials {
     }
 
     async fn authorization_token(&self) -> Result<String, TokenError> {
-        if self.region.is_empty() {
+        if !self.has_region {
             return Err(TokenError::Request(operation_error(MISSING_REGION)));
         }
-        if self.access_key_id.is_empty() || self.secret_access_key.is_empty() {
-            return Err(TokenError::Request(operation_error(&format!(
-                "{CREDENTIALS_REFRESH}, static credentials are empty"
-            ))));
+        if self.credentials_empty {
+            return Err(TokenError::Request(operation_error(EMPTY_STATIC_CREDENTIALS)));
         }
-        let signed = self.sign(Utc::now());
-        let request = signed
-            .headers
-            .iter()
-            .fold(reqwest::Client::new().post(&signed.url), |request, (name, value)| {
-                request.header(name, value)
-            })
-            .body(BODY);
-        let response = super::registry::send_with_retry(request)
+        self.client
+            .get_authorization_token()
+            .send()
             .await
-            .map_err(|e| TokenError::Request(operation_error(&format!("https response error: {e}"))))?;
-        let status = response.status();
-        let request_id = response
-            .headers()
-            .get("x-amzn-requestid")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
-        let body = response.bytes().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(TokenError::Request(api_failure(status.as_u16(), &request_id, &body)));
-        }
-        serde_json::from_slice::<TokenResponse>(&body)
-            .map_err(|e| TokenError::Request(operation_error(&format!("deserialization failed, {e}"))))?
-            .authorization_data
-            .into_iter()
-            .next()
-            .and_then(|data| data.authorization_token)
+            .map_err(|e| TokenError::Request(sdk_failure(&e)))?
+            .authorization_data()
+            .first()
+            .and_then(|data| data.authorization_token())
+            .map(str::to_owned)
             .ok_or(TokenError::Missing)
     }
-
-    fn host(&self) -> String {
-        format!("api.ecr.{}.amazonaws.com", self.region)
-    }
-
-    fn sign(&self, now: DateTime<Utc>) -> SignedRequest {
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-        let day = now.format("%Y%m%d").to_string();
-        let host = self.host();
-        let mut headers = vec![
-            ("content-type".to_owned(), CONTENT_TYPE.to_owned()),
-            ("host".to_owned(), host.clone()),
-            ("x-amz-date".to_owned(), amz_date.clone()),
-        ];
-        if let Some(token) = &self.session_token {
-            headers.push(("x-amz-security-token".to_owned(), token.clone()));
-        }
-        headers.push(("x-amz-target".to_owned(), TARGET.to_owned()));
-        let signed_headers = headers
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(";");
-        let canonical_headers: String = headers
-            .iter()
-            .map(|(name, value)| format!("{name}:{value}\n"))
-            .collect();
-        let canonical_request = format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{}", sha256_hex(BODY));
-        let scope = format!("{day}/{}/{SERVICE}/aws4_request", self.region);
-        let string_to_sign = format!("{ALGORITHM}\n{amz_date}\n{scope}\n{}", sha256_hex(&canonical_request));
-        let key = signing_key(&self.secret_access_key, &day, &self.region, SERVICE);
-        let signature = hex(&hmac(&key, string_to_sign.as_bytes()));
-        let authorization = format!(
-            "{ALGORITHM} Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
-            self.access_key_id
-        );
-        headers.retain(|(name, _)| name != "host");
-        headers.push(("authorization".to_owned(), authorization));
-        SignedRequest {
-            url: format!("https://{host}/"),
-            headers,
-        }
-    }
-}
-
-fn signing_key(secret: &str, day: &str, region: &str, service: &str) -> Vec<u8> {
-    [region, service, "aws4_request"]
-        .iter()
-        .fold(hmac(format!("AWS4{secret}").as_bytes(), day.as_bytes()), |key, part| {
-            hmac(&key, part.as_bytes())
-        })
 }
 
 pub fn base64_error(input: &str, error: base64::DecodeError) -> String {
@@ -226,15 +131,21 @@ pub fn base64_error(input: &str, error: base64::DecodeError) -> String {
     format!("illegal base64 data at input byte {offset}")
 }
 
-fn api_failure(status: u16, request_id: &str, body: &[u8]) -> String {
-    let error = serde_json::from_slice::<ApiError>(body).unwrap_or(ApiError {
-        kind: String::new(),
-        message: String::from_utf8_lossy(body).into_owned(),
-    });
-    let kind = error.kind.rsplit('#').next().unwrap_or_default();
+fn sdk_failure(error: &SdkError<GetAuthorizationTokenError>) -> String {
+    match error {
+        SdkError::ServiceError(service) => api_failure(
+            service.raw().status().as_u16(),
+            service.raw().headers().get("x-amzn-requestid").unwrap_or_default(),
+            error.code().unwrap_or_default(),
+            error.message().unwrap_or_default(),
+        ),
+        other => operation_error(&format!("https response error: {}", DisplayErrorContext(other))),
+    }
+}
+
+fn api_failure(status: u16, request_id: &str, kind: &str, message: &str) -> String {
     operation_error(&format!(
-        "https response error StatusCode: {status}, RequestID: {request_id}, api error {kind}: {}",
-        error.message
+        "https response error StatusCode: {status}, RequestID: {request_id}, api error {kind}: {message}"
     ))
 }
 
@@ -242,64 +153,19 @@ fn operation_error(detail: &str) -> String {
     format!("operation error ECR: GetAuthorizationToken, {detail}")
 }
 
-fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key length");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn sha256_hex(text: &str) -> String {
-    hex(&Sha256::digest(text.as_bytes()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
 
     #[test]
-    fn requests_are_signed_with_sigv4() {
-        let credentials = AwsCredentials {
-            access_key_id: "AKIDEXAMPLE".to_owned(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
-            session_token: None,
-            region: "us-east-1".to_owned(),
-        };
-
-        let signed = credentials.sign(Utc.with_ymd_and_hms(2015, 8, 30, 12, 36, 0).unwrap());
-
-        assert_eq!(signed.url, "https://api.ecr.us-east-1.amazonaws.com/");
-        let authorization = &signed
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization")
-            .unwrap()
-            .1;
-        assert!(authorization.starts_with(
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/ecr/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-target, Signature="
-        ));
-        assert_eq!(
-            hex(&signing_key(
-                "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-                "20120215",
-                "us-east-1",
-                "iam"
-            )),
-            "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d"
-        );
-    }
-
-    #[test]
     fn api_errors_read_like_the_go_sdk() {
-        let body = br#"{"__type":"com.amazonaws#UnrecognizedClientException","message":"The security token included in the request is invalid."}"#;
-
         assert_eq!(
-            api_failure(400, "abc", body),
+            api_failure(
+                400,
+                "abc",
+                "UnrecognizedClientException",
+                "The security token included in the request is invalid."
+            ),
             "operation error ECR: GetAuthorizationToken, https response error StatusCode: 400, RequestID: abc, api error UnrecognizedClientException: The security token included in the request is invalid."
         );
     }
