@@ -3,27 +3,41 @@ use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::Instrument;
 use uuid::Uuid;
 
-use super::harvester::{HarvestJob, PrefetchHarvester, within};
+use super::harvester::{HarvestJob, PrefetchHarvester};
 use super::{HarvestOutcome, HarvestReport, HarvestRun, HarvestUpload, clamp_harvest_timeout_ms};
-use crate::block::build_file::Ready;
 use crate::memory::prefetch::flags::PrefetchFlags;
 use crate::proto::SandboxConfig;
 use crate::sandbox::config::Held;
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::server::prefetch::record_seal_wait;
-use crate::template::metadata::TemplateMetadata;
+use crate::template::Template;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarvestSettings {
+    pub timeout: Duration,
+    pub consume: bool,
+}
+
+impl HarvestSettings {
+    pub fn from_flags(flags: &dyn PrefetchFlags) -> Option<Self> {
+        flags.pause_resume_prefetch_harvest().then(|| Self {
+            timeout: harvest_timeout(flags.pause_resume_prefetch_harvest_timeout_ms()),
+            consume: flags.pause_resume_prefetch_consume(),
+        })
+    }
+}
 
 pub struct PauseHarvest {
     pub config: SandboxConfig,
     pub build_id: Uuid,
     pub start: SystemTime,
     pub end: SystemTime,
-    pub metadata: TemplateMetadata,
+    pub template: Arc<Template>,
     pub upload: Arc<dyn HarvestUpload>,
     pub object_metadata: ObjectMetadata,
-    pub memfile_ready: Ready,
     pub work: Option<Held>,
 }
 
@@ -37,14 +51,14 @@ impl PrefetchHarvest {
         Self { harvester }
     }
 
-    pub fn after_pause(&self, flags: &dyn PrefetchFlags, pause: PauseHarvest) -> Option<JoinHandle<HarvestReport>> {
-        if !flags.pause_resume_prefetch_harvest() {
-            return None;
-        }
-        let timeout = harvest_timeout(flags.pause_resume_prefetch_harvest_timeout_ms());
-        let consume = flags.pause_resume_prefetch_consume();
-        let harvester = self.harvester.clone();
-        Some(tokio::spawn(harvest(harvester, pause, timeout, consume)))
+    pub fn after_pause(&self, settings: HarvestSettings, pause: PauseHarvest) -> JoinHandle<HarvestReport> {
+        let span = tracing::info_span!(
+            parent: None,
+            "harvest-resume-prefetch",
+            build_id = %pause.build_id,
+            consume = settings.consume
+        );
+        tokio::spawn(harvest(self.harvester.clone(), pause, settings).instrument(span))
     }
 }
 
@@ -55,40 +69,39 @@ fn harvest_timeout(timeout_ms: i64) -> Duration {
 async fn harvest(
     harvester: Arc<PrefetchHarvester>,
     mut pause: PauseHarvest,
-    timeout: Duration,
-    consume: bool,
+    settings: HarvestSettings,
 ) -> HarvestReport {
     let _work = pause.work.take();
-    let deadline = Instant::now() + timeout;
-    let seal_started = Instant::now();
-    let sealed = within(deadline, pause.memfile_ready.clone()).await;
-    record_seal_wait(seal_started.elapsed());
+    let deadline = Instant::now() + settings.timeout;
+    record_seal_wait(Duration::ZERO);
     let sandbox_id = pause.config.sandbox_id.clone();
     let build_id = pause.build_id;
-    let report = match sealed {
-        Ok(()) => harvester.run(&job_of(pause, consume, deadline)).await,
-        Err(e) => HarvestReport::failed(
-            HarvestRun::failed(HarvestOutcome::Skipped, Duration::ZERO),
-            format!("waiting for rootfs seal: {e}"),
-        ),
+    let report = match job_of(pause, settings.consume, deadline).await {
+        Ok(job) => harvester.run(&job).await,
+        Err(e) => HarvestReport::failed(HarvestRun::failed(HarvestOutcome::Skipped, Duration::ZERO), e),
     };
     report.run.record_metrics();
     log_failure(&sandbox_id, build_id, &report);
     report
 }
 
-fn job_of(pause: PauseHarvest, consume: bool, deadline: Instant) -> HarvestJob {
-    HarvestJob {
+async fn job_of(pause: PauseHarvest, consume: bool, deadline: Instant) -> Result<HarvestJob, String> {
+    let metadata = pause
+        .template
+        .metadata()
+        .await
+        .map_err(|e| format!("get template metadata: {e}"))?;
+    Ok(HarvestJob {
         config: pause.config,
         build_id: pause.build_id,
         start: pause.start,
         end: pause.end,
-        metadata: pause.metadata,
+        metadata,
         upload: pause.upload,
         object_metadata: pause.object_metadata,
         consume,
         deadline,
-    }
+    })
 }
 
 fn log_failure(sandbox_id: &str, build_id: Uuid, report: &HarvestReport) {
@@ -99,13 +112,10 @@ fn log_failure(sandbox_id: &str, build_id: Uuid, report: &HarvestReport) {
 
 #[cfg(test)]
 mod tests {
-    use futures::FutureExt;
-
     use super::super::harvester::tests::{Fakes, Script, harvester, trace};
     use super::*;
-    use crate::block::build_file::ready_now;
     use crate::memory::prefetch::flags::fixed::FixedPrefetchFlags;
-    use crate::template::metadata::TemplateMetadata;
+    use crate::storage::backend::Storage;
 
     fn flags(harvest: bool, consume: bool, timeout_ms: i64) -> FixedPrefetchFlags {
         FixedPrefetchFlags {
@@ -116,7 +126,9 @@ mod tests {
         }
     }
 
-    fn pause(script: &Arc<Script>, memfile_ready: Ready) -> PauseHarvest {
+    fn pause(script: &Arc<Script>) -> PauseHarvest {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let template = Template::new(Storage::local(&dir).unwrap(), Uuid::from_u128(7), dir);
         PauseHarvest {
             config: SandboxConfig {
                 sandbox_id: "sbx".to_owned(),
@@ -125,10 +137,9 @@ mod tests {
             build_id: Uuid::from_u128(7),
             start: SystemTime::UNIX_EPOCH,
             end: SystemTime::UNIX_EPOCH,
-            metadata: TemplateMetadata::v1(),
+            template: Arc::new(template),
             upload: Arc::new(Fakes(script.clone())),
             object_metadata: ObjectMetadata::default(),
-            memfile_ready,
             work: None,
         }
     }
@@ -143,25 +154,36 @@ mod tests {
         PrefetchHarvest::new(Arc::new(harvester(script)))
     }
 
-    #[tokio::test]
-    async fn the_harvest_is_off_by_default() {
-        let script = scripted();
+    async fn harvested(script: &Arc<Script>, flags: FixedPrefetchFlags) -> HarvestReport {
+        let settings = HarvestSettings::from_flags(&flags).unwrap();
+        harvesting(script).after_pause(settings, pause(script)).await.unwrap()
+    }
 
-        let started = harvesting(&script).after_pause(&FixedPrefetchFlags::default(), pause(&script, ready_now()));
+    #[test]
+    fn the_harvest_is_off_by_default() {
+        assert_eq!(HarvestSettings::from_flags(&FixedPrefetchFlags::default()), None);
+    }
 
-        assert!(started.is_none());
-        assert!(script.events().is_empty());
+    #[test]
+    fn the_settings_carry_the_clamped_timeout_and_the_consume_gate() {
+        assert_eq!(
+            HarvestSettings::from_flags(&flags(true, true, 0)),
+            Some(HarvestSettings {
+                timeout: Duration::from_secs(1),
+                consume: true
+            })
+        );
+        assert_eq!(
+            HarvestSettings::from_flags(&flags(true, false, 2500)).map(|settings| settings.timeout),
+            Some(Duration::from_millis(2500))
+        );
     }
 
     #[tokio::test]
     async fn an_enabled_harvest_runs_without_persisting_unless_consume_is_on() {
         let script = scripted();
 
-        let report = harvesting(&script)
-            .after_pause(&flags(true, false, 15_000), pause(&script, ready_now()))
-            .unwrap()
-            .await
-            .unwrap();
+        let report = harvested(&script, flags(true, false, 15_000)).await;
 
         assert_eq!(report.error, None);
         assert_eq!(report.run.pages, 2);
@@ -172,29 +194,9 @@ mod tests {
     async fn consume_persists_the_mapping() {
         let script = scripted();
 
-        harvesting(&script)
-            .after_pause(&flags(true, true, 15_000), pause(&script, ready_now()))
-            .unwrap()
-            .await
-            .unwrap();
+        harvested(&script, flags(true, true, 15_000)).await;
 
         assert!(script.events().contains(&"upload metadata".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn a_failed_seal_skips_the_harvest() {
-        let script = scripted();
-        let failed = futures::future::ready(Err("disk full".to_owned())).boxed().shared();
-
-        let report = harvesting(&script)
-            .after_pause(&flags(true, true, 15_000), pause(&script, failed))
-            .unwrap()
-            .await
-            .unwrap();
-
-        assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
-        assert_eq!(report.error.as_deref(), Some("waiting for rootfs seal: disk full"));
-        assert!(script.events().is_empty());
     }
 
     #[test]

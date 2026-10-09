@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,10 +5,12 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 use super::{HarvestTemplates, HarvestUpload, MetadataUploader, MetadataWriteError};
+use crate::go_strconv::quote;
 use crate::server::uploads::{Outcome, Uploads};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::paths::BuildPaths;
 use crate::template::Template;
+use crate::template::atomic_write::replace_file;
 use crate::template::cache::TemplateCache;
 use crate::template::metadata::TemplateMetadata;
 
@@ -22,35 +23,23 @@ impl HarvestTemplates for TemplateCache {
     }
 
     async fn update_metadata(&self, build_id: Uuid, metadata: &TemplateMetadata) -> Result<(), MetadataWriteError> {
-        let template = self.get(build_id);
-        let written = replace_atomically(&template.dir().join(METADATA_FILE), metadata.to_json()).await;
-        if written.is_ok() {
+        let template = self.lookup(build_id).ok_or_else(|| {
+            MetadataWriteError::failed(format!("template {} not in cache", quote(&build_id.to_string())))
+        })?;
+        let file = template.dir().join(METADATA_FILE);
+        let content = metadata.to_json();
+        let written = tokio::task::spawn_blocking(move || replace_file(&file, &content))
+            .await
+            .map_err(|e| MetadataWriteError::failed(e.to_string()))?;
+        let visible = written.as_ref().map_or_else(|e| e.committed, |()| true);
+        if visible {
             template.update_metadata(metadata.clone());
         }
-        written.and_then(|committed| committed.map_or(Ok(()), Err))
+        written.map_err(|e| MetadataWriteError {
+            message: format!("failed to replace metadata file: {}", e.message),
+            committed: e.committed,
+        })
     }
-}
-
-async fn replace_atomically(file: &Path, content: Vec<u8>) -> Result<Option<MetadataWriteError>, MetadataWriteError> {
-    let file = file.to_owned();
-    tokio::task::spawn_blocking(move || write_then_rename(&file, &content))
-        .await
-        .map_err(|e| MetadataWriteError::failed(e.to_string()))?
-}
-
-fn write_then_rename(file: &Path, content: &[u8]) -> Result<Option<MetadataWriteError>, MetadataWriteError> {
-    let staged = file.with_extension("json.tmp");
-    let failed = |e: std::io::Error| MetadataWriteError::failed(format!("{}: {e}", file.display()));
-    std::fs::write(&staged, content).map_err(failed)?;
-    std::fs::File::open(&staged)
-        .and_then(|staged| staged.sync_all())
-        .map_err(failed)?;
-    std::fs::rename(&staged, file).map_err(failed)?;
-    Ok(file
-        .parent()
-        .map(|parent| std::fs::File::open(parent).and_then(|dir| dir.sync_all()))
-        .and_then(Result::err)
-        .map(|e| MetadataWriteError::committed(format!("sync {}: {e}", file.display()))))
 }
 
 pub struct SnapshotUpload {
@@ -63,7 +52,8 @@ impl HarvestUpload for SnapshotUpload {
     async fn wait(&self) -> Result<(), String> {
         match self.uploads.wait(self.build_id).await {
             Outcome::Failed => Err(format!("snapshot upload {} failed", self.build_id)),
-            Outcome::Pending | Outcome::Landed => Ok(()),
+            Outcome::Landed => Ok(()),
+            Outcome::Pending => std::future::pending().await,
         }
     }
 }

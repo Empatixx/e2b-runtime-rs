@@ -136,7 +136,8 @@ struct Running {
     commands: mpsc::Receiver<Command>,
     node: Arc<Node>,
     host_stats: Option<HostStatsCollector>,
-    _oom: OomMonitor,
+    _oom: Option<OomMonitor>,
+    throwaway: bool,
     _work: Work,
 }
 
@@ -158,15 +159,18 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         let info = handle.info.lock();
         (info.config.envd_access_token.clone(), info.oom_watermark.clone())
     };
-    let oom = OomMonitor::start(
-        sandbox.envd_address(),
-        access_token,
-        sandbox.id().to_owned(),
-        oom_watermark,
-    );
+    let oom = (!throwaway).then(|| {
+        OomMonitor::start(
+            sandbox.envd_address(),
+            access_token,
+            sandbox.id().to_owned(),
+            oom_watermark,
+        )
+    });
     let running = Running {
         host_stats,
         _oom: oom,
+        throwaway,
         sandbox,
         slot,
         info: handle.info.clone(),
@@ -183,9 +187,14 @@ impl Running {
     async fn run(mut self) {
         let ending = self.wait_for_ending().await;
         let lifecycle = self.info.lock().lifecycle.clone();
-        ending.record_metrics(self.ran_for());
-        let span = tracing::info_span!(parent: None, "stop sandbox-lifecycle");
-        self.tear_down(ending, lifecycle).instrument(span).await;
+        match self.throwaway {
+            true => self.tear_down(ending, lifecycle).await,
+            false => {
+                ending.record_metrics(self.ran_for());
+                let span = tracing::info_span!(parent: None, "stop sandbox-lifecycle");
+                self.tear_down(ending, lifecycle).instrument(span).await;
+            }
+        }
     }
 
     async fn tear_down(mut self, ending: Ending, lifecycle: Lifecycle) {
@@ -232,14 +241,11 @@ impl Running {
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
             self.node.upload(local.clone(), object_metadata.clone());
-            self.node
-                .harvest_after_pause(PausedBuild {
-                    parent: parent.clone(),
-                    build_id,
-                    object_metadata,
-                    memfile_ready: local.memfile_ready.clone(),
-                })
-                .await;
+            self.node.harvest_after_pause(PausedBuild {
+                parent: parent.clone(),
+                build_id,
+                object_metadata,
+            });
         }
         let _ = reply.send(snapshotted.map(|local| local.snapshot));
     }

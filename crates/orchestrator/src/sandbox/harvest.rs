@@ -19,6 +19,8 @@ pub const HARVEST_REAP_TIMEOUT: Duration = Duration::from_secs(60);
 pub const UPLOAD_TOTAL_BUDGET: Duration = Duration::from_secs(2 * 60 * 60);
 pub const THROWAWAY_ID_PREFIX: &str = "prefetch-harvest-";
 pub const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
+pub const START_SLOTS_EXHAUSTED: &str =
+    "rpc error: code = ResourceExhausted desc = too many sandboxes resuming on this node, please retry";
 
 pub fn clamp_harvest_timeout_ms(ms: i64) -> i64 {
     ms.max(MIN_HARVEST_TIMEOUT_MS)

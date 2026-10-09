@@ -45,9 +45,14 @@ impl Default for PrefetchSettings {
 
 impl PrefetchSettings {
     pub fn from_flags(flags: &dyn PrefetchFlags) -> Self {
+        let source = PrefetchSource::parse(&flags.resume_prefetch_source());
         Self {
-            source: PrefetchSource::parse(&flags.resume_prefetch_source()),
-            last_cycle_max_mib: flags.resume_last_cycle_prefetch_max_mib(),
+            source,
+            last_cycle_max_mib: if source.uses_last_cycle() {
+                flags.resume_last_cycle_prefetch_max_mib()
+            } else {
+                Self::default().last_cycle_max_mib
+            },
         }
     }
 }

@@ -2,6 +2,8 @@ use std::net::Ipv4Addr;
 
 #[cfg(target_os = "linux")]
 use futures::StreamExt;
+#[cfg(target_os = "linux")]
+use tracing::Instrument;
 
 #[cfg(target_os = "linux")]
 use super::firewall::EgressRules;
@@ -248,7 +250,9 @@ impl Slot {
 
     pub async fn deny_egress(&self) -> Result<(), String> {
         let script = NetworkSettings::current().firewall().deny_egress();
+        let span = tracing::info_span!("slot-internet-deny-egress", namespace_id = %self.namespace());
         self.nft_inside(&script)
+            .instrument(span)
             .await
             .map_err(|e| format!("failed execution in network namespace '{}': {e}", self.namespace()))
     }

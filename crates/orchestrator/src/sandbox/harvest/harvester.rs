@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{
     DEADLINE_EXCEEDED, HARVEST_REAP_TIMEOUT, HarvestFailure, HarvestInstance, HarvestOutcome, HarvestReport,
     HarvestResumer, HarvestRun, HarvestSlots, HarvestTemplates, HarvestUpload, MetadataUploader, MetadataWriteError,
-    THROWAWAY_ID_PREFIX, ThrowawayResume, UPLOAD_TOTAL_BUDGET,
+    START_SLOTS_EXHAUSTED, THROWAWAY_ID_PREFIX, ThrowawayResume, UPLOAD_TOTAL_BUDGET,
 };
 use crate::proto::SandboxConfig;
 use crate::storage::backend::ObjectMetadata;
@@ -139,9 +139,9 @@ impl PrefetchHarvester {
     }
 
     async fn resume_mapping(&self, job: &HarvestJob) -> Result<Option<MemoryPrefetch>, HarvestFailure> {
-        let _slot = within(job.deadline, self.slots.acquire())
-            .await
-            .map_err(|e| HarvestFailure::new(HarvestOutcome::Skipped, format!("acquire start slot: {e}")))?;
+        let _slot = within(job.deadline, self.slots.acquire()).await.map_err(|e| {
+            HarvestFailure::new(HarvestOutcome::Skipped, format!("acquire start slot: {}", exhausted(e)))
+        })?;
         let hours = job.config.max_sandbox_length;
         let template = within(job.deadline, self.templates.pin(job.build_id, hours))
             .await
@@ -162,6 +162,13 @@ impl PrefetchHarvester {
             .map_err(|e| HarvestFailure::new(HarvestOutcome::CollectFailed, format!("collect prefetch data: {e}")));
         reap(instance.as_ref(), &sandbox_id).await;
         collected.map(|mapping| mapping.filter(|mapping| !mapping.indices.is_empty()))
+    }
+}
+
+fn exhausted(error: String) -> String {
+    match error == DEADLINE_EXCEEDED {
+        true => START_SLOTS_EXHAUSTED.to_owned(),
+        false => error,
     }
 }
 
@@ -216,6 +223,7 @@ pub mod tests {
         pub trace: Mutex<Option<MemoryPrefetch>>,
         pub upload_wait: Mutex<Duration>,
         pub resume_wait: Mutex<Duration>,
+        pub acquire_wait: Mutex<Duration>,
         pub resumed: Mutex<Vec<SandboxConfig>>,
         pub committed: Mutex<bool>,
     }
@@ -284,6 +292,8 @@ pub mod tests {
     #[async_trait]
     impl HarvestSlots for Fakes {
         async fn acquire(&self) -> Result<super::super::StartSlot, String> {
+            let wait = *self.0.acquire_wait.lock();
+            tokio::time::sleep(wait).await;
             self.0.step("acquire")?;
             Ok(Box::new(Slot(self.0.clone())))
         }
@@ -511,6 +521,26 @@ pub mod tests {
         assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
         assert_eq!(report.error.as_deref(), Some("acquire start slot: acquire broke"));
         assert_eq!(script.events(), ["acquire"]);
+    }
+
+    #[tokio::test]
+    async fn a_start_slot_not_free_before_the_deadline_reads_like_upstream_exhaustion() {
+        let script = scripted(1);
+        *script.acquire_wait.lock() = Duration::from_secs(30);
+        let job = HarvestJob {
+            deadline: Instant::now() + Duration::from_millis(50),
+            ..job(&script, true)
+        };
+
+        let report = harvester(&script).run(&job).await;
+
+        assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
+        assert_eq!(
+            report.error.as_deref(),
+            Some(
+                "acquire start slot: rpc error: code = ResourceExhausted desc = too many sandboxes resuming on this node, please retry"
+            )
+        );
     }
 
     #[tokio::test]

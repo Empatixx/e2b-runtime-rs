@@ -50,6 +50,10 @@ impl TemplateCache {
         self.get_for(build_id, 0)
     }
 
+    pub fn lookup(&self, build_id: Uuid) -> Option<Arc<Template>> {
+        self.entries.lock().get(&build_id).map(|entry| entry.template.clone())
+    }
+
     pub fn get_for(&self, build_id: Uuid, max_sandbox_length_hours: i64) -> Arc<Template> {
         let ttl = expiration(max_sandbox_length_hours);
         let mut entries = self.entries.lock();

@@ -1,3 +1,4 @@
+pub mod atomic_write;
 pub mod cache;
 pub mod metadata;
 pub mod optimize;

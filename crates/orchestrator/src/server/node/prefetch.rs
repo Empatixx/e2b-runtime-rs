@@ -1,19 +1,19 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::{Lifetime, Node, StartRequest};
-use crate::block::build_file::Ready;
 use crate::featureflags::{FlagContext, FlagContextBuilder};
-use crate::memory::prefetch::flags::PrefetchFlags;
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::memory::trace::Trace;
 use crate::proto::SandboxConfig;
 use crate::sandbox::harvest::adapters::{SnapshotUpload, StorageMetadataUploader};
-use crate::sandbox::harvest::after_pause::{PauseHarvest, PrefetchHarvest};
+use crate::sandbox::harvest::after_pause::{HarvestSettings, PauseHarvest, PrefetchHarvest};
 use crate::sandbox::harvest::harvester::PrefetchHarvester;
 use crate::sandbox::harvest::{
     HarvestInstance, HarvestResumer, HarvestSlots, StartSlot, THROWAWAY_ID_PREFIX, ThrowawayResume,
@@ -30,44 +30,35 @@ pub struct PausedBuild {
     pub parent: SandboxInfo,
     pub build_id: Uuid,
     pub object_metadata: ObjectMetadata,
-    pub memfile_ready: Ready,
 }
 
 impl Node {
     pub(super) fn prefetch_settings(&self, config: &SandboxConfig) -> PrefetchSettings {
-        let flags = self.feature_flags.scoped(vec![resume_context(config)]);
+        let flags = self.feature_flags.scoped(resume_contexts(config));
         PrefetchSettings::from_flags(&flags)
     }
 
-    pub async fn harvest_after_pause(self: &Arc<Self>, paused: PausedBuild) {
+    pub fn harvest_after_pause(self: &Arc<Self>, paused: PausedBuild) {
         let flags = self.feature_flags.scoped(pause_contexts(&paused.parent.config));
-        if !flags.pause_resume_prefetch_harvest() {
+        let Some(settings) = HarvestSettings::from_flags(&flags) else {
             return;
-        }
-        let build_id = paused.build_id;
-        let metadata = match self.templates.get(build_id).metadata().await {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                tracing::warn!(build = %build_id, error = %e, "pause-resume prefetch harvest failed");
-                return;
-            }
         };
+        let build_id = paused.build_id;
         let parent = paused.parent;
         let pause = PauseHarvest {
             config: parent.config,
             build_id,
             start: parent.start,
             end: parent.end,
-            metadata,
+            template: self.templates.get(build_id),
             upload: Arc::new(SnapshotUpload {
                 uploads: self.uploads.clone(),
                 build_id,
             }),
             object_metadata: paused.object_metadata,
-            memfile_ready: paused.memfile_ready,
             work: Some(Box::new(self.status.track_work())),
         };
-        PrefetchHarvest::new(self.harvester()).after_pause(&flags, pause);
+        PrefetchHarvest::new(self.harvester()).after_pause(settings, pause);
     }
 
     fn harvester(self: &Arc<Self>) -> Arc<PrefetchHarvester> {
@@ -93,10 +84,13 @@ fn sandbox_attributes(config: &SandboxConfig) -> FlagContextBuilder {
         .attribute("envd-version", &config.envd_version)
 }
 
-fn resume_context(config: &SandboxConfig) -> FlagContext {
-    sandbox_attributes(config)
-        .attribute("sandbox-type", SANDBOX_TYPE)
-        .build()
+fn resume_contexts(config: &SandboxConfig) -> Vec<FlagContext> {
+    vec![
+        sandbox_attributes(config)
+            .attribute("sandbox-type", SANDBOX_TYPE)
+            .build(),
+        FlagContext::team(&config.team_id),
+    ]
 }
 
 fn pause_contexts(config: &SandboxConfig) -> Vec<FlagContext> {
@@ -113,6 +107,7 @@ impl HarvestSlots for ThrowawayHost {
         self.node
             .admission
             .acquire()
+            .instrument(tracing::info_span!("wait-for-acquire"))
             .await
             .map(|permit| Box::new(permit) as StartSlot)
             .map_err(|status| format!("rpc error: code = ResourceExhausted desc = {}", status.message()))
@@ -134,21 +129,43 @@ impl HarvestResumer for ThrowawayHost {
             lifecycle_id: Uuid::new_v4().to_string(),
             execution_id: config.execution_id.clone(),
         };
-        let node = self.node.clone();
-        node.start(StartRequest {
-            template,
-            config,
-            lifetime: lifetime(start, end),
-            lifecycle: lifecycle.clone(),
-            oom_watermark: SharedWatermark::default(),
-            throwaway: true,
-        })
-        .await
-        .map(|handle| Box::new(Throwaway { handle }) as Box<dyn HarvestInstance>)
-        .map_err(|failure| {
-            let _ = std::fs::remove_dir_all(node.work_dir_of(&lifecycle));
-            failure.message()
-        })
+        let work_dir = WorkDirGuard::new(self.node.work_dir_of(&lifecycle));
+        let handle = self
+            .node
+            .start(StartRequest {
+                template,
+                config,
+                lifetime: lifetime(start, end),
+                lifecycle,
+                oom_watermark: SharedWatermark::default(),
+                throwaway: true,
+            })
+            .await
+            .map_err(|failure| failure.message())?;
+        work_dir.defuse();
+        Ok(Box::new(Throwaway { handle }))
+    }
+}
+
+struct WorkDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl WorkDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn defuse(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for WorkDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 

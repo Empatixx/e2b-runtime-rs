@@ -28,6 +28,14 @@ pub fn create_temp(prefix: &str, suffix: &str) -> Result<NamedTempFile, String> 
         .map_err(|e| e.to_string())
 }
 
+pub fn create_temp_in(dir: &Path, prefix: &str, suffix: &str) -> Result<NamedTempFile, String> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(suffix)
+        .tempfile_in(dir)
+        .map_err(|e| path_error("open", dir, &e))
+}
+
 pub fn parent(path: &Path) -> PathBuf {
     path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
