@@ -10,10 +10,7 @@ pub struct ServiceKey {
 
 impl ServiceKey {
     pub fn parse(private_key: &str) -> Result<Self, String> {
-        let der = pem::blocks(private_key)
-            .into_iter()
-            .next()
-            .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der);
+        let der = pem::first_der_or_raw(private_key);
         let key = PrivateKey::pkcs8(&der)
             .or_else(|| PrivateKey::pkcs1(&der))
             .or_else(|| PrivateKey::sec1(&der))
