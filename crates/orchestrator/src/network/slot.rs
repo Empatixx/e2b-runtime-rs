@@ -182,7 +182,6 @@ impl Slot {
         let host_ip = self.host_ip().to_string();
         let guest_ip = GUEST_IP.to_string();
         let host_veth_ip = self.host_veth_ip().to_string();
-        self.inside(&["sysctl", "-qw", "net.ipv4.ip_forward=1"]).await?;
         self.inside(&["ip", "route", "add", "default", "via", &host_veth_ip])
             .await?;
         self.iptables_inside(&[

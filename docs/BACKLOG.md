@@ -76,13 +76,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Pause harvest (record a trace with a throwaway resume after each pause) is not implemented; upstream has it off by default | API |
 | Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
 
-## Orchestrator: backlog sweep (2026-10-08)
-
-| Item | Matters from |
-|---|---|
-| Pause bounds the memory server settle with 60 s ("timed out after 60s waiting for the memory server to settle"); Go waits on its lock bounded only by the request context | API |
-| Every slot sets `net.ipv4.ip_forward=1` inside its netns (`slot.rs`); Go does not, and it is unclear what enables it there | API |
-
 ## Orchestrator: template builder (M13–M16)
 
 | Item | Matters from |
