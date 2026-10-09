@@ -19,7 +19,9 @@ use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISI
 use crate::envd::version::is_at_least;
 use crate::go_exec::GoCommand;
 use crate::proto::LogLevel;
-use crate::sandbox::config::SandboxBuilder;
+use crate::sandbox::config::sandbox_builder::{SetIoEngine, SetMemoryMib, SetVcpus, SetWithoutMmds};
+use crate::sandbox::config::{Rootfs, SandboxBuilder};
+use crate::server::node::BaseSandbox;
 use crate::template::metadata::TemplateMetadata;
 
 const BUILD_DIR_MODE: u32 = 0o777;
@@ -127,7 +129,7 @@ impl BaseBuild<'_> {
             .await?;
         let sandbox = slot
             .attach(self.sandbox_builder(&sandbox_id))
-            .rootfs_file(rootfs)
+            .rootfs(Rootfs::File(rootfs.to_path_buf()))
             .init_path(BUSYBOX_INIT_PATH)
             .kernel_logs(true)
             .kvm_clock(true)
@@ -182,7 +184,10 @@ impl BaseBuild<'_> {
         }
     }
 
-    fn sandbox_builder(&self, sandbox_id: &str) -> SandboxBuilder {
+    fn sandbox_builder(
+        &self,
+        sandbox_id: &str,
+    ) -> SandboxBuilder<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<BaseSandbox>>>>> {
         self.phase
             .env
             .node
@@ -282,7 +287,7 @@ impl BaseBuild<'_> {
         let mut sandbox = executor
             .boot_options(slot.attach(builder), &self.shape())
             .memory_base(base_build)
-            .rootfs_file(&ext4.file)
+            .rootfs(Rootfs::File(ext4.file.clone()))
             .kvm_clock(kvm_clock)
             .cold_boot()
             .await

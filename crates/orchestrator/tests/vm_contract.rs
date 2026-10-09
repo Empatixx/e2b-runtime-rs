@@ -124,11 +124,10 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     let launch = Launch::builder()
         .binary(&assets.firecracker)
         .socket(&socket)
-        .namespace(&slot.namespace())
+        .namespace(slot.namespace())
         .rootfs(disk.path())
         .kernel(&assets.kernel)
-        .build()
-        .unwrap();
+        .build();
     let vm = FirecrackerProcess::spawn(&launch).await.unwrap();
     cgroup.add(vm.pid().unwrap()).unwrap();
     let console = Arc::new(Mutex::new(String::new()));
@@ -144,7 +143,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
     let config = VmConfig::builder()
         .kernel(GUEST_KERNEL)
         .rootfs(GUEST_ROOTFS)
-        .boot_args(&format!(
+        .boot_args(format!(
             "{} -- 3600",
             BootOptions {
                 kernel_logs: true,
@@ -152,8 +151,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
             }
             .kernel_args(host_arch())
         ))
-        .build()
-        .unwrap();
+        .build();
     let metadata = MmdsMetadata {
         sandbox_id: "vm-contract".to_owned(),
         template_id: template_id.to_string(),

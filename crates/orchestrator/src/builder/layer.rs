@@ -25,6 +25,10 @@ use crate::network::pool::SlotLease;
 use crate::network::slot::{HostSlots, Slot};
 use crate::proto::LogLevel;
 use crate::sandbox::Sandbox;
+use crate::sandbox::config::sandbox_builder::{
+    IsUnset, SetEnvdTimeout, SetInitPath, SetIoEngine, SetKernelLogs, SetMemoryMib, SetSkipEnvd, SetSlot, SetVcpus,
+    SetWithoutMmds, State,
+};
 use crate::sandbox::config::{PreBoot, SandboxBuilder};
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::server::node::BuildNetwork;
@@ -117,6 +121,9 @@ pub struct LayerBuild<'a> {
     pub build_origin: &'a str,
 }
 
+pub type BootOptioned<S> =
+    SetSkipEnvd<SetEnvdTimeout<SetKernelLogs<SetInitPath<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<S>>>>>>>>;
+
 pub struct BuildSlot {
     slot: Slot,
     network: BuildNetwork,
@@ -124,7 +131,10 @@ pub struct BuildSlot {
 }
 
 impl BuildSlot {
-    pub fn attach(self, builder: SandboxBuilder) -> SandboxBuilder {
+    pub fn attach<S: State>(self, builder: SandboxBuilder<S>) -> SandboxBuilder<SetSlot<S>>
+    where
+        S::Slot: IsUnset,
+    {
         let BuildSlot { slot, network, lease } = self;
         builder.pooled_slot(slot).hold(network).hold(lease)
     }
@@ -220,22 +230,39 @@ impl LayerExecutor<'_> {
             .map_err(|e| BuildError::Internal(format!("error comparing envd version: {e}")))?;
         let slot = self.lease_slot(layer.sandbox_id, "create sandbox").await?;
         let builder = self.env.node.cold_boot_layer(layer).map_err(created)?;
-        let builder = self
+        let mut sandbox = self
             .boot_options(slot.attach(builder), &build.shape)
             .kvm_clock(kvm_clock)
-            .envd(self.env.node.build_envd(build.envd_defaults.clone()));
-        let builder = match build.reserved_blocks {
-            true => builder.pre_boot(reserved_blocks(self.settings.flags.reserved_disk_space_mb())),
-            false => builder,
-        };
-        let mut sandbox = builder.cold_boot().await.map_err(created)?;
+            .envd(self.env.node.build_envd(build.envd_defaults.clone()))
+            .maybe_pre_boot(
+                build
+                    .reserved_blocks
+                    .then(|| reserved_blocks(self.settings.flags.reserved_disk_space_mb())),
+            )
+            .cold_boot()
+            .await
+            .map_err(created)?;
         match sandbox.wait_for_envd().await {
             Ok(()) => Ok(sandbox),
             Err(e) => Err(fail(sandbox, BuildError::Internal(format!("wait for envd: {e}"))).await),
         }
     }
 
-    pub fn boot_options(&self, builder: SandboxBuilder, shape: &SandboxShape<'_>) -> SandboxBuilder {
+    pub fn boot_options<S: State>(
+        &self,
+        builder: SandboxBuilder<S>,
+        shape: &SandboxShape<'_>,
+    ) -> SandboxBuilder<BootOptioned<S>>
+    where
+        S::Vcpus: IsUnset,
+        S::MemoryMib: IsUnset,
+        S::IoEngine: IsUnset,
+        S::WithoutMmds: IsUnset,
+        S::InitPath: IsUnset,
+        S::KernelLogs: IsUnset,
+        S::EnvdTimeout: IsUnset,
+        S::SkipEnvd: IsUnset,
+    {
         builder
             .vcpus(shape.vcpus as u32)
             .memory_mib(shape.memory_mb as u32)

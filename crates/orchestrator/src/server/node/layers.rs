@@ -5,13 +5,16 @@ use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
 
-use super::{BUILD_SANDBOX_TYPE, Node, parents};
+use super::{BUILD_SANDBOX_TYPE, BaseSandbox, Node, parents};
 use crate::block::build_file::{Artifact, BuildFile};
 use crate::block::overlay::Overlay;
 use crate::envd::{EnvdDefaults, EnvdInit};
 use crate::featureflags::FlagContext;
 use crate::firecracker::version::supports_memfd;
 use crate::sandbox::config::SandboxBuilder;
+use crate::sandbox::config::sandbox_builder::{
+    SetMemfile, SetMemoryBase, SetPrefetch, SetPrefetchSettings, SetRootfs, SetUseMemfd,
+};
 use crate::sandbox::snapshot::filesystem::FilesystemSnapshot;
 use crate::server::retry::Failure;
 use crate::storage::backend::{ObjectMetadata, Storage};
@@ -34,6 +37,8 @@ pub struct LayerSandbox<'a> {
     pub team_id: &'a str,
     pub firecracker_version: &'a str,
 }
+
+pub type ResumedLayer = SetUseMemfd<SetPrefetchSettings<SetPrefetch<SetMemfile<SetRootfs<BaseSandbox>>>>>;
 
 impl Node {
     pub async fn layer_source(&self, build_id: &str) -> Result<LayerSource, String> {
@@ -112,7 +117,7 @@ impl Node {
         Ok(())
     }
 
-    pub fn resume_layer(&self, layer: &LayerSandbox) -> Result<SandboxBuilder, String> {
+    pub fn resume_layer(&self, layer: &LayerSandbox) -> Result<SandboxBuilder<ResumedLayer>, String> {
         let work_dir = self.layer_work_dir(layer.sandbox_id)?;
         let memfile = Arc::new(BuildFile::new(
             layer.source.build.memfile.clone(),
@@ -123,7 +128,7 @@ impl Node {
             .build_sandbox(layer.sandbox_id, layer.template_id)
             .rootfs(self.layer_overlay(&layer.source.build, &work_dir)?)
             .memfile(memfile)
-            .prefetch(layer.source.metadata.memory_prefetch().cloned())
+            .maybe_prefetch(layer.source.metadata.memory_prefetch().cloned())
             .prefetch_settings(self.layer_prefetch_settings(layer))
             .use_memfd(
                 supports_memfd(layer.firecracker_version)
@@ -153,7 +158,10 @@ impl Node {
         }
     }
 
-    pub fn cold_boot_layer(&self, layer: &LayerSandbox) -> Result<SandboxBuilder, String> {
+    pub fn cold_boot_layer(
+        &self,
+        layer: &LayerSandbox,
+    ) -> Result<SandboxBuilder<SetMemoryBase<SetRootfs<BaseSandbox>>>, String> {
         let work_dir = self.layer_work_dir(layer.sandbox_id)?;
         Ok(self
             .build_sandbox(layer.sandbox_id, layer.template_id)

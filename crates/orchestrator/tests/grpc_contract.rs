@@ -113,7 +113,7 @@ async fn template_build(host: &Host, dir: &Path, storage: &Storage, slot: u32) -
     let _ = slot.destroy().await;
     let sandbox = Sandbox::builder()
         .id("grpc-template")
-        .template_id(&template_id.to_string())
+        .template_id(template_id.to_string())
         .rootfs(overlay)
         .slot(slot)
         .firecracker(&host.firecracker)

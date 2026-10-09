@@ -5,7 +5,8 @@ pub const GUEST_ROOTFS: &str = "/fc-vm/rootfs.ext4";
 pub const GUEST_KERNEL_DIR: &str = "/fc-vm/kernel";
 pub const GUEST_KERNEL: &str = "/fc-vm/kernel/vmlinux";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+#[builder(on(_, into))]
 pub struct Launch {
     pub binary: PathBuf,
     pub socket: PathBuf,
@@ -15,21 +16,7 @@ pub struct Launch {
     pub cgroup: Option<PathBuf>,
 }
 
-#[derive(Debug, Default)]
-pub struct LaunchBuilder {
-    binary: Option<PathBuf>,
-    socket: Option<PathBuf>,
-    namespace: Option<String>,
-    rootfs: Option<PathBuf>,
-    kernel: Option<PathBuf>,
-    cgroup: Option<PathBuf>,
-}
-
 impl Launch {
-    pub fn builder() -> LaunchBuilder {
-        LaunchBuilder::default()
-    }
-
     pub fn script(&self) -> String {
         let link = |target: &Path, name: &str| format!("ln -s {} {}", quote_path(target), shell_quote(name));
         [
@@ -46,49 +33,6 @@ impl Launch {
             ),
         ]
         .join(" && ")
-    }
-}
-
-impl LaunchBuilder {
-    pub fn binary(mut self, binary: impl Into<PathBuf>) -> Self {
-        self.binary = Some(binary.into());
-        self
-    }
-
-    pub fn socket(mut self, socket: impl Into<PathBuf>) -> Self {
-        self.socket = Some(socket.into());
-        self
-    }
-
-    pub fn namespace(mut self, namespace: &str) -> Self {
-        self.namespace = Some(namespace.to_owned());
-        self
-    }
-
-    pub fn rootfs(mut self, rootfs: impl Into<PathBuf>) -> Self {
-        self.rootfs = Some(rootfs.into());
-        self
-    }
-
-    pub fn kernel(mut self, kernel: impl Into<PathBuf>) -> Self {
-        self.kernel = Some(kernel.into());
-        self
-    }
-
-    pub fn cgroup(mut self, cgroup: Option<PathBuf>) -> Self {
-        self.cgroup = cgroup;
-        self
-    }
-
-    pub fn build(self) -> Result<Launch, String> {
-        Ok(Launch {
-            binary: self.binary.ok_or("firecracker binary is required")?,
-            socket: self.socket.ok_or("api socket is required")?,
-            namespace: self.namespace.ok_or("network namespace is required")?,
-            rootfs: self.rootfs.ok_or("rootfs is required")?,
-            kernel: self.kernel.ok_or("kernel is required")?,
-            cgroup: self.cgroup,
-        })
     }
 }
 
@@ -112,8 +56,7 @@ mod tests {
             .namespace("ns-7")
             .rootfs("/dev/nbd3")
             .kernel("/opt/e2b/vmlinux")
-            .build()
-            .unwrap();
+            .build();
 
         assert_eq!(
             launch.script(),
@@ -127,10 +70,5 @@ mod tests {
     #[test]
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn build_requires_every_path() {
-        assert_eq!(Launch::builder().build().unwrap_err(), "firecracker binary is required");
     }
 }

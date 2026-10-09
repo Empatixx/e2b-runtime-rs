@@ -23,6 +23,9 @@ mod linux {
     use orchestrator::network::slot::Slot;
     use orchestrator::sandbox::Sandbox;
     use orchestrator::sandbox::config::SandboxBuilder;
+    use orchestrator::sandbox::config::sandbox_builder::{
+        SetFirecracker, SetId, SetKernel, SetSlot, SetTemplateId, SetWorkDir,
+    };
     use orchestrator::storage::backend::Storage;
     use orchestrator::storage::header::{Header, Metadata};
     use orchestrator::tcpfirewall::proxy::{FirewallSandbox, TcpFirewall};
@@ -30,6 +33,8 @@ mod linux {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::signal::unix::{Signal, SignalKind, signal};
     use uuid::Uuid;
+
+    type ExampleSandbox = SetWorkDir<SetKernel<SetFirecracker<SetSlot<SetTemplateId<SetId>>>>>;
 
     const COLD_SLOT: u32 = 4020;
     const RESUMED_SLOT: u32 = 4021;
@@ -178,12 +183,17 @@ mod linux {
                 .map_err(|e| format!("create overlay: {e}"))
         }
 
-        async fn sandbox(&self, assets: &Assets, id: &str, slot: u32) -> Result<SandboxBuilder, String> {
+        async fn sandbox(
+            &self,
+            assets: &Assets,
+            id: &str,
+            slot: u32,
+        ) -> Result<SandboxBuilder<ExampleSandbox>, String> {
             let slot = Slot::new(slot)?;
             let _ = slot.destroy().await;
             Ok(Sandbox::builder()
                 .id(id)
-                .template_id(&self.header.metadata.build_id.to_string())
+                .template_id(self.header.metadata.build_id.to_string())
                 .slot(slot)
                 .firecracker(&assets.firecracker)
                 .kernel(&assets.kernel)

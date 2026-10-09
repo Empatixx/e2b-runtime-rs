@@ -3,8 +3,9 @@ mod contexts;
 mod flags;
 mod prefetch;
 
-pub use client::{FeatureFlags, FeatureFlagsBuilder, FlagValue, INIT_TIMEOUT, LAUNCH_DARKLY_API_KEY};
-pub use contexts::{FlagContext, FlagContextBuilder};
+pub use client::feature_flags_builder;
+pub use client::{FeatureFlags, FeatureFlagsBuilder, FlagSettings, FlagValue, INIT_TIMEOUT, LAUNCH_DARKLY_API_KEY};
+pub use contexts::{FlagContext, FlagContextBuilder, flag_context_builder};
 pub use flags::{
     BUILD_BASE_ROOTFS_SIZE_LIMIT_MB, BUILD_CACHE_MAX_USAGE_PERCENTAGE, BUILD_CPU_TEMPLATE,
     BUILD_ENSURE_FREE_DISK_SPACE, BUILD_ENVD_MEMORY_PROTECTION, BUILD_PROVISION_VERSION, BUILD_RESERVED_DISK_SPACE_MB,
