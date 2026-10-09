@@ -1,74 +1,26 @@
-const MEMFD_RELEASE: Release = Release { major: 1, minor: 14 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Release {
-    major: u64,
-    minor: u64,
-}
+use semver::Version;
 
 pub fn supports_memfd(firecracker_version: &str) -> bool {
-    release_line(firecracker_version).is_some_and(|release| release >= MEMFD_RELEASE)
+    release_line(firecracker_version).is_some_and(|release| (release.major, release.minor) >= (1, 14))
 }
 
-fn release_line(version: &str) -> Option<Release> {
+fn release_line(version: &str) -> Option<Version> {
     match version.split_once('_') {
-        Some((release, _)) => strict_semver(release.strip_prefix('v').unwrap_or(release)),
-        None => e2b_release(version).or_else(|| strict_semver(version.strip_prefix('v').unwrap_or(version))),
+        Some((release, _)) => strict_semver(release),
+        None => e2b_release(version).or_else(|| strict_semver(version)),
     }
 }
 
-fn e2b_release(version: &str) -> Option<Release> {
+fn e2b_release(version: &str) -> Option<Version> {
     let (line, e2b) = version.strip_prefix('v')?.split_once('-')?;
-    let [major, minor] = digits_parts(line)?;
-    let [_, _, _] = digits_parts::<3>(e2b)?;
-    strict_semver(&format!("{major}.{minor}.0"))?;
-    strict_semver(e2b)?;
-    Some(Release {
-        major: major.parse().ok()?,
-        minor: minor.parse().ok()?,
-    })
+    Version::parse(e2b)
+        .ok()
+        .filter(|e2b| e2b.pre.is_empty() && e2b.build.is_empty())?;
+    Version::parse(&format!("{line}.0")).ok()
 }
 
-fn digits_parts<const N: usize>(text: &str) -> Option<[&str; N]> {
-    let parts: Vec<&str> = text.split('.').collect();
-    parts
-        .iter()
-        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        .then_some(())?;
-    parts.try_into().ok()
-}
-
-fn strict_semver(text: &str) -> Option<Release> {
-    let (rest, metadata) = text
-        .split_once('+')
-        .map_or((text, None), |(rest, metadata)| (rest, Some(metadata)));
-    let (core, prerelease) = rest
-        .split_once('-')
-        .map_or((rest, None), |(core, prerelease)| (core, Some(prerelease)));
-    let [major, minor, patch] = digits_parts(core)?;
-    let numbers_valid = [major, minor, patch].iter().all(|number| no_leading_zero(number));
-    let prerelease_valid = prerelease.is_none_or(|prerelease| identifiers_valid(prerelease, true));
-    let metadata_valid = metadata.is_none_or(|metadata| identifiers_valid(metadata, false));
-    (numbers_valid && prerelease_valid && metadata_valid).then_some(Release {
-        major: major.parse().ok()?,
-        minor: minor.parse().ok()?,
-    })
-}
-
-fn no_leading_zero(number: &str) -> bool {
-    number == "0" || !number.starts_with('0')
-}
-
-fn identifiers_valid(text: &str, numeric_without_leading_zero: bool) -> bool {
-    text.split('.').all(|identifier| {
-        !identifier.is_empty()
-            && identifier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            && (!numeric_without_leading_zero
-                || !identifier.bytes().all(|byte| byte.is_ascii_digit())
-                || no_leading_zero(identifier))
-    })
+fn strict_semver(text: &str) -> Option<Version> {
+    Version::parse(text.strip_prefix('v').unwrap_or(text)).ok()
 }
 
 #[cfg(test)]
