@@ -1,0 +1,51 @@
+---
+title: Orchestrator overview
+description: The service on every node that turns gRPC calls into running microVMs.
+---
+
+The **orchestrator** is a single Rust binary that runs as root on every node. The E2B API calls it over gRPC (port `5008`) to create, pause, resume and kill sandboxes, and, in its template-manager role, to build templates.
+
+<Mermaid chart={`
+flowchart TB
+  API[E2B API] -- gRPC SandboxService --> SVC[server: service.rs]
+  SVC --> NODE[Node]
+  NODE --> CACHE[template cache]
+  NODE --> NET[network pool]
+  NODE --> NBD[NBD device pool]
+  NODE --> SBX[Sandbox]
+  SBX --> FC[Firecracker process]
+  SBX --> MEM[memory server: userfaultfd]
+  SBX --> DISK[rootfs overlay over NBD]
+  CACHE --> STORE[(object storage)]
+`} />
+
+## The pieces
+
+| Piece | Page | Role |
+|---|---|---|
+| gRPC server | [Lifecycle](./lifecycle/) | `SandboxService`, `InfoService`, health; admission limits; the per-sandbox task. |
+| Firecracker | [Firecracker](./firecracker/) | Launching the VMM, its API socket, snapshot load, MMDS. |
+| Memory | [Memory](./memory/) | Serving guest memory on demand with userfaultfd, prefetch, dirty tracking. |
+| Storage | [Storage](./storage/) | Builds in object storage, headers, the chunk cache, the template cache. |
+| Disks | [Block devices](./block-devices/) | The copy-on-write rootfs overlay, exposed to Firecracker as an NBD device. |
+| Network | [Network](./network/) | Per-sandbox network namespaces, NAT, the egress firewall and proxy. |
+| Templates | [Template builder](./template-builder/) | OCI image to snapshot, layer by layer. |
+| Running it | [Operations](./operations/) | Configuration, feature flags, telemetry, shutdown. |
+
+## Source layout
+
+```
+crates/orchestrator/src/
+  server/        gRPC services, Node, admission, lifecycle task, uploads, shutdown
+  sandbox/       Sandbox: cold boot, resume, snapshot, pause harvest
+  firecracker/   VMM config, API client, launch, exit classification
+  memory/        userfaultfd server, prefetch, traces, memfile export
+  block/         chunk cache, build files, rootfs overlay
+  exposure/nbd/  in-process NBD server and device pool
+  network/       slots, pool, nftables firewall
+  storage/       object store backends, headers, paths
+  template/      template cache and metadata
+  builder/       the template-manager role
+  featureflags/  LaunchDarkly client and flag definitions
+  telemetry/     OpenTelemetry metrics, traces and logs
+```

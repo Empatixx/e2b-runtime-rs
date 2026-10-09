@@ -1,0 +1,70 @@
+---
+title: Sandbox lifecycle
+description: What the node does, step by step, for create, pause, resume and kill.
+---
+
+## Create
+
+`SandboxService/Create` gets a template id, a build id, resources and an end time. A create is always a **resume of a snapshot**: a build's snapshot, or the snapshot a previous pause left.
+
+<Mermaid chart={`
+sequenceDiagram
+  participant API
+  participant N as Node
+  participant T as template cache
+  participant FC as Firecracker
+  participant M as memory server
+  participant E as envd
+  API->>N: Create(build, resources)
+  N->>N: admission (max sandboxes, max starting)
+  N->>T: headers, snapfile, metadata of the build
+  par in parallel
+    N->>N: lease a network slot
+    N->>N: expose the rootfs overlay as /dev/nbdN
+  end
+  N->>FC: start in the slot's network namespace
+  N->>FC: load snapshot (memory backend = userfaultfd socket)
+  FC->>M: hands over the uffd and memory regions
+  N->>N: start prefetch of recorded pages
+  N->>FC: resume VM, set MMDS metadata
+  N->>E: POST /init (env, token, clock, user)
+  E-->>N: ok
+  N-->>API: Created
+`} />
+
+1. **Admission.** A node runs at most `max-sandboxes-per-node` sandboxes and starts at most `max-starting-instances-per-node` at once, both from feature flags. A create that cannot start within 15 s gets `ResourceExhausted`.
+2. **Template.** The [template cache](../storage/) returns the build's headers, `snapfile` and `metadata.json`, downloading them once and sharing them between sandboxes.
+3. **Disk and network in parallel.** A network slot is leased from the [pool](../network/) and the rootfs [overlay](../block-devices/) is attached to a free NBD device.
+4. **Firecracker** starts inside the slot's network namespace and loads the snapshot. Its memory backend is a Unix socket where the [memory server](../memory/) waits.
+5. **Prefetch.** Pages recorded as "always touched right after resume" are copied into the guest in the background, so the guest rarely has to wait.
+6. **Resume and init.** The VM resumes, MMDS gets the sandbox metadata, and envd gets `POST /init`.
+7. **Registered.** The sandbox is added to the registry, and a lifecycle task starts that watches it until it stops.
+
+## Running
+
+The lifecycle task enforces `endTime` (when local expiry is on; normally the API does it), collects host stats into ClickHouse, watches for out-of-memory kills, publishes events and routing entries to Redis, and notices when Firecracker dies. A Firecracker exit is classified like upstream's `fc.ClassifyExit` (clean exit, error exit, external signal, fault, requested signal).
+
+## Pause
+
+<Mermaid chart={`
+flowchart LR
+  A[freeze user processes and fs] --> B[pause VM]
+  B --> C[Firecracker snapshot: snapfile]
+  C --> D[dirty memory pages → memfile diff]
+  C --> E[overlay written blocks → rootfs diff]
+  D --> F[new headers]
+  E --> F
+  F --> G[add to template cache]
+  G --> H[reply to API]
+  G --> I[upload to storage in background]
+`} />
+
+The pause produces a **new build**. Only the memory pages written since resume and the disk blocks written into the overlay are stored; the new headers point at the parent builds for everything else. The reply goes out as soon as the snapshot is in the node's template cache, so a resume on the same node needs no download. The upload to object storage runs in the background (20 minutes per attempt, two hours in total) and parent builds always land before their children.
+
+## Checkpoint
+
+A checkpoint is a pause followed by an immediate resume of the new build. The sandbox keeps running, and the API can later resume it from that moment.
+
+## Kill
+
+Delete stops the lifecycle task, which kills Firecracker, stops the memory server, detaches the NBD device, returns the network slot (after a 3 s delay, like upstream), removes the cgroup and deletes the work files.

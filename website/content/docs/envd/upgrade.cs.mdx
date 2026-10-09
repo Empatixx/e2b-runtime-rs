@@ -1,0 +1,29 @@
+---
+title: Živý upgrade
+description: Výměna envd v běžícím sandboxu, aniž by se ukončily jeho procesy.
+---
+
+Staré šablony obsahují staré verze envd. Přestavět kvůli opravě všechny šablony nejde, proto se envd umí **vyměnit sám v běžícím sandboxu** a procesy, které spustil, běží dál.
+
+## Jak to funguje
+
+<Mermaid chart={`
+sequenceDiagram
+  participant O as orchestrator
+  participant A as starý envd
+  participant B as nový envd
+  O->>A: POST /upgrade (nová binárka v /usr/bin/envd.next)
+  A->>A: zapíše stav předání do /run/e2b/envd-handover.pb
+  A->>B: exec nové binárky s -resume-handover
+  B->>B: přečte předání, převezme procesy, PTY, watchery
+  B-->>O: znovu odpovídá na :49983
+`} />
+
+1. Orchestrator nakopíruje novou binárku do sandboxu a zavolá `POST /upgrade`.
+2. Starý envd zapíše **soubor předání** (protobuf) se vším, co ví: běžící procesy a jejich roury a PTY, jejich tagy, watchery souborového systému, přeposílané porty, výchozího uživatele a pracovní složku a které cgroupy byly zmrazené.
+3. Deskriptory souborů zůstanou přes `exec` otevřené, takže nový envd zdědí skutečné roury a terminály, ne jen jejich čísla.
+4. Nový envd nastartuje s `-resume-handover`, přečte soubor, převezme každý proces a nahlásí, co převzal.
+
+Klienti, kteří streamovali výstup, se znovu připojí přes `Connect` a pokračují, kde byli.
+
+Stejný mechanismus používá template builder, když aktualizuje envd ve vrstvách postavených ze starší šablony.

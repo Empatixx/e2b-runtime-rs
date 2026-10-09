@@ -1,0 +1,45 @@
+---
+title: Paměť
+description: Obsluha RAM hosta na požádání přes userfaultfd, její prefetch a hledání změn.
+---
+
+Snapshot paměti sandboxu může mít gigabajty. Kopírovat ho celý před probuzením by trvalo sekundy, takže ho orchestrator nekopíruje vůbec. Nechá hosta běžet a **každou stránku dodá, až na ni host poprvé sáhne**.
+
+## userfaultfd
+
+Linuxový **userfaultfd** dovoluje procesu převzít obsluhu výpadků stránek (page faults) pro určitý rozsah paměti. Když Firecracker načítá snapshot s backendem `Uffd`, namapuje RAM hosta bez obsahu, zaregistruje ji u userfaultfd a pošle tento deskriptor spolu s rozložením paměti na unixový socket. Tam poslouchá **paměťový server** orchestratoru.
+
+<Mermaid chart={`
+sequenceDiagram
+  participant G as CPU hosta
+  participant K as jádro Linuxu
+  participant S as paměťový server
+  participant C as cache chunků
+  G->>K: sáhne na stránku na adrese X
+  K->>S: událost výpadku stránky (uffd)
+  S->>S: adresa → offset v memfilu (mapa oblastí)
+  S->>C: přečti 4 KiB na offsetu
+  C-->>S: bajty (z cache, nebo ze staženého chunku)
+  S->>K: UFFDIO_COPY stránky do hosta
+  K-->>G: pokračuje
+`} />
+
+Server přeloží adresu výpadku na offset v memfilu podle mapy oblastí, kterou poslal Firecracker, přečte stránku přes [cache chunků](../storage/) a vloží ji pomocí `UFFDIO_COPY`. Virtuální CPU, které výpadek způsobilo, pokračuje, jako by tam stránka byla odjakživa.
+
+## Prefetch
+
+Čekat na výpadky po jedné stránce je pomalé hned na začátku probuzení, kdy host sahá na tisíce stránek. Orchestrator proto **prefetchuje**:
+
+- **init**: při stavbě šablony ji fáze optimize dvakrát probudí, zaznamená, na které stránky sáhly oba běhy, a uloží ten seznam do `metadata.json`. Při každém probuzení se tyto stránky na pozadí stáhnou a vloží v zaznamenaném pořadí.
+- **last-cycle**: vlastní data nejnovější vrstvy se předem nahřejí do cache, ale nevkládají se.
+- **pause harvest**: volitelně se po uspání probudí jednorázová kopie sandboxu bez sítě a zaznamená čerstvý seznam.
+
+Zdroj, počty workerů a limity velikosti pocházejí z feature flagů (`resume-prefetch-source`, `memory-prefetch-max-fetch-workers`, `memory-prefetch-max-copy-workers`, `memory-prefetch-coalesce-max-mb`).
+
+## Hledání zapsaných stránek
+
+Při uspání je potřeba uložit jen stránky zapsané od probuzení. Stránky, které server vložil, jsou registrované s **ochranou proti zápisu**; první zápis do takové stránky ochranu zruší a Firecracker nahlásí, které stránky ji ztratily (`GET /memory/dirty`). Stránky, do kterých host zapsal, aniž by je kdy načetl (čerstvé alokace), se doplní z mapy rezidentních stránek.
+
+## memfd
+
+RAM hosta může být uložená v **memfd**, který Firecracker sdílí s orchestratorem. Export zapsaných stránek při uspání je pak obyčejné čtení z memfd místo `process_vm_readv` do cizího procesu. Zapíná ho feature flag `use-memfd` pro verze Firecrackeru, které to podporují.

@@ -1,0 +1,32 @@
+---
+title: Sandbox
+description: A small, isolated Linux computer that starts in about a second.
+---
+
+A **sandbox** is a Linux virtual machine that the SDK creates on demand. From the inside it looks like a normal computer: it has a filesystem, a user called `user`, a shell, network access and whatever the template installed. From the outside it is a [Firecracker](https://firecracker-microvm.github.io/) **microVM**: a very small virtual machine with only the devices a sandbox needs.
+
+```ts
+import { Sandbox } from 'e2b'
+
+const sandbox = await Sandbox.create()
+const result = await sandbox.commands.run('python3 -c "print(1 + 1)"')
+console.log(result.stdout) // 2
+```
+
+## Why a microVM and not a container
+
+A container shares the host's kernel, so a bug in the kernel can let code escape. A microVM has its **own kernel**, and the only thing it shares with the host is the KVM hypervisor and a few virtual devices. That is the isolation E2B needs to run code nobody has reviewed, such as code an AI model just wrote.
+
+## What identifies a sandbox
+
+| Field | Meaning |
+|---|---|
+| `sandboxID` | The public id the SDK uses. |
+| `templateID` | Which [template](../template/) it was created from. |
+| `buildID` | Which build of that template, or the build left by its last pause. |
+| `teamID` | Who owns it. |
+| `endTime` | When the API should stop or pause it. |
+
+## What runs inside
+
+Every sandbox runs **[envd](../../envd/)**, a small daemon that listens on port `49983`. The SDK does everything through envd: it starts processes, streams their output, reads and writes files and watches directories. The orchestrator never runs commands in a sandbox itself; it also goes through envd.

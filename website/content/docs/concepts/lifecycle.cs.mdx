@@ -1,0 +1,26 @@
+---
+title: Životní cyklus
+description: Vytvoření, běh, uspání, probuzení, ukončení a co každý krok dělá na nodu.
+---
+
+<Mermaid chart={`
+stateDiagram-v2
+  [*] --> Running: create (probudí build)
+  Running --> Paused: pause
+  Paused --> Running: resume (create z uspaného buildu)
+  Running --> [*]: kill nebo timeout
+  Paused --> [*]: delete
+`} />
+
+| Krok | Co se stane |
+|---|---|
+| **Create** | Orchestrator probudí snapshot buildu: načte stav VM, obsluhuje paměť na požádání a připojí disk. envd se nastavení sandboxu dozví přes `POST /init`. |
+| **Běh** | SDK mluví s envd. Orchestrator hlídá VM, sbírá statistiky a dodržuje `endTime`. |
+| **Pause** | VM se pozastaví a udělá se snapshot. Uloží se jen změněné stránky paměti a bloky disku, jako nový build. Pause odpoví, jakmile je snapshot v lokální cache nodu; upload do úložiště pokračuje na pozadí. |
+| **Resume** | Je to jen create z buildu, který vytvořil pause. Na stejném nodu čte jen lokální soubory. |
+| **Checkpoint** | Pause, po které sandbox běží dál, takže se k tomu okamžiku dá později vrátit. |
+| **Kill** | VM se zastaví a uvolní se všechny prostředky, které používala. |
+
+Uspaný sandbox nestojí nic kromě úložiště. Proto E2B může sandbox držet „naživu“ celé dny: většinu té doby je to snapshot v bucketu.
+
+Podrobnosti z pohledu nodu jsou na stránce [Životní cyklus sandboxu](../../orchestrator/lifecycle/).

@@ -1,0 +1,29 @@
+---
+title: Node
+description: The bare-metal machine that runs sandboxes, and the orchestrator that manages them.
+---
+
+A **node** is a Linux machine with KVM (usually bare metal) that runs many sandboxes at once. Each node runs one **orchestrator**, a long-running service with a gRPC API. The E2B API picks a node for each new sandbox and calls that node's orchestrator.
+
+## Roles
+
+The same orchestrator binary can play two roles, chosen with `ORCHESTRATOR_SERVICES`:
+
+| Role | gRPC service | What it does |
+|---|---|---|
+| `orchestrator` | `SandboxService` | Creates, updates, lists, pauses, checkpoints and deletes sandboxes. |
+| `template-manager` | `TemplateService` | Builds templates into snapshots. |
+
+Both roles also serve `InfoService` (node status and resources) and gRPC health on the same port (`5008` by default).
+
+## What a node keeps ready
+
+Starting a sandbox must be fast, so the node prepares expensive things in advance:
+
+- **Network slots**: Linux network namespaces with their virtual cables and firewall rules, created ahead of time and reused.
+- **NBD devices**: block devices the sandbox disks are exposed through.
+- **A template cache**: recently used builds, with their headers and the chunks already downloaded.
+
+## Feature flags
+
+Many limits and switches (how many sandboxes a node may run, whether to prefetch memory, which kernel to build with) come from **LaunchDarkly** feature flags with the same names and defaults as upstream. Without an API key, every flag uses upstream's built-in fallback. See [Operations](../../orchestrator/operations/).

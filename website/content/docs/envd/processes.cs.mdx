@@ -1,0 +1,35 @@
+---
+title: Procesy
+description: Spouštění příkazů, streamování jejich výstupu a jejich přežití přes znovupřipojení.
+---
+
+Služba `process.Process` spouští příkazy pro SDK. Příkaz běží jako linuxový uživatel, v pracovní složce, s proměnnými prostředí a volitelně v pseudoterminálu (PTY).
+
+## Život příkazu
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant envd
+  participant P as proces
+  SDK->>envd: Start(cmd, user, cwd, pty?)
+  envd->>P: fork + exec jako user, v cgroupě
+  envd-->>SDK: StartEvent(pid)
+  P-->>envd: stdout / stderr
+  envd-->>SDK: DataEvent(...)
+  P-->>envd: konec
+  envd-->>SDK: EndEvent(exitCode, status)
+`} />
+
+- Proces startuje s uid, gid a skupinami **uživatele**. envd přepne credentials jen pro vlákno, které proces spouští, a hned potom je vrátí, takže zbytek envd dál běží jako root.
+- Každý proces jde do **cgroupy**: `ptys` pro terminály, `socats` pro přeposílání portů, `user` pro všechno ostatní. Díky tomu může orchestrator před snapshotem zmrazit uživatelský kód, aniž by zmrazil envd.
+- Výstup se rozesílá všem: k jednomu procesu se může přes `Connect` připojit víc klientů a každý dostane stream. Pomalý nebo odpojený klient ostatní neblokuje.
+- Událost konce nese stavový text z Go, například `exit status 1` nebo `signal: killed`.
+
+## Tagy a výpis
+
+Proces jde spustit s **tagem**. `List` vrací běžící procesy i s tagy a `Connect` umí proces najít podle tagu místo pid. SDK to používá, aby se po znovupřipojení vrátilo k dlouho běžícím příkazům.
+
+## Přeposílání portů
+
+Programy často poslouchají na `127.0.0.1`, kam se zvenku VM nedostanete. envd hledá naslouchající sockety a pro každý port dostupný jen lokálně spustí `socat`, který přeposílá z vnější adresy sandboxu na něj. Client proxy pak službu najde na `https://<port>-<sandboxID>.<domain>`.

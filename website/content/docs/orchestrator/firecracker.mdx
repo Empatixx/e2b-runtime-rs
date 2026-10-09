@@ -1,0 +1,35 @@
+---
+title: Firecracker
+description: How the orchestrator launches and drives the Firecracker VMM.
+---
+
+[Firecracker](https://firecracker-microvm.github.io/) is the virtual machine monitor (VMM) every sandbox runs in. E2B uses its own fork, and the orchestrator picks the binary and the guest kernel per build, as upstream does:
+
+```
+FIRECRACKER_VERSIONS_DIR/<version>/<arch>/firecracker   (default /fc-versions)
+HOST_KERNELS_DIR/<version>/<arch>/vmlinux.bin            (default /fc-kernels)
+```
+
+The build's `metadata.json` records which versions it was made with, so an old build keeps resuming with the kernel and VMM it was snapshotted with.
+
+## Launch
+
+Each Firecracker process starts:
+
+- inside the sandbox's **network namespace**, so its tap device is the sandbox's only network;
+- inside a **private mount namespace**, where the rootfs path the snapshot remembers points at this sandbox's NBD device;
+- in its own **cgroup** named `sbx-<id>-<random>`, for CPU and memory accounting.
+
+The orchestrator then talks to it over its **API socket** (HTTP over a Unix socket): load the snapshot, set rate limits, resume, set MMDS metadata, pause, create a snapshot, ask which memory pages are dirty.
+
+## Cold boot
+
+Templates are born by a **cold boot**: a normal Linux boot from a kernel and an ext4 rootfs, with the same kernel command line as upstream (`buildKernelArgs`). Everything after that is a resume.
+
+## MMDS
+
+The Microvm Metadata Service answers inside the guest at `169.254.169.254`. The orchestrator writes the sandbox id, template id, the log collector address and a hash of the access token there, and envd reads them at init.
+
+## Console
+
+Firecracker's serial console goes to the orchestrator's log. The last 2000 bytes are kept and attached to errors, so a failed boot or resume says what the guest printed last.

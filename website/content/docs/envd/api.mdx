@@ -1,0 +1,56 @@
+---
+title: API
+description: The HTTP routes and Connect RPC services envd serves.
+---
+
+envd serves two kinds of API on the same port: plain **HTTP routes** for simple things and file transfers, and **Connect RPC** services (gRPC-compatible, over HTTP/1.1 or HTTP/2) for processes and the filesystem. Both are copied from upstream: the routes from envd's OpenAPI spec, the services from its `.proto` files.
+
+## Authentication
+
+| Mechanism | Used for |
+|---|---|
+| `X-Access-Token` header | Set by `POST /init`. When a token is configured, every protected route requires it. |
+| `Authorization: Basic <user>:` | Picks the Linux user a request runs as (for example `user` or `root`). |
+| Signed URLs | `/files` downloads and uploads can carry a `signature` (and optional `signature_expiration`) query parameter instead of the token, so a browser can fetch a file directly. |
+
+## HTTP routes
+
+| Route | Purpose |
+|---|---|
+| `GET /health` | Liveness. Returns 204. |
+| `POST /init` | Configure the sandbox. See [Init](../init/). |
+| `GET /files`, `POST /files` | Download a file, upload one or more files (multipart). |
+| `POST /files/compose` | Concatenate uploaded parts into one file. |
+| `GET /envs` | The sandbox's environment variables. |
+| `GET /metrics` | CPU, memory and disk usage. |
+| `POST /freeze`, `POST /unfreeze` | Freeze and thaw user processes (cgroup freezer) around a snapshot. |
+| `POST /fsfreeze`, `POST /fsthaw` | Freeze and thaw filesystems so the disk is consistent in a snapshot. |
+| `POST /collapse` | Ask the kernel to collapse memory into huge pages. |
+| `POST /upgrade` | Replace envd with a new binary without stopping processes. |
+
+## Connect services
+
+**`process.Process`**
+
+| RPC | Purpose |
+|---|---|
+| `Start` | Start a process (optionally in a PTY) and stream its events. |
+| `Connect` | Re-attach to a running process's event stream. |
+| `List` | List running processes with their tags. |
+| `SendInput`, `StreamInput` | Write to stdin, once or as a stream. |
+| `CloseStdin` | Close stdin. |
+| `SendSignal` | Send SIGTERM or SIGKILL. |
+| `Update` | Resize a PTY. |
+
+**`filesystem.Filesystem`**
+
+| RPC | Purpose |
+|---|---|
+| `Stat`, `ListDir` | Inspect files and directories. |
+| `MakeDir`, `Move`, `Remove` | Change the tree. |
+| `WatchDir` | Stream changes in a directory. |
+| `CreateWatcher`, `GetWatcherEvents`, `RemoveWatcher` | Poll-based watching, for clients that cannot keep a stream open. |
+
+## Errors
+
+Errors are part of the contract. HTTP routes answer with the same status code and the same `{"code": …, "message": …}` body as Go; Connect errors carry the same code and text. Even messages that come from the operating system use Go's wording (`no such file or directory`, not Rust's `No such file or directory (os error 2)`).

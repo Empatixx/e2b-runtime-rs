@@ -1,0 +1,26 @@
+---
+title: Host operations
+description: The routes the orchestrator uses around snapshots and for maintenance.
+---
+
+Some routes exist for the orchestrator, not for users. They prepare the guest for a snapshot or report on it.
+
+## Freeze before a snapshot
+
+When a sandbox is paused, its memory and disk are captured at one instant. Two things can make that instant inconsistent: user processes still writing, and filesystem data still in the page cache.
+
+| Route | What it does |
+|---|---|
+| `POST /freeze` | Freezes the `user` and `ptys` cgroups with the cgroup v2 freezer, so user code stops between two instructions. envd itself keeps running. |
+| `POST /fsfreeze` | Runs `FIFREEZE` on the filesystems, which flushes dirty data and blocks new writes. |
+| `POST /unfreeze`, `POST /fsthaw` | Undo them after the snapshot. |
+
+A sandbox resumed from such a snapshot is thawed as part of its first `/init`.
+
+## Metrics
+
+`GET /metrics` returns CPU usage, memory used and total, and disk used and total, with the same JSON keys as Go envd. The orchestrator reads it to report sandbox resource usage and to detect out-of-memory kills.
+
+## Huge pages
+
+`POST /collapse` asks the kernel (`MADV_COLLAPSE`) to merge a process's memory into 2 MiB huge pages. Templates built with huge pages resume faster because there are 512 times fewer pages to load.

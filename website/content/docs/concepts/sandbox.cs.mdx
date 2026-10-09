@@ -1,0 +1,32 @@
+---
+title: Sandbox
+description: Malý izolovaný linuxový počítač, který nastartuje zhruba za sekundu.
+---
+
+**Sandbox** je linuxový virtuální stroj, který SDK vytvoří na požádání. Zevnitř vypadá jako normální počítač: má souborový systém, uživatele `user`, shell, přístup k síti a cokoli, co nainstalovala šablona. Zvenku je to [Firecracker](https://firecracker-microvm.github.io/) **microVM**: velmi malý virtuální stroj jen s těmi zařízeními, která sandbox potřebuje.
+
+```ts
+import { Sandbox } from 'e2b'
+
+const sandbox = await Sandbox.create()
+const result = await sandbox.commands.run('python3 -c "print(1 + 1)"')
+console.log(result.stdout) // 2
+```
+
+## Proč microVM, a ne kontejner
+
+Kontejner sdílí jádro s hostitelem, takže chyba v jádře může kódu umožnit utéct ven. MicroVM má **vlastní jádro** a s hostitelem sdílí jen hypervisor KVM a několik virtuálních zařízení. Právě takovou izolaci E2B potřebuje, aby mohl spouštět kód, který nikdo nekontroloval, třeba kód, který AI model právě napsal.
+
+## Co sandbox identifikuje
+
+| Pole | Význam |
+|---|---|
+| `sandboxID` | Veřejné ID, které používá SDK. |
+| `templateID` | Ze které [šablony](../template/) vznikl. |
+| `buildID` | Ze kterého buildu té šablony, případně z buildu, který zanechalo jeho poslední uspání. |
+| `teamID` | Komu patří. |
+| `endTime` | Kdy ho má API zastavit nebo uspat. |
+
+## Co běží uvnitř
+
+V každém sandboxu běží **[envd](../../envd/)**, malý daemon na portu `49983`. SDK všechno dělá přes envd: spouští procesy, streamuje jejich výstup, čte a zapisuje soubory a sleduje složky. Ani orchestrator v sandboxu nikdy nespouští příkazy sám, také jde přes envd.

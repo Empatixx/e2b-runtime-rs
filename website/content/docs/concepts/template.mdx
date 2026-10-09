@@ -1,0 +1,43 @@
+---
+title: Template and build
+description: The recipe for a sandbox, and the baked result that sandboxes start from.
+---
+
+## Template
+
+A **template** says what a sandbox should contain. It starts from a Docker image and adds steps, much like a Dockerfile:
+
+```ts
+const template = Template()
+  .fromImage('python:3.12')
+  .runCmd('pip install numpy')
+  .setEnvs({ GREETING: 'hello' })
+  .setStartCmd('python3 server.py', waitForPort(8000))
+```
+
+A template has a stable `templateID`, for example `my-python`. You refer to it when you create a sandbox.
+
+## Build
+
+A **build** is one baked version of a template, identified by a `buildID` (a UUID). Building takes the image and the steps, turns them into a disk image, boots a VM, runs the steps inside it, and finally **pauses that VM**. The result of a build is therefore not just a disk: it is a full [snapshot](../snapshot/) of a running machine, with memory.
+
+That is the trick behind fast starts. Creating a sandbox does not boot Linux; it **resumes** the snapshot of the build, so the start command is already running and the Python interpreter is already loaded.
+
+## Layers
+
+Each step of a build is stored as its own **layer**: a build of its own whose disk and memory only hold the blocks that step changed. A later build whose first steps are the same reuses those layers from a cache instead of running the steps again. See [Template builder](../../orchestrator/template-builder/) for the phases.
+
+## Where builds live
+
+Builds are stored in object storage (Google Cloud Storage, S3, Azure Blob or a local directory) under their `buildID`:
+
+```
+<buildID>/memfile            guest memory
+<buildID>/memfile.header     which build holds each memory block
+<buildID>/rootfs.ext4        disk
+<buildID>/rootfs.ext4.header which build holds each disk block
+<buildID>/snapfile           Firecracker VM state
+<buildID>/metadata.json      template settings, envd version, prefetch list
+```
+
+The file names, the header format and the JSON keys are exactly the ones the Go orchestrator writes, so both versions can read each other's builds.

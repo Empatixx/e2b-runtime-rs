@@ -1,0 +1,34 @@
+---
+title: Template builder
+description: Jak se z OCI image a seznamu kroků stane snapshot, který jde probudit.
+---
+
+S `ORCHESTRATOR_SERVICES=template-manager` orchestrator obsluhuje i `TemplateService` a staví šablony. Build běží jako pipeline **fází** a každá fáze vytvoří **vrstvu**: vlastní build, který další fáze probudí.
+
+<Mermaid chart={`
+flowchart LR
+  B[base: image → ext4 → provisioning → boot] --> U[výchozí uživatel]
+  U --> S1[krok 1] --> S2[krok 2] --> SN[krok N]
+  SN --> FD[zajištění volného místa]
+  FD --> F[finalize: konfigurace, start, ready]
+  F --> O[optimize: záznam prefetche]
+`} />
+
+## Fáze
+
+| Fáze | Co dělá |
+|---|---|
+| **base** | Stáhne image (Docker Hub, mirror, GCP Artifact Registry, ECR nebo ACR), rozbalí vrstvy do souboru ext4, vloží envd a busybox, nastartuje provisioning VM, která nainstaluje systemd, openssh, sudo a další, pak výsledek nastartuje se systemd a uspí. |
+| **výchozí uživatel** | U nových šablon vytvoří účet `user` a jeho domovskou složku. |
+| **kroky** | Každý `RUN`, `ENV`, `WORKDIR`, `USER` nebo `COPY` běží přes envd ve VM probuzené z předchozí vrstvy, pak se VM uspí a uloží jako vrstva. |
+| **zajištění volného místa** | Zvětší ext4 tak, aby bylo k dispozici požadované volné místo, bez VM. |
+| **finalize** | Nastartuje poslední vrstvu pod finálním ID buildu, spustí konfigurační skript, start příkaz a počká na ready příkaz, nainstaluje balík CA certifikátů. |
+| **optimize** | Finální šablonu dvakrát probudí a stránky, na které sáhly oba běhy, uloží jako seznam pro [prefetch](../memory/). |
+
+## Cache vrstev
+
+Každá fáze má **hash** spočítaný ze svých vstupů a hashe předchozí vrstvy, stejně jako v Go. Než builder fázi spustí, podívá se na hash do indexu vrstev v build cache. Když ho najde, fázi přeskočí a použije uloženou vrstvu; v logu buildu je `CACHED`. Změna kroku 5 proto přestaví kroky od pátého dál a nic před ním.
+
+## Artefakty bajt po bajtu
+
+Některé soubory vrstev zapisuje builder sám, například vložený envd a jeho systemd unit. Jejich digesty se objevují v logech a v cache, proto se zapisují portem `archive/tar` a `compress/gzip` z Go. Stejný vstup dá stejné bajty a stejný `sha256` jako builder v Go.

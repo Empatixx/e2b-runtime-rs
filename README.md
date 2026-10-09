@@ -7,7 +7,7 @@ A self-hosted [E2B](https://e2b.dev) runtime written in Rust, aimed at bare-meta
 | Component | What it does | State |
 |---|---|---|
 | **envd** | Agent inside every sandbox: processes, PTY, files, watchers, `/files` upload/download | ✅ done, passes the official E2B JS SDK tests |
-| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs (ublk / NBD), pause with diffs to S3 | 🚧 cold boot, resume (~0.5 s with prefetch), pause, checkpoint and the gRPC `SandboxService` and `InfoService` work end to end in CI; egress firewall, Redis routing, events, ClickHouse stats at upstream parity ([parity](docs/PARITY.md), [spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
+| **orchestrator** | Firecracker microVMs on a node: snapshot resume over `userfaultfd`, copy-on-write rootfs over NBD, pause with diffs to S3 | 🚧 cold boot, resume (~0.5 s with prefetch), pause, checkpoint and the gRPC `SandboxService` and `InfoService` work end to end in CI; egress firewall, Redis routing, events, ClickHouse stats at upstream parity ([parity](docs/PARITY.md), [spec](docs/superpowers/specs/2026-10-07-orchestrator-rs-design.md)) |
 | template build | OCI image → ext4 → snapshot (template-manager role of the orchestrator) | 🚧 `TemplateService`, build cache, the base phase (pull, ext4, provisioning, base layer) and the steps (RUN, ENV, WORKDIR, USER, COPY), finalize (configure, start and ready commands, CA bundle) and optimize (prefetch) done ([spec](docs/superpowers/specs/2026-10-17-template-builder-design.md)) |
 | api | REST API for the SDK, node selection | planned |
 | client-proxy | `https://<port>-<sandbox>.<domain>` routing | planned |
@@ -64,6 +64,10 @@ kubectl -n e2b-runtime port-forward svc/envd 49983:49983
 **Any Kubernetes cluster:** push the image to your registry, point `images:` in `deploy/k8s/kustomization.yaml` at it, then `kubectl apply -k deploy/k8s`. Check `kubectl config current-context` first.
 
 The manifests are validated with `kubectl kustomize` but have not been run on a cluster yet. The compose setup has been run end to end with the SDK demo.
+
+## Documentation
+
+`website/` is a [Fumadocs](https://fumadocs.dev) site that explains the concepts, envd and the orchestrator, in English and Czech: `cd website && npm install && npm run dev`.
 
 ## Development
 

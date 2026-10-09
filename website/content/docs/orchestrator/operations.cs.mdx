@@ -1,0 +1,42 @@
+---
+title: Provoz
+description: Konfigurace, feature flagy, telemetrie a vypínání.
+---
+
+## Konfigurace
+
+Orchestrator se nastavuje proměnnými prostředí se stejnými názvy jako v Go. Ty nejdůležitější:
+
+| Proměnná | Výchozí | Význam |
+|---|---|---|
+| `GRPC_PORT` | `5008` | Port pro gRPC, health a `/health`. |
+| `NODE_ID` | `local` | Jméno nodu v metrikách, událostech a routingu. |
+| `ORCHESTRATOR_SERVICES` | `orchestrator` | Role: `orchestrator`, `template-manager` nebo obě. |
+| `TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` | | Kde se ukládají buildy. |
+| `FIRECRACKER_VERSIONS_DIR`, `HOST_KERNELS_DIR` | `/fc-versions`, `/fc-kernels` | Binárky VMM a jádra. |
+| `NBD_POOL_SIZE` | `64` | Připravená NBD zařízení. |
+| `LAUNCH_DARKLY_API_KEY` | | Feature flagy; bez něj výchozí hodnoty z Go. |
+| `OTEL_COLLECTOR_GRPC_ENDPOINT` | | Zapne OTLP metriky, trace a logy. |
+
+## Feature flagy
+
+Limity a přepínače pocházejí z **LaunchDarkly** se stejnými názvy flagů, kontexty (sandbox, tým, cluster, služba) a výchozími hodnotami jako v Go. Příklady:
+
+| Flag | Výchozí | Řídí |
+|---|---|---|
+| `max-sandboxes-per-node` | 200 | Limit admission, znovu načítaný každých 30 s. |
+| `max-starting-instances-per-node` | 3 | Souběžné starty, znovu načítané každých 30 s. |
+| `resume-prefetch-source` | `init` | Který prefetch běží při probuzení. |
+| `use-memfd` | zapnuto | Paměť hosta v memfd. |
+| `envd-timeout-milliseconds` | `ENVD_TIMEOUT` nebo 10 s | Jak dlouho probuzení čeká na envd. |
+| `build-cache-max-usage-percentage` | 85 | Kdy se mažou lokální rozdíly. |
+
+## Telemetrie
+
+S nastaveným `OTEL_COLLECTOR_GRPC_ENDPOINT` orchestrator exportuje **metriky, trace a logy** přes OTLP, se stejnými názvy metrik, jednotkami, názvy spanů a atributy jako orchestrator v Go, takže existující dashboardy fungují dál.
+
+## Vypínání
+
+Po `SIGTERM` se node ohlásí jako vypínající se, počká 15 s (pokud není `ENVIRONMENT=local`), aby na něj API přestalo plánovat, nechá doběhnout běžící buildy šablon a pak čeká, dokud API neodstraní všechny sandboxy a nedoběhnou všechny uploady. `FORCE_STOP=true` čekání přeskočí.
+
+Při startu smaže, co po sobě nechal předchozí běh (namespaces `ns-*`, `/sys/fs/cgroup/e2b/*`, pracovní složku), takže počítá s tím, že node patří jen jemu.

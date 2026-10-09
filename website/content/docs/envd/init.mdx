@@ -1,0 +1,32 @@
+---
+title: Init
+description: How the orchestrator configures envd after every create and resume.
+---
+
+A sandbox is created from a snapshot, so the envd inside it wakes up still configured for whoever built the template. Right after every create or resume, the orchestrator calls **`POST /init`** to tell envd about the new session.
+
+```json
+{
+  "envVars": { "MY_KEY": "value" },
+  "accessToken": "…",
+  "timestamp": "2026-10-09T12:00:00Z",
+  "defaultUser": "user",
+  "defaultWorkdir": "/home/user",
+  "hyperloopIP": "192.0.2.1",
+  "caBundle": "-----BEGIN CERTIFICATE-----…",
+  "volumeMounts": [{ "nfs_target": "10.0.0.1:/data", "path": "/mnt/data" }],
+  "lifecycleID": "…"
+}
+```
+
+## What envd does with it
+
+1. **Clock**: sets the guest clock from `timestamp`, because a resumed VM wakes up with the time it was paused at. A request with an older timestamp than the last one is ignored, so retries cannot move time backwards.
+2. **Environment**: stores `envVars` for every process started afterwards.
+3. **Security**: stores the access token that protected routes will require from now on.
+4. **Defaults**: the user and working directory used when a request does not name one.
+5. **Certificates**: installs `caBundle` into the system trust store, so the sandbox trusts a custom proxy.
+6. **Volumes**: mounts the listed NFS volumes.
+7. **Metadata**: reads the sandbox's identity from the Firecracker **MMDS** (the metadata service at `169.254.169.254`) and writes it to `/run/e2b/`.
+
+The orchestrator retries `/init` until it succeeds or its deadline passes, with the same timeouts as upstream (`envd-timeout-milliseconds` and `envd-init-request-timeout-milliseconds` feature flags).

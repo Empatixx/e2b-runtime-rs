@@ -1,0 +1,56 @@
+---
+title: API
+description: HTTP routy a Connect RPC služby, které envd obsluhuje.
+---
+
+envd na jednom portu obsluhuje dva druhy API: obyčejné **HTTP routy** pro jednoduché věci a přenos souborů a **Connect RPC** služby (kompatibilní s gRPC, přes HTTP/1.1 nebo HTTP/2) pro procesy a souborový systém. Obojí je převzaté z E2B: routy z OpenAPI specifikace envd, služby z jeho `.proto` souborů.
+
+## Autentizace
+
+| Mechanismus | K čemu |
+|---|---|
+| Hlavička `X-Access-Token` | Nastaví ji `POST /init`. Když je token nastavený, každá chráněná routa ho vyžaduje. |
+| `Authorization: Basic <user>:` | Vybírá linuxového uživatele, pod kterým požadavek běží (například `user` nebo `root`). |
+| Podepsané URL | Stahování a nahrávání přes `/files` může místo tokenu nést query parametr `signature` (a volitelně `signature_expiration`), takže soubor může stáhnout přímo prohlížeč. |
+
+## HTTP routy
+
+| Routa | Účel |
+|---|---|
+| `GET /health` | Kontrola, že envd žije. Vrací 204. |
+| `POST /init` | Nastavení sandboxu. Viz [Init](../init/). |
+| `GET /files`, `POST /files` | Stažení souboru, nahrání jednoho nebo více souborů (multipart). |
+| `POST /files/compose` | Spojí nahrané části do jednoho souboru. |
+| `GET /envs` | Proměnné prostředí sandboxu. |
+| `GET /metrics` | Využití CPU, paměti a disku. |
+| `POST /freeze`, `POST /unfreeze` | Zmrazí a rozmrazí uživatelské procesy (cgroup freezer) kolem snapshotu. |
+| `POST /fsfreeze`, `POST /fsthaw` | Zmrazí a rozmrazí souborové systémy, aby byl disk ve snapshotu konzistentní. |
+| `POST /collapse` | Požádá jádro o sloučení paměti do huge pages. |
+| `POST /upgrade` | Vymění envd za novou binárku, aniž by zastavil procesy. |
+
+## Connect služby
+
+**`process.Process`**
+
+| RPC | Účel |
+|---|---|
+| `Start` | Spustí proces (volitelně v PTY) a streamuje jeho události. |
+| `Connect` | Znovu se připojí ke streamu událostí běžícího procesu. |
+| `List` | Vypíše běžící procesy i s jejich tagy. |
+| `SendInput`, `StreamInput` | Zápis na stdin, jednorázově nebo jako stream. |
+| `CloseStdin` | Zavře stdin. |
+| `SendSignal` | Pošle SIGTERM nebo SIGKILL. |
+| `Update` | Změní velikost PTY. |
+
+**`filesystem.Filesystem`**
+
+| RPC | Účel |
+|---|---|
+| `Stat`, `ListDir` | Prohlížení souborů a složek. |
+| `MakeDir`, `Move`, `Remove` | Změny stromu. |
+| `WatchDir` | Stream změn ve složce. |
+| `CreateWatcher`, `GetWatcherEvents`, `RemoveWatcher` | Sledování dotazováním, pro klienty, které nemůžou držet otevřený stream. |
+
+## Chyby
+
+Chyby jsou součástí kontraktu. HTTP routy odpovídají stejným stavovým kódem a stejným tělem `{"code": …, "message": …}` jako Go; Connect chyby nesou stejný kód a text. I hlášky, které pocházejí od operačního systému, používají formulaci z Go (`no such file or directory`, ne rustovské `No such file or directory (os error 2)`).

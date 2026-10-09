@@ -1,0 +1,45 @@
+---
+title: Memory
+description: Serving guest RAM on demand with userfaultfd, prefetching it, and finding what changed.
+---
+
+A sandbox's memory snapshot can be gigabytes. Copying it all before resuming would take seconds, so the orchestrator does not copy it at all. It lets the guest run and **serves each page the first time the guest touches it**.
+
+## userfaultfd
+
+Linux's **userfaultfd** lets a process take over page faults for a memory range. When Firecracker loads a snapshot with the `Uffd` backend, it maps the guest RAM without contents, registers it with a userfaultfd and sends that file descriptor, plus the memory layout, to a Unix socket. The orchestrator's **memory server** listens there.
+
+<Mermaid chart={`
+sequenceDiagram
+  participant G as guest CPU
+  participant K as Linux kernel
+  participant S as memory server
+  participant C as chunk cache
+  G->>K: touches page at address X
+  K->>S: page fault event (uffd)
+  S->>S: address → memfile offset (region map)
+  S->>C: read 4 KiB at offset
+  C-->>S: bytes (from cache, or fetched chunk)
+  S->>K: UFFDIO_COPY page into guest
+  K-->>G: continues
+`} />
+
+The server translates the faulting address to an offset in the memfile using the region map Firecracker sent, reads the page through the [chunk cache](../storage/), and installs it with `UFFDIO_COPY`. The faulting vCPU continues as if the page had always been there.
+
+## Prefetch
+
+Waiting for faults one page at a time is slow at the very start of a resume, when the guest touches thousands of pages. So the orchestrator **prefetches**:
+
+- **init**: when a template is built, the optimize phase resumes it twice, records which pages both runs touched and stores that list in `metadata.json`. On every resume these pages are fetched and installed in the background, in the recorded order.
+- **last-cycle**: the newest layer's own data is warmed into the cache without installing it.
+- **pause harvest**: optionally, after a pause, a throwaway copy of the sandbox is resumed with no network to record a fresh list.
+
+The source, worker counts and size caps come from feature flags (`resume-prefetch-source`, `memory-prefetch-max-fetch-workers`, `memory-prefetch-max-copy-workers`, `memory-prefetch-coalesce-max-mb`).
+
+## Finding dirty pages
+
+On pause, only pages written since resume need to be stored. Pages the server installed are registered with **write protection**; the first write to such a page clears the protection, and Firecracker reports which pages lost it (`GET /memory/dirty`). Pages the guest wrote without ever faulting them in (fresh allocations) are added from the residency map.
+
+## memfd
+
+Guest RAM can be backed by a **memfd** that Firecracker shares with the orchestrator. Then exporting dirty pages on pause is a plain read from the memfd instead of `process_vm_readv` into another process. The `use-memfd` feature flag turns it on for Firecracker versions that support it.

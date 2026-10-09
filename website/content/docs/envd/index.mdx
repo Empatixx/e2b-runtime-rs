@@ -1,0 +1,58 @@
+---
+title: envd overview
+description: The daemon inside every sandbox that the SDK talks to.
+---
+
+**envd** ("environment daemon") is a single static binary that runs inside every sandbox as a systemd service. It listens on port **49983** and is the only way in: when the SDK runs a command, uploads a file or watches a folder, it is talking to envd.
+
+<Mermaid chart={`
+flowchart LR
+  SDK[E2B SDK] -- HTTPS via client proxy --> ENVD[envd :49983]
+  ORCH[orchestrator] -- POST /init, /freeze, /upgrade --> ENVD
+  ENVD --> P[processes and PTYs]
+  ENVD --> FS[files and watchers]
+  ENVD --> CG[cgroups]
+`} />
+
+## What it does
+
+| Area | Examples |
+|---|---|
+| **Processes** | Start a command, stream stdout and stderr, send input, resize a terminal, send signals, reconnect to a running process. |
+| **Filesystem** | Stat, list, move, remove, make directories, watch for changes. |
+| **Files** | Upload and download files over plain HTTP, compose several uploads into one file. |
+| **Init** | Receive the sandbox's environment variables, default user, access token and CA certificates from the orchestrator. |
+| **Host work** | Freeze processes and filesystems before a snapshot, report metrics, forward ports, upgrade itself without dropping processes. |
+
+## A drop-in replacement
+
+This envd replaces the Go envd binary one to one. It has the same routes, the same Connect RPC services, the same JSON bodies and error texts, the same command-line flags and the same version string (`0.9.0`). The official E2B JavaScript SDK test suite runs against it in CI.
+
+It is built as a **static musl binary**, like upstream's, so it runs in any image: Debian, Alpine, Ubuntu or a distroless base.
+
+## Command-line flags
+
+envd takes Go-style flags (`-port 49983` or `-port=49983`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-port` | `49983` | Port to listen on. |
+| `-isnotfc` | `false` | Not running in Firecracker: skip MMDS and other VM-only work (used in tests and containers). |
+| `-cgroup-root` | `/sys/fs/cgroup` | Where the cgroup v2 hierarchy is mounted. |
+| `-no-cgroups` | `false` | Run processes without cgroups. |
+| `-verbose` | `false` | More logs. |
+| `-version` | | Print the version and exit. |
+| `-commit` | | Print the build commit and exit. |
+| `-resume-handover` | `false` | Start by taking over processes from the previous envd (see [Upgrade](./upgrade/)). |
+
+## Source layout
+
+```
+crates/envd/src/
+  router.rs        every route and Connect service in one place
+  controllers/     one file per area: init, process/, filesystem/, files/, freeze, ...
+  host/            things done to the VM: clock, /etc/hosts, MMDS, CA certs, NFS
+  cgroups.rs       the ptys / socats / user cgroups processes run in
+  port/            port scanner and socat forwarder
+  upgrade/         live upgrade: hand processes over to a new envd
+```

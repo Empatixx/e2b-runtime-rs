@@ -1,0 +1,33 @@
+---
+title: Snapshot
+description: A frozen sandbox - memory, disk and VM state - stored as diffs against its parent.
+---
+
+A **snapshot** is everything needed to bring a sandbox back exactly where it stopped. It has three parts:
+
+| Part | What it is |
+|---|---|
+| **memfile** | The guest's RAM, page by page. |
+| **rootfs** | The guest's disk, an ext4 image. |
+| **snapfile** | Firecracker's VM state: CPU registers, device state, the memory layout. |
+
+## Diffs instead of copies
+
+A sandbox with 2 GiB of RAM and a 10 GiB disk would be expensive to copy on every pause. Instead, a snapshot only stores the **blocks that changed** since the build it came from. The rest is borrowed from the parent.
+
+Every memfile and rootfs has a **header** next to it. The header is a list of mappings: "blocks from offset A to offset B live in build X at storage offset C". A new snapshot's header points at itself for the changed blocks and at its ancestors for everything else.
+
+<Mermaid chart={`
+flowchart LR
+  subgraph header[rootfs header of build C]
+    m1[blocks 0-99 → build A]
+    m2[blocks 100-119 → build C]
+    m3[blocks 120-999 → build B]
+  end
+`} />
+
+To read a block, the orchestrator looks up its mapping and fetches it from the right build. Blocks are fetched lazily, in 4 MiB chunks, and kept in a local cache, so a sandbox only downloads the parts of its disk and memory it actually touches.
+
+## Memory pages
+
+Memory is tracked in pages of 4 KiB (or 2 MiB with huge pages). When a sandbox is paused, the orchestrator asks Firecracker which pages were written since the sandbox resumed and stores only those. Pages that were never touched are not even read from storage when a sandbox resumes; they are loaded the first time the guest touches them. See [Memory](../../orchestrator/memory/).

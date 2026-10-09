@@ -1,0 +1,35 @@
+---
+title: Firecracker
+description: Jak orchestrator spouští a řídí VMM Firecracker.
+---
+
+[Firecracker](https://firecracker-microvm.github.io/) je monitor virtuálních strojů (VMM), ve kterém běží každý sandbox. E2B používá vlastní fork a orchestrator vybírá binárku i jádro hosta pro každý build, stejně jako Go:
+
+```
+FIRECRACKER_VERSIONS_DIR/<verze>/<arch>/firecracker   (výchozí /fc-versions)
+HOST_KERNELS_DIR/<verze>/<arch>/vmlinux.bin            (výchozí /fc-kernels)
+```
+
+`metadata.json` buildu si pamatuje, se kterými verzemi vznikl, takže starý build se dál probouzí s jádrem a VMM, se kterými byl snapshot pořízen.
+
+## Spuštění
+
+Každý proces Firecrackeru startuje:
+
+- uvnitř **network namespace** sandboxu, takže jeho tap zařízení je jediná síť sandboxu;
+- uvnitř **vlastního mount namespace**, kde cesta k rootfs, kterou si snapshot pamatuje, ukazuje na NBD zařízení tohoto sandboxu;
+- ve vlastní **cgroupě** `sbx-<id>-<náhodný sufix>` kvůli účtování CPU a paměti.
+
+Orchestrator s ním pak mluví přes jeho **API socket** (HTTP přes unixový socket): načíst snapshot, nastavit limity, probudit, nastavit metadata v MMDS, pozastavit, vytvořit snapshot, zjistit, které stránky paměti jsou zapsané.
+
+## Cold boot
+
+Šablony vznikají **cold bootem**: běžným bootem Linuxu z jádra a ext4 rootfs se stejnou příkazovou řádkou jádra jako v Go (`buildKernelArgs`). Všechno potom už je probuzení.
+
+## MMDS
+
+Microvm Metadata Service odpovídá uvnitř hosta na `169.254.169.254`. Orchestrator tam zapíše ID sandboxu, ID šablony, adresu sběrače logů a hash access tokenu a envd je při initu přečte.
+
+## Konzole
+
+Sériová konzole Firecrackeru jde do logu orchestratoru. Posledních 2000 bajtů se drží a přikládá k chybám, takže neúspěšný boot nebo resume ukáže, co host naposledy vypsal.

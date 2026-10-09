@@ -1,0 +1,49 @@
+---
+title: Úložiště
+description: Kde buildy leží, jak fungují jejich hlavičky a cache, díky kterým je čtení levné.
+---
+
+## Objektové úložiště
+
+Buildy leží v objektovém úložišti. Poskytovatel se vybírá stejně jako v Go: `TEMPLATE_STORAGE_URL` a `BUILD_CACHE_STORAGE_URL` berou `gs://bucket`, `s3://bucket?region=…`, `azblob://container` nebo `file:///cesta`; bez nich platí starší proměnné `STORAGE_PROVIDER`.
+
+Přihlašovací údaje se hledají stejně jako v Go SDK:
+
+| Poskytovatel | Řetězec |
+|---|---|
+| GCS | Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, soubor gcloud, external accounts, impersonace, GCE metadata server. |
+| S3 | Výchozí řetězec AWS: proměnné prostředí, profily, SSO, web identity, role ECS a EC2. |
+| Azure | Klíče účtu nebo SAS, případně `DefaultAzureCredential`: proměnné prostředí, workload identity, managed identity, Azure CLI, azd, PowerShell. |
+
+## Soubory buildu
+
+```
+<buildID>/memfile, memfile.header
+<buildID>/rootfs.ext4, rootfs.ext4.header
+<buildID>/snapfile
+<buildID>/metadata.json
+```
+
+## Hlavičky
+
+Hlavička začíná metadaty (verze, velikost bloku, celková velikost, ID buildu, ID základního buildu) a za nimi následuje seznam **mapování**. Každé mapování říká, který rozsah zařízení je uložený ve kterém buildu a na jakém offsetu v souboru toho buildu.
+
+```
+offset 0        délka 4 MiB   → build A, offset v úložišti 0
+offset 4 MiB    délka 64 KiB  → build C, offset v úložišti 0
+offset 4,06 MiB délka …       → build B, offset v úložišti 12 MiB
+```
+
+Rozdílový build ukládá jen své vlastní bloky, naskládané za sebou, a jeho hlavička všechno ostatní mapuje na předky. Formát je hlavička V3 z Go, bajt po bajtu.
+
+## Cache chunků
+
+Čtení jde přes lokální **cache chunků**. Data se z úložiště stahují po chunkách 4 MiB, zapisují se do řídkého (sparse) souboru cache a označí se jako přítomná. Výpadek stránky čeká jen na chunk, ve kterém jeho stránka leží, a souběžní čtenáři stejného chunku sdílejí jedno stahování.
+
+## Cache šablon
+
+**Cache šablon** drží pro každé ID buildu jednu `Template`: její hlavičky, snapfile a metadata, stažené jednou a sdílené všemi sandboxy, které ten build probouzejí. Záznam žije 25 hodin od posledního použití a je připíchnutý, dokud ho nějaký sandbox používá. Pause sem přidá svůj snapshot dřív, než začne upload, proto je probuzení na stejném nodu okamžité.
+
+## Build cache pro rozdíly
+
+Lokální rozdílové soubory se drží 25 hodin, jsou připíchnuté, dokud nedoběhne jejich upload, a mažou se dřív, když je disk cache plnější než `build-cache-max-usage-percentage`.

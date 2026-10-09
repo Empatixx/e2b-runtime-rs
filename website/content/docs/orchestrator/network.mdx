@@ -1,0 +1,34 @@
+---
+title: Network
+description: Network namespaces, addresses, NAT and the egress firewall for every sandbox.
+---
+
+Every sandbox has the **same addresses inside**: the guest is `169.254.0.21` on `eth0`, its gateway (the tap device) is `169.254.0.22`. That is what makes snapshots portable: a resumed VM keeps its network configuration. The isolation and the unique addresses live outside the VM, in a **slot**.
+
+## Slots
+
+A slot is a Linux **network namespace** `ns-<index>` with:
+
+- a `tap0` device that Firecracker attaches the guest to;
+- a **veth pair** connecting the namespace to the host, with unique addresses derived from the index (`10.12.x.y` for the veth, `10.11.x.y` for the sandbox's host-visible address);
+- NAT rules that translate between the guest's fixed address and the slot's unique one;
+- an **nftables firewall** for egress rules.
+
+<Mermaid chart={`
+flowchart LR
+  VM[guest 169.254.0.21] --- TAP[tap0 169.254.0.22]
+  subgraph ns[namespace ns-N]
+    TAP --- NAT[NAT + firewall]
+    NAT --- V1[veth peer]
+  end
+  V1 --- V2[host veth 10.12.x.y]
+  V2 --- HOST[host routing]
+`} />
+
+## The pool
+
+Creating a slot takes tens of milliseconds, so the **network pool** creates up to 32 new slots in advance and keeps up to 100 returned slots for reuse. A returned slot waits 3 seconds and has its firewall reset before anyone gets it again, exactly like upstream's pool.
+
+## Egress control
+
+A sandbox can be created with egress rules: allowed and denied CIDRs and domains. IP rules go into the slot's nftables sets. Domain rules need to see the hostname, so TCP traffic is redirected to the orchestrator's **TCP firewall proxy** (ports 5016–5018), which reads the HTTP `Host` header or the TLS SNI and allows or blocks the connection.

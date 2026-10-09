@@ -1,0 +1,29 @@
+---
+title: Live upgrade
+description: Replacing envd inside a running sandbox without killing its processes.
+---
+
+Old templates contain old envd versions. Rebuilding every template to get a fix out is not possible, so envd can **replace itself in a running sandbox**, and the processes it started keep running.
+
+## How it works
+
+<Mermaid chart={`
+sequenceDiagram
+  participant O as orchestrator
+  participant A as old envd
+  participant B as new envd
+  O->>A: POST /upgrade (new binary at /usr/bin/envd.next)
+  A->>A: write handover state to /run/e2b/envd-handover.pb
+  A->>B: exec new binary with -resume-handover
+  B->>B: read handover, adopt processes, PTYs, watchers
+  B-->>O: answers on :49983 again
+`} />
+
+1. The orchestrator copies the new binary into the sandbox and calls `POST /upgrade`.
+2. The old envd writes a **handover file** (protobuf) with everything it knows: running processes and their pipes and PTYs, their tags, filesystem watchers, port forwards, the default user and working directory, and which cgroups were frozen.
+3. The file descriptors stay open across `exec`, so the new envd inherits the actual pipes and terminals, not just their numbers.
+4. The new envd starts with `-resume-handover`, reads the file, adopts every process and reports what it took over.
+
+Clients that were streaming output reconnect with `Connect` and continue where they were.
+
+The template builder uses the same mechanism to update envd in layers built from an older template.

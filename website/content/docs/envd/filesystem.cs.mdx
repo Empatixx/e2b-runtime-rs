@@ -1,0 +1,27 @@
+---
+title: Souborový systém a soubory
+description: Prohlížení a změny souborů, jejich přenos a sledování změn.
+---
+
+## Služba Filesystem
+
+`filesystem.Filesystem` pracuje s cestami. Cesta může být absolutní nebo relativní k domovské složce uživatele a `~` se rozvine stejně jako v envd v Go. Každá vrácená položka má stejná pole jako v Go: jméno, typ, cestu, velikost, mód, řetězec oprávnění, vlastníka, skupinu, čas změny a u symlinků cíl.
+
+## Sledování
+
+Složku jde sledovat dvěma způsoby:
+
+- **`WatchDir`** drží otevřený stream a pošle událost pro každé vytvoření, zápis, smazání, přejmenování a chmod.
+- **`CreateWatcher` + `GetWatcherEvents`** sbírá události na serveru a klient se na ně dotazuje. Hodí se pro klienty, které nemůžou držet stream.
+
+Obojí používá linuxový inotify a umí sledovat rekurzivně.
+
+## Nahrávání a stahování
+
+`/files` přenáší obsah souborů přes obyčejné HTTP, což je jednodušší a rychlejší než posílat bajty přes RPC:
+
+- `GET /files?path=…` stáhne soubor, s `Content-Disposition` a podporou rozsahů.
+- `POST /files?path=…` nahraje jeden nebo více souborů jako `multipart/form-data`. Chybějící nadřazené složky se vytvoří a patří uživateli požadavku.
+- `POST /files/compose` spojí dříve nahrané části do jednoho souboru. SDK velké uploady dělí na části a tady se spojí. Na Linuxu spojení používá `copy_file_range`, takže data nikdy neprojdou pamětí envd.
+
+Nahrávání a stahování jde místo access tokenu autorizovat **podepsanou URL**, takže SDK může odkaz předat prohlížeči.
