@@ -30,7 +30,7 @@ use orchestrator::storage::spec::StorageSpec;
 use orchestrator::tcpfirewall::proxy::TcpFirewall;
 use uuid::Uuid;
 
-const SLOTS: std::ops::RangeInclusive<u32> = 4106..=4109;
+const SLOTS: std::ops::RangeInclusive<u32> = 4120..=4135;
 const BASE_IMAGE: &str = "debian:trixie-slim";
 const LOG_PAGE: u32 = 100;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
