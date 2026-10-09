@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::super::{credsfile, go_json};
 use super::config::{CredentialSource, ExternalAccountFile};
 use crate::go_url::GoUrl;
 use crate::go_url::escape::{Mode, escape};
@@ -173,17 +174,23 @@ fn environment(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SecurityCredentials {
+    #[serde(rename = "AccessKeyID")]
+    access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    secret_access_key: String,
+    #[serde(rename = "Token")]
+    token: String,
+}
+
 fn parse_keys(body: &str) -> Result<AwsKeys, String> {
-    let fields: BTreeMap<String, String> = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(body)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter_map(|(key, value)| Some((key.to_ascii_lowercase(), value.as_str()?.to_owned())))
-        .collect();
-    let field = |name: &str| fields.get(name).cloned().unwrap_or_default();
+    let parsed: SecurityCredentials = go_json::unmarshal(body.as_bytes(), credsfile::AWS_SECURITY_CREDENTIALS)?;
     Ok(AwsKeys {
-        access_key_id: field("accesskeyid"),
-        secret_access_key: field("secretaccesskey"),
-        session_token: field("token"),
+        access_key_id: parsed.access_key_id,
+        secret_access_key: parsed.secret_access_key,
+        session_token: parsed.token,
     })
 }
 

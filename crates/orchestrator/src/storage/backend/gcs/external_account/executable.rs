@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use tokio::process::Command;
 
+use super::super::{credsfile, go_json};
 use super::config::{CredentialSource, ExternalAccountFile};
 use super::exit_status::{exit_code, exit_text, start_failure};
 
@@ -153,7 +154,7 @@ impl ExecutableSubject {
     }
 
     fn parse(&self, response: &[u8], source: &str, now: i64) -> Result<String, ParseError> {
-        let parsed: Response = serde_json::from_slice(response).map_err(|_| {
+        let parsed: Response = go_json::unmarshal(response, credsfile::EXECUTABLE_RESPONSE).map_err(|_| {
             ParseError::Reportable(format!(
                 "credentials: unable to parse {}: {}",
                 crate::go_strconv::quote(source),

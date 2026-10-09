@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use super::super::{credsfile, go_json};
 use super::TokenFlow;
 
 const SUPPORTED_FORMAT_VERSION: &str = "1";
@@ -14,7 +15,7 @@ struct GdchFile {
 }
 
 pub fn from_json(json: &[u8]) -> Result<Arc<dyn TokenFlow>, String> {
-    let file: GdchFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    let file: GdchFile = go_json::unmarshal(json, credsfile::GDCH)?;
     match file.format_version == SUPPORTED_FORMAT_VERSION {
         false => Err(format!(
             "credentials: unsupported gdch_service_account format {}",

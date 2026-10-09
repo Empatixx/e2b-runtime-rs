@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use super::super::{credsfile, go_json};
+
 const WORKFORCE_PREFIX: &str = "//iam.googleapis.com/locations/";
 const WORKFORCE_POOLS: &str = "/workforcePools/";
 const DEFAULT_UNIVERSE: &str = "googleapis.com";
@@ -68,7 +70,7 @@ pub struct CertificateConfig {
 
 impl ExternalAccountFile {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| e.to_string())
+        go_json::unmarshal(bytes, credsfile::EXTERNAL_ACCOUNT)
     }
 
     pub fn validate(&self) -> Result<(), String> {

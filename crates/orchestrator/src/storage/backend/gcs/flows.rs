@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use super::external_account::ExternalAccount;
 use super::universe::{client_universe_domain, validate_universe_domain};
+use super::{credsfile, go_json};
 pub use cached::CachedFlow;
 pub use client::{default_client, request_error};
 pub use compute::{ComputeFlow, Messages as ComputeMessages, on_gce};
@@ -86,7 +87,7 @@ struct RedirectConfig {
 }
 
 fn is_client_credentials(json: &[u8]) -> bool {
-    serde_json::from_slice::<ClientCredentials>(json)
+    go_json::unmarshal::<ClientCredentials>(json, credsfile::CLIENT_CREDENTIALS)
         .ok()
         .and_then(|creds| creds.web.or(creds.installed))
         .is_some_and(|config| !config.redirect_uris.is_empty())
@@ -96,9 +97,7 @@ pub fn build(json: &[u8], profile: &FlowProfile) -> Result<Arc<dyn TokenFlow>, S
     if is_client_credentials(json) {
         return Err("credentials: auth handler must be specified for this credential filetype".to_owned());
     }
-    let kind = serde_json::from_slice::<FileType>(json)
-        .map_err(|e| e.to_string())?
-        .r#type;
+    let kind = go_json::unmarshal::<FileType>(json, credsfile::FILE_TYPE)?.r#type;
     let flow: Arc<dyn TokenFlow> = match kind.as_str() {
         "" => return Err(UNIDENTIFIED.to_owned()),
         "service_account" => service_account::ServiceAccountFlow::from_json(json, profile)?,
@@ -263,5 +262,37 @@ mod tests {
             build(br#"{"type":"x"}"#, &profile).err().unwrap(),
             "credentials: unsupported filetype \"x\""
         );
+    }
+
+    #[test]
+    fn credential_files_fail_with_go_json_texts() {
+        let profile = FlowProfile::new(&[], false);
+        let error = |json: &str| build(json.as_bytes(), &profile).err().unwrap();
+
+        assert_eq!(error(""), "unexpected end of JSON input");
+        assert_eq!(error("{\"type\": "), "unexpected end of JSON input");
+        assert_eq!(
+            error("not json"),
+            "invalid character 'o' in literal null (expecting 'u')"
+        );
+        assert_eq!(
+            error("[]"),
+            "json: cannot unmarshal array into Go value of type struct { Type string \"json:\\\"type\\\"\" }"
+        );
+        assert_eq!(
+            error(r#"{"type":5}"#),
+            "json: cannot unmarshal number into Go struct field .type of type string"
+        );
+        assert_eq!(
+            error(r#"{"type":"service_account","client_email":7}"#),
+            "json: cannot unmarshal number into Go struct field ServiceAccountFile.client_email of type string"
+        );
+    }
+
+    #[test]
+    fn credential_file_keys_match_case_insensitively() {
+        let json = br#"{"TYPE":"authorized_user","Client_ID":"a","client_secret":"b","Refresh_Token":"c"}"#;
+
+        assert!(build(json, &FlowProfile::new(&[], false)).is_ok());
     }
 }

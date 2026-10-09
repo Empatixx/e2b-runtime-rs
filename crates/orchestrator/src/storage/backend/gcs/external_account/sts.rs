@@ -7,6 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use super::super::form::UrlEncodedForm;
+use super::super::{credsfile, go_json};
 
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
@@ -109,7 +110,7 @@ async fn send(request: reqwest::RequestBuilder) -> Result<StsResponse, String> {
     if !(200..=300).contains(&status) {
         return Err(format!("credentials: status code {status}: {body}"));
     }
-    serde_json::from_str(&body)
+    go_json::unmarshal(body.as_bytes(), credsfile::STS_RESPONSE)
         .map_err(|e| format!("credentials: failed to unmarshal response body from Secure Token Server: {e}"))
 }
 
@@ -176,8 +177,8 @@ pub async fn impersonate(
     if !(200..300).contains(&status) {
         return Err(format!("credentials: status code {status}: {text}"));
     }
-    let parsed: ImpersonationResponse =
-        serde_json::from_str(&text).map_err(|e| format!("credentials: unable to parse response: {e}"))?;
+    let parsed: ImpersonationResponse = go_json::unmarshal(text.as_bytes(), credsfile::IMPERSONATION_RESPONSE)
+        .map_err(|e| format!("credentials: unable to parse response: {e}"))?;
     let expiry = DateTime::parse_from_rfc3339(&parsed.expire_time)
         .map_err(|e| format!("credentials: unable to parse expiry: {e}"))?;
     Ok((parsed.access_token, SystemTime::from(expiry)))

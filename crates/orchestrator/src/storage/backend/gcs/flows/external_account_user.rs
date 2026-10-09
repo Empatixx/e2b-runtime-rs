@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use super::super::{credsfile, go_json};
 use super::{FlowToken, TokenFlow, default_client};
 use crate::storage::backend::gcs::external_account::refresh;
 
@@ -29,7 +30,7 @@ pub struct ExternalAccountUserFlow {
 
 impl ExternalAccountUserFlow {
     pub fn from_json(json: &[u8]) -> Result<Arc<Self>, String> {
-        let file: UserFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        let file: UserFile = go_json::unmarshal(json, credsfile::EXTERNAL_ACCOUNT_AUTHORIZED_USER)?;
         let complete = [
             &file.client_id,
             &file.client_secret,

@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
 
+use super::super::{credsfile, go_json};
 use super::{CLOUD_PLATFORM_SCOPE, FlowProfile, FlowToken, TokenFlow, build, default_client};
 use crate::storage::backend::gcs::external_account::impersonate;
 
@@ -28,7 +29,7 @@ pub struct ImpersonatedFlow {
 
 impl ImpersonatedFlow {
     pub fn from_json(json: &[u8], profile: &FlowProfile) -> Result<Arc<Self>, String> {
-        let file: ImpersonatedFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        let file: ImpersonatedFile = go_json::unmarshal(json, credsfile::IMPERSONATED)?;
         let source_json = match (
             &file.source_credentials,
             file.service_account_impersonation_url.is_empty(),

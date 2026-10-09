@@ -6,6 +6,8 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use super::super::credsfile;
+use super::super::go_json::{self, Target};
 use super::{FlowToken, TokenFlow};
 use crate::go_url::escape::{Mode, escape};
 
@@ -37,6 +39,7 @@ pub struct Messages {
     invalid_json_prefix: &'static str,
     incomplete: &'static str,
     not_on_gce: Option<&'static str>,
+    target: &'static Target,
 }
 
 impl Messages {
@@ -45,6 +48,7 @@ impl Messages {
         invalid_json_prefix: "credentials: invalid token JSON from metadata: ",
         incomplete: "credentials: incomplete token received from metadata",
         not_on_gce: None,
+        target: &credsfile::METADATA_TOKEN,
     };
 
     pub const OAUTH2: Self = Self {
@@ -52,6 +56,7 @@ impl Messages {
         invalid_json_prefix: "oauth2/google: invalid token JSON from metadata: ",
         incomplete: "oauth2/google: incomplete token received from metadata",
         not_on_gce: Some("oauth2/google: can't get a token from the metadata service; not running on GCE"),
+        target: &credsfile::OAUTH2_METADATA_TOKEN,
     };
 }
 
@@ -200,8 +205,8 @@ impl TokenFlow for ComputeFlow {
             .get(&self.suffix())
             .await
             .map_err(|e| format!("{}{e}", self.messages.fetch_prefix))?;
-        let parsed: MetadataToken =
-            serde_json::from_str(&body).map_err(|e| format!("{}{e}", self.messages.invalid_json_prefix))?;
+        let parsed: MetadataToken = go_json::decode(body.as_bytes(), *self.messages.target)
+            .map_err(|e| format!("{}{e}", self.messages.invalid_json_prefix))?;
         if parsed.expires_in == 0 || parsed.access_token.is_empty() {
             return Err(self.messages.incomplete.to_owned());
         }

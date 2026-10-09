@@ -13,6 +13,7 @@ use tokio_rustls::rustls::pki_types::{
 use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, SignatureScheme};
 
+use super::super::{credsfile, go_json};
 use super::config::CredentialSource;
 use crate::storage::backend::pem;
 
@@ -157,7 +158,7 @@ impl X509Subject {
     fn workload(&self) -> Result<WorkloadConfig, String> {
         let config_path = self.config_file();
         let bytes = std::fs::read(&config_path).map_err(|_| SOURCE_UNAVAILABLE.to_owned())?;
-        let config: CertificateConfigFile = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let config: CertificateConfigFile = go_json::unmarshal(&bytes, credsfile::CERTIFICATE_CONFIG)?;
         let Some(workload) = config.cert_configs.workload else {
             return match is_ecp(&config) {
                 true => Err(ECP_UNSUPPORTED.to_owned()),

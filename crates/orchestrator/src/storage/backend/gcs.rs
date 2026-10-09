@@ -1,8 +1,10 @@
 pub mod adc;
+pub mod credsfile;
 pub mod detect;
 pub mod external_account;
 pub mod flows;
 mod form;
+pub mod go_json;
 mod key_errors;
 pub mod oauth2;
 pub mod store;
@@ -24,7 +26,6 @@ use crate::go_url::query::Query;
 const SERVICE_ACCOUNT_ENV: &str = "GOOGLE_SERVICE_ACCOUNT_BASE64";
 const EMULATOR_HOST_ENV: &str = "STORAGE_EMULATOR_HOST";
 const DEFAULT_HOST: &str = "storage.googleapis.com";
-const SERVICE_ACCOUNT_TYPE: &str = "storage.gcpServiceToken";
 const MISSING_ACCESS_ID: &str = "storage: missing required GoogleAccessID";
 
 #[derive(Clone)]
@@ -71,8 +72,8 @@ impl ServiceAccountSigner {
 
     fn service_account(&self) -> Result<ServiceAccount, String> {
         let decoded = decode_ignoring_newlines(&self.service_account_base64)?;
-        serde_json::from_slice(&decoded)
-            .map_err(|e| format!("failed to parse service account JSON: {}", json_error(&e)))
+        go_json::unmarshal(&decoded, credsfile::SERVICE_ACCOUNT_TOKEN)
+            .map_err(|e| format!("failed to parse service account JSON: {e}"))
     }
 
     fn signed_url(&self, account: &ServiceAccount, path: &str, expires: u64) -> Result<String, String> {
@@ -154,35 +155,6 @@ fn private_key_der(private_key: &str) -> Vec<u8> {
         .into_iter()
         .next()
         .map_or_else(|| private_key.as_bytes().to_vec(), |block| block.der)
-}
-
-fn json_error(error: &serde_json::Error) -> String {
-    use serde_json::error::Category;
-    match error.classify() {
-        Category::Eof => "unexpected end of JSON input".to_owned(),
-        Category::Data => format!(
-            "json: cannot unmarshal {} into Go value of type {SERVICE_ACCOUNT_TYPE}",
-            data_kind(error)
-        ),
-        Category::Syntax | Category::Io => {
-            format!("invalid character {} looking for beginning of value", offending(error))
-        }
-    }
-}
-
-fn data_kind(error: &serde_json::Error) -> &'static str {
-    let text = error.to_string();
-    match text.split_once("invalid type: ").map(|(_, rest)| rest) {
-        Some(rest) if rest.starts_with("string") => "string",
-        Some(rest) if rest.starts_with("integer") || rest.starts_with("floating") => "number",
-        Some(rest) if rest.starts_with("boolean") => "bool",
-        Some(rest) if rest.starts_with("sequence") => "array",
-        _ => "object",
-    }
-}
-
-fn offending(error: &serde_json::Error) -> String {
-    format!("'{}'", error.to_string().rsplit('`').nth(1).unwrap_or("?"))
 }
 
 #[cfg(test)]

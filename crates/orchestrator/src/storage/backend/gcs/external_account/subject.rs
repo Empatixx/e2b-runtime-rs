@@ -4,6 +4,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::Value;
 
+use super::super::{credsfile, go_json};
 use super::aws::AwsSubject;
 use super::config::{CredentialSource, ExternalAccountFile, Format};
 use super::executable::ExecutableSubject;
@@ -134,8 +135,8 @@ fn formatted(text: &str, format: Option<&Format>) -> Result<String, String> {
 }
 
 fn json_field(text: &str, field: &str) -> Result<String, String> {
-    let object: HashMap<String, Value> =
-        serde_json::from_str(text).map_err(|e| format!("credentials: failed to unmarshal subject token file: {e}"))?;
+    let object: HashMap<String, Value> = go_json::unmarshal(text.as_bytes(), credsfile::ANY_OBJECT)
+        .map_err(|e| format!("credentials: failed to unmarshal subject token file: {e}"))?;
     match object.get(field) {
         None => Err("credentials: provided subject_token_field_name not found in credentials".to_owned()),
         Some(Value::String(token)) => Ok(token.clone()),

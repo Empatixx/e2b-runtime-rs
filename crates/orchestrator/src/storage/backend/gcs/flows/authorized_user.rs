@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::super::form::UrlEncodedForm;
+use super::super::{credsfile, go_json};
 use super::response::{Dialect, read_three_legged};
 use super::{FlowToken, TokenFlow, default_client, request_error};
 
@@ -33,7 +34,7 @@ impl AuthorizedUserFlow {
     }
 
     fn with_token_url(json: &[u8], token_url: &str) -> Result<Arc<Self>, String> {
-        let file: UserFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+        let file: UserFile = go_json::unmarshal(json, credsfile::USER_CREDENTIALS)?;
         if file.client_id.is_empty() {
             return Err("auth: client ID must be provided".to_owned());
         }

@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use super::adc::AdcFile;
 use super::external_account::ExternalAccount;
 use super::flows::{ComputeFlow, ComputeMessages, FlowProfile, TokenFlow, on_gce};
+use super::{credsfile, go_json};
 use reuse::ReuseFlow;
 
 const STORE: &str = "GoogleCloudStorage";
@@ -35,9 +36,7 @@ struct ImpersonatedFile {
 }
 
 fn oauth2_flow(json: &[u8], scopes: &[String]) -> Result<Arc<dyn TokenFlow>, String> {
-    let kind = serde_json::from_slice::<FileType>(json)
-        .map_err(|e| e.to_string())?
-        .r#type;
+    let kind = go_json::unmarshal::<FileType>(json, credsfile::OAUTH2_CREDENTIALS_FILE)?.r#type;
     let flow: Arc<dyn TokenFlow> = match kind.as_str() {
         "service_account" | "gdch_service_account" => jwt::JwtFlow::from_json(json, scopes)?,
         "authorized_user" => user::UserFlow::from_json(json)?,
@@ -58,7 +57,7 @@ fn profile(scopes: &[String]) -> FlowProfile {
 }
 
 fn impersonated_flow(json: &[u8], scopes: &[String]) -> Result<Arc<dyn TokenFlow>, String> {
-    let file: ImpersonatedFile = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    let file: ImpersonatedFile = go_json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
     let source = match (
         file.source_credentials,
         file.service_account_impersonation_url.is_empty(),

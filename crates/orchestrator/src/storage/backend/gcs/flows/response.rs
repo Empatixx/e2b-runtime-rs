@@ -1,9 +1,25 @@
 use std::time::{Duration, SystemTime};
 
 use reqwest::{Response, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
+use super::super::credsfile;
+use super::super::go_json;
 use crate::go_url::query::Query;
+
+fn seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Lifetime {
+        Number(i64),
+        Text(String),
+    }
+    match Option::<Lifetime>::deserialize(deserializer)? {
+        None => Ok(0),
+        Some(Lifetime::Number(seconds)) => Ok(seconds),
+        Some(Lifetime::Text(text)) => text.trim().parse().map_err(serde::de::Error::custom),
+    }
+}
 
 pub struct OAuthToken {
     pub access_token: String,
@@ -15,6 +31,7 @@ pub struct OAuthToken {
 #[serde(default)]
 struct TokenJson {
     access_token: String,
+    #[serde(deserialize_with = "seconds")]
     expires_in: i64,
     refresh_token: String,
     error: String,
@@ -33,6 +50,13 @@ impl Dialect {
         match self {
             Self::Auth => "auth",
             Self::Oauth2 => "oauth2",
+        }
+    }
+
+    fn token_target(self) -> go_json::Target {
+        match self {
+            Self::Auth => credsfile::AUTH_TOKEN_3LO,
+            Self::Oauth2 => credsfile::OAUTH2_TOKEN,
         }
     }
 
@@ -92,7 +116,8 @@ pub async fn read_two_legged(response: Response) -> Result<OAuthToken, String> {
     if !status.is_success() {
         return Err(Dialect::Auth.cannot_fetch(status, &body));
     }
-    let parsed: TokenJson = serde_json::from_str(&body).map_err(|e| format!("auth: cannot fetch token: {e}"))?;
+    let parsed: TokenJson = go_json::unmarshal(body.as_bytes(), credsfile::AUTH_TOKEN_2LO)
+        .map_err(|e| format!("auth: cannot fetch token: {e}"))?;
     Ok(OAuthToken {
         access_token: parsed.access_token,
         expiry: expiry_in(parsed.expires_in),
@@ -138,7 +163,7 @@ pub async fn read_three_legged(response: Response, dialect: Dialect) -> Result<O
                 refresh_token: field("refresh_token"),
             }
         }
-        _ => match serde_json::from_str::<TokenJson>(&body) {
+        _ => match go_json::unmarshal::<TokenJson>(body.as_bytes(), dialect.token_target()) {
             Ok(parsed) => {
                 error.code = parsed.error;
                 error.description = parsed.error_description;
