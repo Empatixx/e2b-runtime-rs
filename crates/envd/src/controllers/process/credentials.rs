@@ -49,9 +49,16 @@ impl Credentials {
     }
 
     fn restore(&self) -> io::Result<()> {
-        set_thread_res_uid(self.uid, self.uid, None)?;
-        set_thread_res_gid(self.gid, self.gid, None)?;
-        set_thread_groups(&self.groups)?;
+        let current = Self::current()?;
+        if current.uid != self.uid {
+            set_thread_res_uid(self.uid, self.uid, None)?;
+        }
+        if current.gid != self.gid {
+            set_thread_res_gid(self.gid, self.gid, None)?;
+        }
+        if current.groups != self.groups {
+            set_thread_groups(&self.groups)?;
+        }
         Ok(())
     }
 }
