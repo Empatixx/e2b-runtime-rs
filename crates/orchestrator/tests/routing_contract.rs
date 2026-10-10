@@ -32,6 +32,8 @@ async fn routing_records_are_stored_with_ttl_and_deleted_only_by_their_execution
         execution_id: "exec-1".to_owned(),
         sandbox_started_at: "2026-10-08T00:00:00Z".to_owned(),
         sandbox_max_length_in_hours: 1,
+        lifecycle_id: None,
+        network_placement: None,
     };
 
     routes

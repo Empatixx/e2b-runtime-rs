@@ -16,6 +16,25 @@ pub struct RoutingRecord {
     pub execution_id: String,
     pub sandbox_started_at: String,
     pub sandbox_max_length_in_hours: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_placement: Option<NetworkPlacement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkMode {
+    Legacy,
+    EgressRouter,
+    FullRouter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NetworkPlacement {
+    pub network_mode: NetworkMode,
+    pub router_id: String,
+    pub portable_ip: String,
 }
 
 pub trait RouteStore: Send + Sync {
@@ -91,6 +110,8 @@ impl RoutingPublisher {
             execution_id: sandbox.execution_id.clone(),
             sandbox_started_at: rfc3339_nano(sandbox.started_at),
             sandbox_max_length_in_hours: sandbox.max_length_hours,
+            lifecycle_id: None,
+            network_placement: None,
         };
         let ttl = (sandbox.max_length_hours > 0).then(|| Duration::from_secs(sandbox.max_length_hours as u64 * 3600));
         let stored = tokio::time::timeout(STORE_TIMEOUT, store.store(&sandbox.sandbox_id, &record, ttl)).await;
@@ -192,6 +213,36 @@ mod tests {
                 r#"set sbx {"orchestrator_id":"orch","orchestrator_ip":"10.0.0.5","execution_id":"exec","sandbox_started_at":"1970-01-01T00:00:00Z","sandbox_max_length_in_hours":24} Some(86400s)"#.to_owned(),
                 "del sbx exec".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn a_routed_record_carries_its_lifecycle_and_placement() {
+        let record = RoutingRecord {
+            orchestrator_id: "orch-A".to_owned(),
+            orchestrator_ip: "10.0.0.5".to_owned(),
+            execution_id: "exec-1".to_owned(),
+            sandbox_started_at: "1970-01-01T00:00:00Z".to_owned(),
+            sandbox_max_length_in_hours: 1,
+            lifecycle_id: Some("lifecycle-1".to_owned()),
+            network_placement: Some(NetworkPlacement {
+                network_mode: NetworkMode::FullRouter,
+                router_id: "router-1".to_owned(),
+                portable_ip: "10.4.0.7".to_owned(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            serde_json::json!({
+                "orchestrator_id": "orch-A",
+                "orchestrator_ip": "10.0.0.5",
+                "execution_id": "exec-1",
+                "sandbox_started_at": "1970-01-01T00:00:00Z",
+                "sandbox_max_length_in_hours": 1,
+                "lifecycle_id": "lifecycle-1",
+                "network_placement": {"network_mode": "full-router", "router_id": "router-1", "portable_ip": "10.4.0.7"}
+            })
         );
     }
 
