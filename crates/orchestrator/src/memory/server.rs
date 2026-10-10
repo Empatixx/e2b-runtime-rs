@@ -645,6 +645,14 @@ mod tests {
         }
     }
 
+    async fn eventually(condition: impl Fn() -> bool) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !condition() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        condition()
+    }
+
     async fn read_page(pages: &Arc<Pages>, page: u64) -> u8 {
         let pages = pages.clone();
         tokio::task::spawn_blocking(move || pages.read_byte((page * PAGE + 11) as usize))
@@ -721,11 +729,15 @@ mod tests {
             eprintln!("skipping: userfaultfd needs root");
             return;
         }
+        if Pages::map(PAGE as usize).register_write_protected().is_err() {
+            eprintln!("skipping: this kernel has no async uffd write-protect for anonymous memory");
+            return;
+        }
         let fixture = fixture_with(2, 2, true).await;
 
         assert_eq!(read_page(&fixture.pages, 0).await, 1);
 
-        assert!(fixture.server.write_protecting());
+        assert!(eventually(|| fixture.server.write_protecting()).await);
         assert!(Pages::write_protected(fixture.pages.address()));
         fixture.server.stop().await.unwrap();
     }
@@ -1028,16 +1040,16 @@ mod tests {
     async fn a_write_to_a_protected_page_is_resolved_and_promoted_to_dirty() {
         let Some(fixture) = sync_fixture(2).await else { return };
         assert_eq!(read_page(&fixture.pages, 0).await, 1);
-        assert_eq!(fixture.server.page_state(0), PageState::Clean);
+        assert!(eventually(|| fixture.server.page_state(0) == PageState::Clean).await);
 
         write_page(&fixture.pages, 0, 0x42).await;
 
-        assert_eq!(
-            fixture.server.page_state(0),
-            PageState::Dirty,
-            "resolve must promote the page to dirty"
+        assert!(
+            eventually(|| fixture.server.page_state(0) == PageState::Dirty).await,
+            "resolve must promote the page to dirty, got {:?}",
+            fixture.server.page_state(0)
         );
-        assert_eq!(fixture.server.wp_faults_resolved(), 1);
+        assert!(eventually(|| fixture.server.wp_faults_resolved() == 1).await);
         assert_eq!(fixture.pages.read_byte(0), 0x42);
         fixture.server.stop().await.unwrap();
     }

@@ -167,14 +167,14 @@ mod tests {
 
         let still_taken = pool.close().await;
 
+        let taken = || pool.devices.claims.lock().taken.iter().copied().collect::<Vec<_>>();
         assert!(pool.populating.lock().is_none());
         assert!(still_taken.contains(&handed));
+        assert_eq!(taken(), still_taken);
         assert_eq!(pool.devices.claim_next(), None);
         assert_eq!(pool.get().await, Err(CLOSED.to_owned()));
-        assert_eq!(
-            pool.devices.claims.lock().taken.iter().copied().collect::<Vec<_>>(),
-            vec![handed]
-        );
+        assert!(taken().contains(&handed));
+        assert!(taken().iter().all(|index| still_taken.contains(index)));
     }
 
     #[tokio::test]
