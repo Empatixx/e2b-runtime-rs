@@ -1,0 +1,106 @@
+---
+title: 'Sandbox resume in Rust vs Go: 51 ms against 321 ms at p50'
+description: We measured how fast the Rust orchestrator resumes an E2B sandbox from a snapshot, against the upstream Go orchestrator, on the same node and the same template.
+author: Jiří Krokviak
+date: '2026-10-10'
+---
+
+E2B starts most sandboxes by **resuming a snapshot**: the orchestrator loads a paused microVM and hands it to the SDK. That step decides how long a user waits. We rewrote the orchestrator in Rust with the same API, and this post compares its resume time with the Go original.
+
+## Summary
+
+- One sandbox at a time: **Rust p50 51 ms, Go p50 321 ms**. Rust stays between 33 and 63 ms.
+- Four in parallel: **Rust p50 121 ms, Go p50 430 ms**.
+- Eight in parallel on 4 vCPUs: **Rust p50 277 ms, Go p50 747 ms**. The Rust tail grows here (p90 713 ms).
+- Guest RAM size barely matters: a 512 MiB template gives almost the same numbers as 1 GiB.
+
+## Results at a glance
+
+<CompareChart
+  title="Resume p50, 1 GiB template"
+  unit="ms"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 51, go: 321 },
+    { label: '4 in parallel', rust: 121, go: 430 },
+    { label: '8 in parallel', rust: 277, go: 747 },
+  ]}
+/>
+
+<CompareChart
+  title="Resume p90, 1 GiB template"
+  unit="ms"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 58, go: 336 },
+    { label: '4 in parallel', rust: 223, go: 606 },
+    { label: '8 in parallel', rust: 713, go: 1362 },
+  ]}
+/>
+
+<CompareChart
+  title="Resume p50, 512 MiB template"
+  unit="ms"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 57, go: 328 },
+    { label: '4 in parallel', rust: 142, go: 417 },
+    { label: '8 in parallel', rust: 323, go: 717 },
+  ]}
+/>
+
+A bar is the time from the start of the resume until envd inside the sandbox answers `/init`. The first run of every set fills the caches and is left out.
+
+## Method
+
+| | |
+|---|---|
+| Node | Azure `Standard_E4ds_v4`: 4 vCPUs, 32 GB RAM, Ubuntu 24.04, host kernel 6.17. A nested KVM guest, not bare metal. |
+| Host setup | As upstream requires: udev `nowatch` rule for `nbd*`, `nbds_max=128`, 16 GiB of hugepages |
+| Firecracker | `v1.14-0.2.0`, the E2B fork, guest kernel `vmlinux-6.1.158` |
+| Template | `e2bdev/base`, built by Go `create-build` with its optimize phase, 2 vCPUs, 1 GiB or 512 MiB |
+| Rust | `resume_bench` example: the real node and gRPC server, `Create` with `snapshot: true`, then delete and wait until Firecracker and the NBD device are gone |
+| Go | `resume-build -iterations N`, which calls the sandbox factory directly; we added a parallel mode for this test |
+| Runs | 40 sequential, 48 with 4 or 8 in parallel, for each implementation and template |
+
+P99 comes from 40 to 48 runs, so it is close to the maximum.
+
+## Details, 1 GiB template
+
+| Parallel | | min | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| 1 | Rust | 33 | 51 | 58 | 63 | 63 |
+| 1 | Go | 40 | 321 | 336 | 347 | 347 |
+| 4 | Rust | 58 | 121 | 223 | 661 | 661 |
+| 4 | Go | 108 | 430 | 606 | 746 | 746 |
+| 8 | Rust | 58 | 277 | 713 | 878 | 878 |
+| 8 | Go | 338 | 747 | 1362 | 1956 | 1956 |
+
+All times in milliseconds. One Rust resume splits like this: Firecracker spawn and NBD in parallel 13 to 23 ms, snapshot load 6 to 16 ms, vCPU resume and MMDS 1 to 8 ms, envd `/init` 6 to 28 ms.
+
+## What made the difference
+
+Most of these changes bring Rust in line with what Go already does.
+
+- **2 MiB huge pages** for the guest memory: about 60 page faults per resume instead of about 7000.
+- **The chunk cache is read through an mmap**, like Go. A page fault installs its page straight from the mapping. Before, each 2 MiB block was copied up to five times.
+- **Prefetch starts copying pages while the snapshot loads**, as soon as Firecracker connects to the memory server.
+- **Firecracker is started inside its cgroup** with `clone3(CLONE_INTO_CGROUP)`, as Go does. Moving it there afterwards cost 3 to 7 ms and sometimes 250 ms.
+- **`TCP_NODELAY` on the gRPC port**. Go turns it on for every connection. Without it, every `Create` reply waited 40 ms for a delayed ACK.
+- **The udev `nowatch` rule** for NBD devices, which upstream requires on its nodes.
+
+## What did not work
+
+We ported Go's **NBD over generic netlink** and measured it. A connect right after a device was released waits 100 to 250 ms inside the kernel, in `blk_mq_freeze_queue_wait`. Go hits the same wait, and it explains most of its 320 ms runs. The older ioctl connect takes about 17 ms, so Rust keeps it.
+
+## Known gaps
+
+- The node is a nested VM with 4 vCPUs. We expect lower numbers for both on bare metal and have not measured that yet.
+- At 8 parallel resumes on 4 vCPUs, the Rust tail grows. We have not found the cause yet.
+- Go runs without its gRPC layer and Rust with it, so the comparison slightly favours Go.
+- Go maps the whole guest memory from hugepages at resume. With the 4 GiB that upstream's guide reserves, 8 parallel 1 GiB sandboxes failed in 15 of 48 Go runs. Rust did not fail.
+
+The numbers and the setup are in [`docs/performance-resume.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance-resume.md), and the Rust benchmark is [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).

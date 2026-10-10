@@ -1,0 +1,106 @@
+---
+title: 'Probuzení sandboxu v Rustu a v Go: 51 ms proti 321 ms v mediánu'
+description: Změřili jsme, jak rychle Rust orchestrator probudí sandbox E2B ze snapshotu, proti původnímu orchestratoru v Go, na stejném stroji a se stejnou šablonou.
+author: Jiří Krokviak
+date: '2026-10-10'
+---
+
+E2B spouští většinu sandboxů tak, že **probudí snapshot**: orchestrator načte uspaný microVM a předá ho SDK. Na tomto kroku záleží, jak dlouho uživatel čeká. Orchestrator jsme přepsali do Rustu se stejným API a v tomto článku srovnáváme jeho rychlost probuzení s původní verzí v Go.
+
+## Shrnutí
+
+- Jeden sandbox naráz: **Rust p50 51 ms, Go p50 321 ms**. Rust se drží mezi 33 a 63 ms.
+- Čtyři souběžně: **Rust p50 121 ms, Go p50 430 ms**.
+- Osm souběžně na 4 vCPU: **Rust p50 277 ms, Go p50 747 ms**. Tady se u Rustu prodlužuje chvost (p90 713 ms).
+- Velikost RAM hosta skoro nehraje roli: šablona s 512 MiB dává skoro stejná čísla jako s 1 GiB.
+
+## Výsledky v grafech
+
+<CompareChart
+  title="Probuzení p50, šablona 1 GiB"
+  unit="ms"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 51, go: 321 },
+    { label: '4 souběžně', rust: 121, go: 430 },
+    { label: '8 souběžně', rust: 277, go: 747 },
+  ]}
+/>
+
+<CompareChart
+  title="Probuzení p90, šablona 1 GiB"
+  unit="ms"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 58, go: 336 },
+    { label: '4 souběžně', rust: 223, go: 606 },
+    { label: '8 souběžně', rust: 713, go: 1362 },
+  ]}
+/>
+
+<CompareChart
+  title="Probuzení p50, šablona 512 MiB"
+  unit="ms"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 57, go: 328 },
+    { label: '4 souběžně', rust: 142, go: 417 },
+    { label: '8 souběžně', rust: 323, go: 717 },
+  ]}
+/>
+
+Sloupec je čas od začátku probuzení do chvíle, kdy envd uvnitř sandboxu odpoví na `/init`. První běh každé sady plní cache, proto ho nezapočítáváme.
+
+## Metodika
+
+| | |
+|---|---|
+| Stroj | Azure `Standard_E4ds_v4`: 4 vCPU, 32 GB RAM, Ubuntu 24.04, jádro hostitele 6.17. Vnořená KVM, ne bare metal. |
+| Nastavení hostitele | Jak vyžaduje upstream: udev pravidlo `nowatch` pro `nbd*`, `nbds_max=128`, 16 GiB huge pages |
+| Firecracker | `v1.14-0.2.0`, fork od E2B, jádro hosta `vmlinux-6.1.158` |
+| Šablona | `e2bdev/base`, postavená Go `create-build` včetně fáze optimize, 2 vCPU, 1 GiB nebo 512 MiB |
+| Rust | example `resume_bench`: skutečný node a gRPC server, `Create` se `snapshot: true`, pak smazání a čekání, než zmizí Firecracker i NBD zařízení |
+| Go | `resume-build -iterations N`, který volá továrnu sandboxů přímo; paralelní režim jsme doplnili jen pro tento test |
+| Počet běhů | 40 po jednom, 48 při 4 nebo 8 souběžných, pro každou implementaci a šablonu |
+
+P99 vychází ze 40 až 48 běhů, takže je blízko maxima.
+
+## Podrobně, šablona 1 GiB
+
+| Souběžně | | min | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| 1 | Rust | 33 | 51 | 58 | 63 | 63 |
+| 1 | Go | 40 | 321 | 336 | 347 | 347 |
+| 4 | Rust | 58 | 121 | 223 | 661 | 661 |
+| 4 | Go | 108 | 430 | 606 | 746 | 746 |
+| 8 | Rust | 58 | 277 | 713 | 878 | 878 |
+| 8 | Go | 338 | 747 | 1362 | 1956 | 1956 |
+
+Všechny časy jsou v milisekundách. Jedno probuzení v Rustu se rozpadá takto: spuštění Firecrackeru a NBD souběžně 13 až 23 ms, načtení snapshotu 6 až 16 ms, spuštění vCPU a MMDS 1 až 8 ms, envd `/init` 6 až 28 ms.
+
+## Co pomohlo
+
+Většina změn srovnává Rust s tím, co už dělá Go.
+
+- **Huge pages 2 MiB** pro paměť hosta: asi 60 výpadků stránek na probuzení místo asi 7000.
+- **Cache chunků se čte přes mmap**, stejně jako v Go. Výpadek stránky ji nainstaluje přímo z mapování. Dřív se každý 2MiB blok kopíroval až pětkrát.
+- **Prefetch začne kopírovat stránky už během načítání snapshotu**, hned jak se Firecracker připojí k paměťovému serveru.
+- **Firecracker startuje rovnou ve své cgroup** přes `clone3(CLONE_INTO_CGROUP)`, stejně jako v Go. Dodatečný přesun stál 3 až 7 ms a někdy i 250 ms.
+- **`TCP_NODELAY` na gRPC portu**. Go ho zapíná u každého spojení. Bez něj každá odpověď na `Create` čekala 40 ms na zpožděné ACK.
+- **Udev pravidlo `nowatch`** pro NBD zařízení, které upstream na svých nodech vyžaduje.
+
+## Co nefungovalo
+
+Převedli jsme z Go i **NBD přes generic netlink** a změřili ho. Připojení hned po uvolnění zařízení čeká v jádře 100 až 250 ms, ve funkci `blk_mq_freeze_queue_wait`. Go čeká stejně a vysvětluje to většinu jeho běhů kolem 320 ms. Starší připojení přes ioctl trvá asi 17 ms, takže Rust zůstává u něj.
+
+## Známé mezery
+
+- Stroj je vnořená VM se 4 vCPU. Na bare metalu čekáme nižší čísla pro obě implementace, ale zatím jsme je neměřili.
+- Při 8 souběžných probuzeních na 4 vCPU se u Rustu prodlužuje chvost. Příčinu jsme zatím nenašli.
+- Go běží bez své gRPC vrstvy a Rust s ní, takže srovnání mírně nahrává Go.
+- Go při probuzení mapuje celou paměť hosta z huge pages. Se 4 GiB, které rezervuje návod upstreamu, selhalo 8 souběžných sandboxů s 1 GiB v 15 ze 48 běhů Go. Rust neselhal.
+
+Čísla a nastavení jsou v [`docs/performance-resume.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance-resume.md) a benchmark v Rustu je [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).
