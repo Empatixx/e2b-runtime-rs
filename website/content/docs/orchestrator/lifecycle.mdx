@@ -61,6 +61,10 @@ flowchart LR
 
 The pause produces a **new build**. Only the memory pages written since resume and the disk blocks written into the overlay are stored; the new headers point at the parent builds for everything else. The reply goes out as soon as the snapshot is in the node's template cache, so a resume on the same node needs no download. The upload to object storage runs in the background (20 minutes per attempt, two hours in total) and parent builds always land before their children.
 
+Before the VM pauses, the node prepares the guest like upstream. Each step has its own feature flag and is off by default. `freeze-user-cgroup` freezes the workload's cgroups through envd's `/freeze`. `collapse-envd-heap` packs envd's heap into huge pages. `guest-pause-reclaim` runs `fstrim`, `sync`, `drop_caches` and `compact_memory` with a time cap per step. `free-page-hinting-config` drains free-page hinting, so the snapshot does not keep pages the guest already freed. A checkpoint that keeps the sandbox running unfreezes it afterwards.
+
+With `defer-rootfs-export` on, a pause only records which overlay blocks changed and builds the header. The blocks are written to the rootfs diff in the background, so the reply does not wait for that copy. The upload and a resume on the same node wait until the diff is complete. The `orchestrator.sandbox.snapshot.rootfs_seal.duration` metric records how long that background write takes.
+
 ## Checkpoint
 
 A checkpoint is a pause followed by an immediate resume of the new build. The sandbox keeps running, and the API can later resume it from that moment.

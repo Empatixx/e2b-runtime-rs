@@ -3,15 +3,28 @@ use std::path::PathBuf;
 use bytes::Bytes;
 
 use super::{body, data_metadata};
+use crate::block::build_file::Ready;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct FilesystemSnapshot {
     pub build: Build,
     pub rootfs_diff: Option<PathBuf>,
     pub rootfs_bytes: u64,
     pub metadata_file: PathBuf,
+    pub rootfs_sealed: Ready,
+}
+
+impl std::fmt::Debug for FilesystemSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesystemSnapshot")
+            .field("build", &self.build)
+            .field("rootfs_diff", &self.rootfs_diff)
+            .field("rootfs_bytes", &self.rootfs_bytes)
+            .field("metadata_file", &self.metadata_file)
+            .finish()
+    }
 }
 
 impl FilesystemSnapshot {
@@ -20,6 +33,7 @@ impl FilesystemSnapshot {
     }
 
     pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
+        self.rootfs_sealed.clone().await?;
         let paths = self.build.paths();
         let header = Bytes::from(self.build.rootfs.finalized().serialize()?);
         let rootfs_metadata = data_metadata(metadata, &self.build.rootfs, self.rootfs_bytes);
@@ -77,6 +91,7 @@ mod tests {
             rootfs_bytes: diff.map_or(0, |bytes| bytes.len() as u64),
             rootfs_diff,
             metadata_file: fixture.dir.path().join("metadata.json"),
+            rootfs_sealed: crate::block::build_file::ready_now(),
         }
     }
 

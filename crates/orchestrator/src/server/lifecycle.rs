@@ -19,6 +19,7 @@ use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
+use crate::featureflags::DEFER_ROOTFS_EXPORT;
 use crate::firecracker::exit::{CrashCause, ExitInfo};
 use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::trace::Trace;
@@ -338,9 +339,10 @@ impl Running {
     ) {
         let parent = self.info.lock().clone();
         self.reclaim(&parent, true).await;
+        let defer_rootfs = self.defers_rootfs(&parent);
         let paused = self
             .node
-            .pause_filesystem_locally(&self.sandbox, &parent, build_id, flags)
+            .pause_filesystem_locally(&self.sandbox, &parent, build_id, flags, defer_rootfs)
             .await;
         if let Ok((layer, _)) = &paused {
             self.node.events.publish(
@@ -353,7 +355,7 @@ impl Running {
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
             self.node
-                .mark_written_when_ready(disk.clone(), crate::block::build_file::ready_now());
+                .mark_written_when_ready(disk.clone(), layer.rootfs_sealed.clone());
             span.in_scope(|| self.node.upload_filesystem(layer.clone(), object_metadata, disk));
         }
         let _ = reply.send(paused.map(|(_, snapshot)| snapshot));
@@ -369,7 +371,11 @@ impl Running {
     ) {
         let parent = self.info.lock().clone();
         self.reclaim(&parent, false).await;
-        let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
+        let defer_rootfs = self.defers_rootfs(&parent);
+        let snapshotted = self
+            .node
+            .snapshot_locally(&self.sandbox, &parent, build_id, defer_rootfs)
+            .await;
         if snapshotted.is_ok() {
             self.node.events.publish(
                 SandboxEvent::new(PAUSED, &event_sandbox(&parent))
@@ -382,8 +388,7 @@ impl Running {
                 .with("template_id", template_id)
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
-            self.node
-                .mark_written_when_ready(disk.clone(), local.memfile_ready.clone());
+            self.node.mark_written_when_ready(disk.clone(), local.written());
             span.in_scope(|| self.node.upload(local.clone(), object_metadata.clone(), disk));
             self.node.harvest_after_pause(PausedBuild {
                 parent: parent.clone(),
@@ -397,7 +402,17 @@ impl Running {
     async fn checkpoint(&self, build_id: Uuid, reply: oneshot::Sender<Result<LocalSnapshot, String>>) {
         let parent = self.info.lock().clone();
         self.reclaim(&parent, false).await;
-        let _ = reply.send(self.node.snapshot_locally(&self.sandbox, &parent, build_id).await);
+        let _ = reply.send(
+            self.node
+                .snapshot_locally(&self.sandbox, &parent, build_id, false)
+                .await,
+        );
+    }
+
+    fn defers_rootfs(&self, parent: &SandboxInfo) -> bool {
+        self.node
+            .feature_flags
+            .get(&DEFER_ROOTFS_EXPORT, &reclaim_contexts(&parent.config))
     }
 
     async fn reclaim(&self, parent: &SandboxInfo, filesystem_only: bool) {

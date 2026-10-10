@@ -317,7 +317,7 @@ impl Node {
         attributes: &[KeyValue],
     ) -> Result<(), Status> {
         let build_id = local.snapshot.build.build_id;
-        let sealed = tokio::time::timeout(ATTEMPT_TIMEOUT, local.memfile_ready.clone())
+        let sealed = tokio::time::timeout(ATTEMPT_TIMEOUT, local.written())
             .await
             .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
         match sealed {
@@ -653,6 +653,7 @@ mod tests {
             rootfs_diff: Some("/definitely/not/here/rootfs.diff".into()),
             rootfs_bytes: 4096,
             metadata_file: "/definitely/not/here/metadata.json".into(),
+            rootfs_sealed: crate::block::build_file::ready_now(),
         }
     }
 

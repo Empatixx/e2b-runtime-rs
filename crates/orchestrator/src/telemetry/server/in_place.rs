@@ -34,6 +34,13 @@ static PROCESS_ROOTFS_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
     )
 });
 
+static ROOTFS_SEAL_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    milliseconds(
+        "orchestrator.sandbox.snapshot.rootfs_seal.duration",
+        "Time for the background deferred rootfs reflink seal (off the pause critical path), labeled by in_place and success",
+    )
+});
+
 static FS_QUIESCED_PAUSE: LazyLock<Counter<u64>> = LazyLock::new(|| {
     counter(
         "orchestrator.sandbox.pause.fs_quiesced",
@@ -126,6 +133,17 @@ impl ProcessRootfsOutcome {
             ],
         );
     }
+}
+
+pub fn record_rootfs_seal(in_place: bool, success: bool, team_id: &str, took: Duration) {
+    ROOTFS_SEAL_DURATION.record(
+        millis(took),
+        &[
+            KeyValue::new("in_place", in_place),
+            KeyValue::new("success", success),
+            team(team_id),
+        ],
+    );
 }
 
 pub fn count_fs_quiesced_pause(quiesced: bool) {

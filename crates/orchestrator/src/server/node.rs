@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use futures::FutureExt;
+
 use tonic::Status;
 use uuid::Uuid;
 
@@ -68,7 +70,7 @@ use crate::sandbox::config::sandbox_builder::{
     SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetSandboxType, SetTemplateId, SetWorkDir,
 };
 use crate::sandbox::rootfs::recovery::RecoveryRecord;
-use crate::sandbox::snapshot::LocalSnapshot;
+use crate::sandbox::snapshot::{LocalSnapshot, SnapshotOptions};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::upload_limit::UploadLimiter;
@@ -303,10 +305,15 @@ impl Node {
         sandbox: &Sandbox,
         parent: &SandboxInfo,
         build_id: Uuid,
+        defer_rootfs: bool,
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
+        let options = SnapshotOptions {
+            dedup: self.memfile_dedup(&parent.config),
+            defer_rootfs,
+        };
         let local = sandbox
-            .snapshot_deduped_into(&dir, build_id, self.memfile_dedup(&parent.config))
+            .snapshot_with(&dir, build_id, options)
             .await
             .map_err(|e| format!("error snapshotting sandbox: {e}"))
             .inspect_err(|_| discard_snapshot_dir(&dir))?;
@@ -330,7 +337,7 @@ impl Node {
             firecracker_version: parent.config.firecracker_version.clone(),
         });
         if let Err(e) = self.cache_snapshot(&local, metadata, dir.clone()) {
-            let _ = local.memfile_ready.clone().await;
+            let _ = local.written().await;
             discard_snapshot_dir(&dir);
             return Err(format!("error adding snapshot to template cache: {e}"));
         }
@@ -1014,6 +1021,7 @@ async fn upload_attempt(
     storage: Storage,
     object_metadata: ObjectMetadata,
 ) -> Result<(), Failure> {
+    local.written().await.map_err(Failure::Terminal)?;
     if !local.files.exist() {
         return Err(Failure::Terminal("snapshot files are gone".to_owned()));
     }
@@ -1052,9 +1060,20 @@ fn register_local_diffs(store: &DiffStore, local: &LocalSnapshot) -> Result<(), 
         &local.files.memfile,
         local.memfile_ready.clone(),
     );
-    store
-        .add_local(build_id, Artifact::Rootfs, &local.files.rootfs)
-        .inspect_err(|_| store.remove(build_id))
+    match local.rootfs_ready.clone().now_or_never() {
+        None => {
+            store.add_local_when(
+                build_id,
+                Artifact::Rootfs,
+                &local.files.rootfs,
+                local.rootfs_ready.clone(),
+            );
+            Ok(())
+        }
+        Some(sealed) => sealed
+            .and_then(|()| store.add_local(build_id, Artifact::Rootfs, &local.files.rootfs))
+            .inspect_err(|_| store.remove(build_id)),
+    }
 }
 
 fn discard_snapshot_dir(dir: &Path) {
@@ -1124,6 +1143,7 @@ mod tests {
                 rootfs: dir.join("rootfs"),
             },
             memfile_ready: ready_now(),
+            rootfs_ready: ready_now(),
         }
     }
 

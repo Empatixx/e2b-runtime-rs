@@ -59,6 +59,14 @@ impl Overlay {
         self.cache.export_diff(out)
     }
 
+    pub fn diff_metadata(&self) -> DiffMetadata {
+        self.cache.diff_metadata()
+    }
+
+    pub fn export_with(&self, out: &mut File, metadata: &DiffMetadata) -> io::Result<()> {
+        self.cache.export_with(out, metadata)
+    }
+
     async fn read_block(&self, offset: u64, block: &mut [u8]) -> Result<(), String> {
         let cached = self
             .cache

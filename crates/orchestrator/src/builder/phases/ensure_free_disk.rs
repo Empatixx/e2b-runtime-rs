@@ -197,6 +197,7 @@ fn write_layer_files(
         rootfs_diff,
         rootfs_bytes,
         metadata_file,
+        rootfs_sealed: crate::block::build_file::ready_now(),
     })
 }
 

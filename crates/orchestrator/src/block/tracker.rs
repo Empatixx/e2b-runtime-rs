@@ -52,7 +52,7 @@ impl BlockTracker {
     }
 }
 
-fn runs(blocks: &RoaringBitmap) -> Vec<Range<u32>> {
+pub(super) fn runs(blocks: &RoaringBitmap) -> Vec<Range<u32>> {
     blocks.iter().fold(Vec::new(), |mut runs, index| {
         match runs.last_mut() {
             Some(last) if last.end == index => last.end += 1,

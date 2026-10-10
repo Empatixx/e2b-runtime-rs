@@ -15,6 +15,7 @@ use super::Sandbox;
 use super::config::Rootfs;
 use crate::block::build_file::{BuildFile, Ready, ready_now};
 use crate::block::file_diff::export_file_diff;
+use crate::block::overlay::Overlay;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::dedup::config::DedupConfig;
@@ -23,6 +24,7 @@ use crate::memory::snapshot::{BuildFileBase, GuestMemory, diff_metadata, export_
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
+use crate::telemetry::server::in_place::record_rootfs_seal;
 use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
 
 const ROOTFS_BLOCK_SIZE: u64 = 4096;
@@ -49,6 +51,19 @@ pub struct LocalSnapshot {
     pub snapshot: Snapshot,
     pub files: SnapshotFiles,
     pub memfile_ready: Ready,
+    pub rootfs_ready: Ready,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotOptions {
+    pub dedup: DedupConfig,
+    pub defer_rootfs: bool,
+}
+
+pub struct DiskExport {
+    exported: Exported,
+    sealed: Ready,
+    deferred: bool,
 }
 
 impl std::fmt::Debug for LocalSnapshot {
@@ -135,18 +150,26 @@ impl Sandbox {
         build_id: Uuid,
         dedup: DedupConfig,
     ) -> Result<LocalSnapshot, String> {
+        let options = SnapshotOptions {
+            dedup,
+            defer_rootfs: false,
+        };
+        self.snapshot_with(dir, build_id, options).await
+    }
+
+    pub async fn snapshot_with(
+        &self,
+        dir: &Path,
+        build_id: Uuid,
+        options: SnapshotOptions,
+    ) -> Result<LocalSnapshot, String> {
         let vm = self.resources.vm.as_ref().ok_or("firecracker is not running")?;
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let files = SnapshotFiles::in_dir(dir);
-        self.write(&client, pid, &files, build_id, dedup)
+        self.write(&client, pid, &files, build_id, options)
             .await
-            .map(|(snapshot, memfile_ready)| LocalSnapshot {
-                snapshot,
-                files: files.clone(),
-                memfile_ready,
-            })
             .inspect_err(|_| files.remove())
     }
 
@@ -156,21 +179,27 @@ impl Sandbox {
         pid: u32,
         files: &SnapshotFiles,
         build_id: Uuid,
-        dedup: DedupConfig,
-    ) -> Result<(Snapshot, Ready), String> {
+        options: SnapshotOptions,
+    ) -> Result<LocalSnapshot, String> {
         client.pause().await?;
         client.create_snapshot(&files.snapfile).await?;
         let pages = self.memory_pages(client).await?;
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
         let tracked_writes = pages.tracked_writes;
-        let (memfile, memfile_ready) = self.export_memory(pages, pid, &files.memfile, build_id, dedup).await?;
-        let rootfs = match self.export_disk(&files.rootfs, build_id).await {
-            Ok(rootfs) => rootfs,
+        let (memfile, memfile_ready) = self
+            .export_memory(pages, pid, &files.memfile, build_id, options.dedup)
+            .await?;
+        let disk = match self
+            .export_disk_with(&files.rootfs, build_id, options.defer_rootfs)
+            .await
+        {
+            Ok(disk) => disk,
             Err(e) => {
                 let _ = memfile_ready.await;
                 return Err(e);
             }
         };
+        let rootfs = disk.exported;
         let snapshot = Snapshot {
             build: Build {
                 build_id,
@@ -183,12 +212,57 @@ impl Sandbox {
             tracked_writes,
             vm_vcpus: self.resolved_vm_vcpus,
         };
-        Ok((snapshot, memfile_ready))
+        Ok(LocalSnapshot {
+            snapshot,
+            files: files.clone(),
+            memfile_ready,
+            rootfs_ready: disk.sealed,
+        })
     }
 
     async fn export_disk(&self, path: &Path, build_id: Uuid) -> Result<Exported, String> {
         self.flush_disk().await?;
         self.export_rootfs(path, build_id).await
+    }
+
+    pub async fn export_disk_with(&self, path: &Path, build_id: Uuid, defer: bool) -> Result<DiskExport, String> {
+        let deferrable = match (&self.config.rootfs, defer) {
+            (Rootfs::Overlay(overlay), true) => Some(overlay.clone()),
+            _ => None,
+        };
+        match deferrable {
+            Some(overlay) => {
+                self.flush_disk().await?;
+                self.seal_in_background(overlay, path, build_id)
+            }
+            None => self.export_disk(path, build_id).await.map(|exported| DiskExport {
+                exported,
+                sealed: ready_now(),
+                deferred: false,
+            }),
+        }
+    }
+
+    fn seal_in_background(&self, overlay: Arc<Overlay>, path: &Path, build_id: Uuid) -> Result<DiskExport, String> {
+        let parent = overlay.base().header().clone();
+        let metadata = overlay.diff_metadata();
+        record_snapshot_diff(&self.config.team_id, "rootfs", &metadata, &parent);
+        let exported = exported(&metadata, &parent, build_id)?;
+        let seal = RootfsSeal {
+            overlay,
+            path: path.to_path_buf(),
+            metadata,
+            team_id: self.config.team_id.clone(),
+        };
+        let sealed = tokio::spawn(seal.run())
+            .map(|joined| joined.map_err(|e| format!("deferred rootfs export: {e}"))?)
+            .boxed()
+            .shared();
+        Ok(DiskExport {
+            exported,
+            sealed,
+            deferred: true,
+        })
     }
 
     async fn memory_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
@@ -418,19 +492,56 @@ fn exported(diff: &DiffMetadata, parent: &Header, build_id: Uuid) -> Result<Expo
     })
 }
 
-async fn blocking(
+async fn blocking<T: Send + 'static>(
     what: &'static str,
-    work: impl FnOnce() -> io::Result<DiffMetadata> + Send + 'static,
-) -> Result<DiffMetadata, String> {
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|e| format!("{what}: {e}"))?
         .map_err(|e| format!("{what}: {e}"))
 }
 
+struct RootfsSeal {
+    overlay: Arc<Overlay>,
+    path: PathBuf,
+    metadata: DiffMetadata,
+    team_id: String,
+}
+
+impl RootfsSeal {
+    async fn run(self) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let RootfsSeal {
+            overlay,
+            path,
+            metadata,
+            team_id,
+        } = self;
+        let sealed = blocking("export rootfs diff", move || {
+            File::create(&path).and_then(|mut out| overlay.export_with(&mut out, &metadata))
+        })
+        .await
+        .map_err(|e| format!("deferred rootfs export failed: {e}"));
+        record_rootfs_seal(false, sealed.is_ok(), &team_id, started.elapsed());
+        if let Err(e) = &sealed {
+            tracing::error!(error = %e, "deferred rootfs export failed");
+        }
+        sealed
+    }
+}
+
 impl LocalSnapshot {
+    pub fn written(&self) -> Ready {
+        futures::future::try_join(self.memfile_ready.clone(), self.rootfs_ready.clone())
+            .map(|written| written.map(drop))
+            .boxed()
+            .shared()
+    }
+
     pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
         self.memfile_ready.clone().await?;
+        self.rootfs_ready.clone().await?;
         let build = &self.snapshot.build;
         let paths = build.paths();
         let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());

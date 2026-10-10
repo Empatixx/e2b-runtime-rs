@@ -402,7 +402,10 @@ mod tests {
             return;
         }
         let pages = Pages::map(2 * PAGE as usize);
-        let uffd = pages.register_write_protected().unwrap();
+        let Ok(uffd) = pages.register_write_protected() else {
+            eprintln!("skipping: this kernel has no async uffd write-protect for anonymous memory");
+            return;
+        };
         let source = vec![5; PAGE as usize];
 
         assert_eq!(uffd.copy(pages.address(), &source, true).unwrap(), CopyOutcome::Copied);

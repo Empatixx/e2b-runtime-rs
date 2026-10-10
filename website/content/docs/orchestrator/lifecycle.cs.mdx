@@ -61,6 +61,10 @@ flowchart LR
 
 Pause vytvoří **nový build**. Uloží se jen stránky paměti zapsané od probuzení a bloky disku zapsané do overlaye; nové hlavičky pro všechno ostatní ukazují na rodičovské buildy. Odpověď odchází, jakmile je snapshot v cache šablon nodu, takže probuzení na stejném nodu nic nestahuje. Upload do objektového úložiště běží na pozadí (20 minut na pokus, celkem dvě hodiny) a rodičovské buildy vždycky dorazí dřív než jejich potomci.
 
+Před pozastavením VM node připraví hosta stejně jako Go. Každý krok má vlastní feature flag a ve výchozím stavu je vypnutý. `freeze-user-cgroup` zmrazí cgroupy úlohy přes `/freeze` v envd. `collapse-envd-heap` zabalí heap envd do huge pages. `guest-pause-reclaim` pustí `fstrim`, `sync`, `drop_caches` a `compact_memory`, každý s časovým limitem. `free-page-hinting-config` vyprázdní hinting volných stránek, takže snapshot neobsahuje stránky, které host už uvolnil. Checkpoint, po kterém sandbox běží dál, ho potom zase rozmrazí.
+
+Se zapnutým `defer-rootfs-export` pause jen zaznamená, které bloky overlaye se změnily, a sestaví hlavičku. Bloky se do rozdílu rootfs zapíšou na pozadí, takže odpověď na tu kopii nečeká. Upload a probuzení na stejném nodu počkají, až je rozdíl hotový. Metrika `orchestrator.sandbox.snapshot.rootfs_seal.duration` měří, jak dlouho zápis na pozadí trvá.
+
 ## Checkpoint
 
 Checkpoint je pause, po které hned následuje probuzení nového buildu. Sandbox běží dál a API ho může později probudit z toho okamžiku.

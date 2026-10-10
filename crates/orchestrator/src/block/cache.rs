@@ -102,6 +102,23 @@ impl BlockCache {
         })
     }
 
+    pub fn diff_metadata(&self) -> DiffMetadata {
+        let tracker = self.tracker.read();
+        DiffMetadata {
+            dirty: tracker.data().clone(),
+            empty: tracker.zero().clone(),
+            block_size: self.block_size,
+        }
+    }
+
+    pub fn export_with(&self, out: &mut File, metadata: &DiffMetadata) -> io::Result<()> {
+        let start = out.stream_position()?;
+        let written = super::tracker::runs(&metadata.dirty)
+            .into_iter()
+            .try_fold(start, |position, run| self.export_run(out, run, position))?;
+        out.seek(SeekFrom::Start(written)).map(drop)
+    }
+
     fn export_run(&self, out: &File, run: Range<u32>, position: u64) -> io::Result<u64> {
         let from = u64::from(run.start) * self.block_size;
         let length = u64::from(run.end - run.start) * self.block_size;
@@ -230,6 +247,22 @@ mod tests {
         let mut out = tempfile::tempfile().unwrap();
         let diff = cache.export_diff(&mut out).unwrap();
         assert_eq!(diff.dirty.iter().collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(contents(&mut out), [vec![9; 4096], vec![3; 4096]].concat());
+    }
+
+    #[test]
+    fn a_deferred_export_writes_the_blocks_the_snapshot_saw() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(dir.path(), 4);
+        cache.write_at(3 * 4096, &[3; 4096]).unwrap();
+        cache.write_at(0, &[9; 4096]).unwrap();
+        let metadata = cache.diff_metadata();
+        cache.write_at(4096, &[7; 4096]).unwrap();
+
+        let mut out = tempfile::tempfile().unwrap();
+        cache.export_with(&mut out, &metadata).unwrap();
+
+        assert_eq!(metadata.dirty.iter().collect::<Vec<_>>(), vec![0, 3]);
         assert_eq!(contents(&mut out), [vec![9; 4096], vec![3; 4096]].concat());
     }
 

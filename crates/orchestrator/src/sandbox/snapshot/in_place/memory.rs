@@ -321,6 +321,7 @@ impl Sandbox {
                 },
                 files,
                 memfile_ready: exports.ready,
+                rootfs_ready: ready_now(),
             },
             deferred,
         })

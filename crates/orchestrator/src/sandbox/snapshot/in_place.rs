@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{Exported, SnapshotFiles};
+use crate::block::build_file::Ready;
 use crate::envd::quiesce::guest::GuestEnvd;
 use crate::envd::quiesce::{GuestQuiesce, Preparation, PreparationFailure};
 use crate::envd::reclaim::GuestReclaim;
@@ -37,15 +38,29 @@ pub struct FilesystemCheckpointRequest {
     pub flags: QuiesceFlags,
     pub team_id: String,
     pub balloon_mode: String,
+    pub defer_rootfs: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct FilesystemCheckpoint {
     pub build: Build,
     pub rootfs_diff: PathBuf,
     pub rootfs_bytes: u64,
     pub frozen: bool,
     pub vm_vcpus: i64,
+    pub rootfs_sealed: Ready,
+}
+
+impl std::fmt::Debug for FilesystemCheckpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesystemCheckpoint")
+            .field("build", &self.build)
+            .field("rootfs_diff", &self.rootfs_diff)
+            .field("rootfs_bytes", &self.rootfs_bytes)
+            .field("frozen", &self.frozen)
+            .field("vm_vcpus", &self.vm_vcpus)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +130,7 @@ impl Sandbox {
         let exported = match self.pause_vm().await {
             Ok(()) => {
                 freeze.paused = true;
-                self.export_filesystem(request, prepared.frozen).await
+                self.export_filesystem(request, prepared.frozen, true).await
             }
             Err(e) => Err(e),
         };
@@ -134,7 +149,7 @@ impl Sandbox {
         let quiesce = self.guest_quiesce(request.flags);
         let prepared = self.quiesce_guest(&quiesce, request).await?;
         let exported = match self.pause_vm().await {
-            Ok(()) => self.export_filesystem(request, prepared.frozen).await,
+            Ok(()) => self.export_filesystem(request, prepared.frozen, false).await,
             Err(e) => Err(e),
         };
         match exported {
@@ -192,6 +207,7 @@ impl Sandbox {
         &self,
         request: &FilesystemCheckpointRequest,
         frozen: bool,
+        in_place: bool,
     ) -> Result<FilesystemCheckpoint, String> {
         let client = self.resources.vm.as_ref().ok_or("firecracker is not running")?.client();
         std::fs::create_dir_all(&request.dir).map_err(|e| format!("create {}: {e}", request.dir.display()))?;
@@ -201,25 +217,28 @@ impl Sandbox {
             .await
             .map_err(|e| format!("error creating snapshot: {e}"))?;
         let started = Instant::now();
-        let exported = self.export_disk(&files.rootfs, request.build_id).await;
+        let defer = request.defer_rootfs && !in_place;
+        let exported = self.export_disk_with(&files.rootfs, request.build_id, defer).await;
         drop(std::fs::remove_file(&files.snapfile));
         ProcessRootfsOutcome {
             fs_only: true,
-            deferred: false,
-            in_place: true,
+            deferred: exported.as_ref().is_ok_and(|disk| disk.deferred),
+            in_place,
             success: exported.is_ok(),
             team_id: request.team_id.clone(),
         }
         .record(started.elapsed());
-        let Exported { header, bytes } = exported
+        let disk = exported
             .inspect_err(|_| files.remove())
-            .map_err(|e| format!("synchronous in-place rootfs export failed: {e}"))?;
+            .map_err(|e| export_failure(in_place, defer, e))?;
+        let Exported { header, bytes } = disk.exported;
         Ok(FilesystemCheckpoint {
             build: Build::filesystem_only(request.build_id, header),
             rootfs_diff: files.rootfs,
             rootfs_bytes: bytes,
             frozen,
             vm_vcpus: self.resolved_vm_vcpus,
+            rootfs_sealed: disk.sealed,
         })
     }
 
@@ -334,4 +353,12 @@ async fn within_state_flip(call: impl std::future::Future<Output = Result<(), St
     tokio::time::timeout(STATE_FLIP_TIMEOUT, call)
         .await
         .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()))
+}
+
+fn export_failure(in_place: bool, deferred: bool, error: String) -> String {
+    match (in_place, deferred) {
+        (true, _) => format!("synchronous in-place rootfs export failed: {error}"),
+        (false, true) => format!("deferred rootfs export setup failed: {error}"),
+        (false, false) => format!("synchronous rootfs export failed: {error}"),
+    }
 }

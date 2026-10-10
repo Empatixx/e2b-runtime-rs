@@ -21,8 +21,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Deferred/background rootfs export (reflink, `copy_file_range`) and async memfile header | perf |
-| Dedup of the memory diff against the parent memfile | later |
 | If write-protect is unavailable the resumed pause falls back to resident−empty (correct but large); surface it as a metric | API |
 | No KVM test with multiple memory regions (guests above the MMIO gap) | API |
 
@@ -57,8 +55,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Metrics keep the SDK default cardinality limit of 2000 series per interval: the Rust SDK preallocates by the limit, so it is not lifted for delta counters and histograms as upstream does | perf |
-| The disk estimate of a pause has no memfile dedup copy because the Rust node does not dedup memory diffs | later |
-| The rootfs seal duration metric (`snapshot.rootfs_seal.duration`) is missing because the rootfs seal is not deferred yet | perf |
 | No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
 
 ## Orchestrator: vCPU hotplug and filesystem boot

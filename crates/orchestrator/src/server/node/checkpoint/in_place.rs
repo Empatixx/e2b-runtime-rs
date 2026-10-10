@@ -170,6 +170,7 @@ impl Node {
         parent: &SandboxInfo,
         build_id: Uuid,
         flags: QuiesceFlags,
+        defer_rootfs: bool,
     ) -> Result<(FilesystemSnapshot, crate::sandbox::snapshot::Snapshot), String> {
         let dir = self.templates.instance_dir(build_id);
         let request = FilesystemCheckpointRequest {
@@ -178,6 +179,7 @@ impl Node {
             flags,
             team_id: parent.config.team_id.clone(),
             balloon_mode: sandbox.balloon_mode().to_owned(),
+            defer_rootfs,
         };
         let checkpoint = sandbox
             .pause_filesystem(&request)
@@ -218,6 +220,7 @@ impl Node {
             },
             team_id: parent.config.team_id.clone(),
             balloon_mode: balloon_mode.as_str().to_owned(),
+            defer_rootfs: false,
         };
         let (reply, checkpoint) = oneshot::channel();
         let stopped = || InPlaceFailure {
@@ -272,6 +275,7 @@ impl Node {
             rootfs_diff: (checkpoint.rootfs_bytes > 0).then(|| checkpoint.rootfs_diff.clone()),
             rootfs_bytes: checkpoint.rootfs_bytes,
             metadata_file,
+            rootfs_sealed: checkpoint.rootfs_sealed.clone(),
         };
         self.cache_filesystem_layer(&layer, &metadata, dir.to_path_buf())
             .map_err(|e| format!("error adding snapshot to template cache: {e}"))?;

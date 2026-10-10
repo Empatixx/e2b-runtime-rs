@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::FutureExt;
 use uuid::Uuid;
 
 use super::pause_disk::ROOTFS_OVERLAY_FILE;
@@ -77,7 +78,12 @@ impl Node {
     ) -> Result<(), String> {
         let build_id = layer.build.build_id;
         if let Some(diff) = &layer.rootfs_diff {
-            self.store.add_local(build_id, Artifact::Rootfs, diff)?;
+            match layer.rootfs_sealed.clone().now_or_never() {
+                None => self
+                    .store
+                    .add_local_when(build_id, Artifact::Rootfs, diff, layer.rootfs_sealed.clone()),
+                Some(sealed) => sealed.and_then(|()| self.store.add_local(build_id, Artifact::Rootfs, diff))?,
+            }
         }
         self.templates
             .add_filesystem_layer(layer.build.clone(), metadata.clone(), dir);
@@ -221,6 +227,7 @@ async fn filesystem_upload_attempt(
     storage: Storage,
     object_metadata: ObjectMetadata,
 ) -> Result<(), Failure> {
+    layer.rootfs_sealed.clone().await.map_err(Failure::Terminal)?;
     if !layer.exist() {
         return Err(Failure::Terminal("snapshot files are gone".to_owned()));
     }
