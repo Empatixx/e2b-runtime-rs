@@ -65,6 +65,15 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | `build-kernel-cmdline-args`, `build-cpu-template`, `free-page-reporting` and `free-page-hinting-config` are read from LaunchDarkly but not applied to the VM (`balloon` stays `{"reporting":false,"hinting":false}`) | template build |
 
+## Orchestrator: vCPU hotplug
+
+| Item | Target |
+|---|---|
+| No sandbox metrics observer: the `e2b.sandbox.cpu.possible`, `cpu.target`, `cpu.target_attempts` and `cpu.write_pending` gauges and the "CPU hotplug write stuck" warning from envd `/metrics` are missing | API |
+| A filesystem boot (reboot) keeps no `max_vcpus` inheritance (`rebootMaxVcpus`) and no `validateColdBootVcpus`, because the Rust node has no filesystem boot path | API |
+| `Cgroup::remove` consumes the cgroup, so a failed removal cannot be retried, and it does not `cgroup.kill` stray threads of the vcpu child | later |
+| The `resume-build` dev tool (`defaultRunVcpu`) has no Rust counterpart | later |
+
 ## Orchestrator: peer chunk sharing
 
 | Item | Target |

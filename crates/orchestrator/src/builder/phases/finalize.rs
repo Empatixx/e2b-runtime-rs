@@ -51,21 +51,14 @@ pub struct FinalizePhase {
 impl FinalizePhase {
     fn final_layer(&self, source: &LayerResult, hash: String) -> LayerResult {
         let settings = &self.build.settings;
-        let metadata = TemplateMetadata {
-            start: start_of(&source.metadata, &self.start_command, &self.ready_command),
-            template: TemplateVersions {
-                build_id: self.build_id.clone(),
-                kernel_version: settings.kernel_version.clone(),
-                firecracker_version: settings.firecracker_version.clone(),
-            },
-            cmdline_args: BTreeMap::new(),
-            balloon: Some(Balloon::default()),
-            cpu_template: None,
-            build_cpu_template: None,
-            ..source.metadata.clone()
+        let template = TemplateVersions {
+            build_id: self.build_id.clone(),
+            kernel_version: settings.kernel_version.clone(),
+            firecracker_version: settings.firecracker_version.clone(),
         };
+        let start = start_of(&source.metadata, &self.start_command, &self.ready_command);
         LayerResult {
-            metadata,
+            metadata: final_metadata(&source.metadata, start, template, self.build.vcpus),
             cached: false,
             hash,
         }
@@ -283,6 +276,24 @@ fn envd_defaults(context: &Context, context_defaults: bool) -> EnvdDefaults {
     }
 }
 
+fn final_metadata(
+    source: &TemplateMetadata,
+    start: Option<Start>,
+    template: TemplateVersions,
+    vcpus: i64,
+) -> TemplateMetadata {
+    TemplateMetadata {
+        start,
+        template,
+        cmdline_args: BTreeMap::new(),
+        balloon: Some(Balloon::default()),
+        cpu_template: None,
+        build_cpu_template: None,
+        ..source.clone()
+    }
+    .with_vcpu_count(vcpus)
+}
+
 fn configure_script(template_id: &str, build_id: &str) -> String {
     CONFIGURE_SCRIPT
         .replace("{{ .TemplateID }}", template_id)
@@ -358,6 +369,24 @@ mod tests {
             start_command: start_command.to_owned(),
             ready_command: ready_command.to_owned(),
             context: Context::default(),
+        }
+    }
+
+    #[test]
+    fn the_layer_records_the_vm_this_build_boots_not_the_cached_one() {
+        for (name, cached, build) in [
+            ("rebuilt larger", 2, 8),
+            ("rebuilt smaller", 8, 2),
+            ("unrecorded", 0, 4),
+        ] {
+            let source = TemplateMetadata {
+                vcpu_count: cached,
+                ..TemplateMetadata::default()
+            };
+
+            let metadata = final_metadata(&source, None, TemplateVersions::default(), build);
+
+            assert_eq!(metadata.vcpu_count, build, "{name}");
         }
     }
 

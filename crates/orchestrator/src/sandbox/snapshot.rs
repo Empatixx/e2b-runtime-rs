@@ -30,6 +30,7 @@ pub struct Snapshot {
     pub memory_bytes: u64,
     pub rootfs_bytes: u64,
     pub tracked_writes: bool,
+    pub vm_vcpus: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +167,7 @@ impl Sandbox {
             memory_bytes,
             rootfs_bytes: rootfs.bytes,
             tracked_writes,
+            vm_vcpus: self.resolved_vm_vcpus,
         };
         Ok((snapshot, memfile_ready))
     }

@@ -322,6 +322,25 @@ async fn check_node_services(cluster: &Cluster) {
     );
 }
 
+async fn check_vcpu_limits(cluster: &mut Cluster, build: Uuid) {
+    for (vcpu, max_vcpus, text) in [
+        (0, 0, "vcpu 0 must be at least 1"),
+        (-1, 0, "vcpu -1 must be at least 1"),
+        (4, 2, "vcpu 4 must be 1..max_vcpus 2"),
+        (2, 33, "max_vcpus 33 is above the 32 a VM can have"),
+        (33, 0, "vcpu 33 is above the 32 a VM can have"),
+    ] {
+        let mut request = create_request("grpc-vcpus", build, Duration::from_secs(600));
+        if let Some(sandbox) = request.sandbox.as_mut() {
+            sandbox.vcpu = vcpu;
+            sandbox.max_vcpus = max_vcpus;
+            sandbox.snapshot = true;
+        }
+        let refused = cluster.client.create(request).await.unwrap_err();
+        assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, text));
+    }
+}
+
 async fn running_envd(pool: Pool) -> String {
     let client = reqwest::Client::new();
     let mut failures = Vec::new();
@@ -450,6 +469,7 @@ async fn sandbox_lifecycle_over_grpc() {
     let base = running_envd(pool).await;
     put_note(&base, "before pause").await;
     check_node_services(&cluster).await;
+    check_vcpu_limits(&mut cluster, build).await;
 
     let listed = cluster.client.list(()).await.unwrap().into_inner().sandboxes;
     assert_eq!(

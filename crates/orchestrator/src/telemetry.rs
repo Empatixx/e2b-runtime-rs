@@ -1,4 +1,5 @@
 pub mod endpoint;
+pub mod fc;
 pub mod grpc;
 pub mod identity;
 pub mod logs;

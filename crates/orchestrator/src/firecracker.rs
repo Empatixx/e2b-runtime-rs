@@ -9,4 +9,5 @@ pub mod memory_info;
 pub mod mmds;
 #[cfg(target_os = "linux")]
 pub mod process;
+pub mod vcpus;
 pub mod version;

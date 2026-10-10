@@ -1,3 +1,5 @@
+pub mod cpu_limit;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -5,11 +7,14 @@ use std::path::{Path, PathBuf};
 use crate::hoststats::{CgroupSample, parse_cpu_stat};
 
 const ROOT: &str = "/sys/fs/cgroup/e2b";
+const PROC_ROOT: &str = "/proc/";
 const CONTROLLERS: &str = "+cpu +memory";
 
 pub struct Cgroup {
     path: PathBuf,
     peak: Option<File>,
+    proc_root: PathBuf,
+    vcpu_threads_confined: bool,
 }
 
 pub struct CgroupStats {
@@ -31,7 +36,12 @@ impl Cgroup {
             .open(path.join("memory.peak"))
             .inspect_err(|e| tracing::warn!(error = %e, "failed to open memory.peak for reset"))
             .ok();
-        Ok(Self { path, peak })
+        Ok(Self {
+            path,
+            peak,
+            proc_root: PathBuf::from(PROC_ROOT),
+            vcpu_threads_confined: false,
+        })
     }
 
     pub fn stats(&self) -> CgroupStats {
@@ -56,6 +66,7 @@ impl Cgroup {
 
     pub fn remove(mut self) -> io::Result<()> {
         self.peak.take();
+        self.remove_vcpu_cgroup()?;
         std::fs::remove_dir(&self.path)
     }
 }

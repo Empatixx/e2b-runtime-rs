@@ -37,6 +37,8 @@ pub struct TemplateMetadata {
     pub cpu_template: Option<CpuTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_cpu_template: Option<CpuTemplate>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vcpu_count: i64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub filesystem_only: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -84,6 +86,10 @@ pub struct Context {
     pub workdir: Option<String>,
     #[serde(default, skip_serializing_if = "is_nil_or_empty")]
     pub env_vars: Option<BTreeMap<String, String>>,
+}
+
+fn is_zero(count: &i64) -> bool {
+    *count == 0
 }
 
 fn is_nil_or_empty(env_vars: &Option<BTreeMap<String, String>>) -> bool {
@@ -183,6 +189,7 @@ impl TemplateMetadata {
             balloon: self.balloon,
             cpu_template: self.cpu_template.clone(),
             build_cpu_template: self.build_cpu_template.clone(),
+            vcpu_count: self.vcpu_count,
             ..Self::default()
         }
     }
@@ -193,6 +200,13 @@ impl TemplateMetadata {
             prefetch: None,
             filesystem_only: false,
             fs_quiesced: false,
+            ..self.clone()
+        }
+    }
+
+    pub fn with_vcpu_count(&self, vcpus: i64) -> Self {
+        Self {
+            vcpu_count: vcpus,
             ..self.clone()
         }
     }
@@ -464,5 +478,60 @@ mod tests {
 
         assert!(json.contains(r#""start":{"start_command":"npm start","ready_command":"","context":{"user":"user"}}"#));
         assert_eq!(TemplateMetadata::from_json(json.as_bytes()).unwrap(), started);
+    }
+
+    #[test]
+    fn every_copy_constructor_carries_the_vcpu_count_but_a_from_template_build_does_not() {
+        let base = TemplateMetadata {
+            version: CURRENT_VERSION,
+            template: TemplateVersions {
+                build_id: "build-1".to_owned(),
+                ..TemplateVersions::default()
+            },
+            vcpu_count: 16,
+            ..TemplateMetadata::default()
+        };
+        let next = TemplateVersions {
+            build_id: "build-2".to_owned(),
+            ..TemplateVersions::default()
+        };
+
+        for (name, copy) in [
+            ("same_version", base.same_version(next.clone())),
+            ("new_version", base.new_version(next)),
+            ("with_prefetch", base.with_prefetch(Some(MemoryPrefetch::default()), "")),
+            (
+                "with_vcpu_count",
+                TemplateMetadata {
+                    version: CURRENT_VERSION,
+                    ..TemplateMetadata::default()
+                }
+                .with_vcpu_count(16),
+            ),
+        ] {
+            assert_eq!(copy.vcpu_count, 16, "{name}");
+        }
+        assert_eq!(base.based_on("a", "build-0").vcpu_count, 0);
+    }
+
+    #[test]
+    fn the_vcpu_count_is_written_after_the_cpu_templates_and_skipped_when_unrecorded() {
+        let json = |count| String::from_utf8(paused().with_vcpu_count(count).to_json()).unwrap();
+
+        assert!(json(4).ends_with(r#""vcpu_count":4}"#), "{}", json(4));
+        assert!(!json(0).contains("vcpu_count"));
+        assert_eq!(TemplateMetadata::from_json(json(4).as_bytes()).unwrap().vcpu_count, 4);
+    }
+
+    #[test]
+    fn a_v1_lineage_keeps_its_version_and_loses_the_count() {
+        let stamped = TemplateMetadata::v1().with_vcpu_count(4);
+        assert_eq!(stamped.version, DEPRECATED_VERSION);
+        assert_eq!(stamped.vcpu_count, 4);
+
+        let decoded = TemplateMetadata::from_json(&stamped.to_json()).unwrap();
+
+        assert_eq!(decoded.version, DEPRECATED_VERSION);
+        assert_eq!(decoded.vcpu_count, 0);
     }
 }

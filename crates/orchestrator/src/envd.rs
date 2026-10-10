@@ -1,4 +1,5 @@
 pub mod body;
+pub mod cpus;
 pub mod files;
 pub mod process;
 pub mod version;
@@ -20,6 +21,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 
 pub const ENVD_PORT: u16 = 49983;
+const CPUS_HEADER: &str = "x-envd-cpus";
 const RETRY_DELAY: Duration = Duration::from_millis(5);
 const DEFAULT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -39,6 +41,13 @@ pub struct EnvdInit {
     pub hyperloop_ip: Option<String>,
     pub volume_mounts: Vec<VolumeMount>,
     pub request_timeout: Option<Duration>,
+    pub cpu_count: Option<i64>,
+}
+
+#[derive(Debug)]
+pub struct Initialised {
+    pub attempts: u32,
+    pub cpus_header: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -48,6 +57,13 @@ pub struct VolumeMount {
 }
 
 impl EnvdInit {
+    pub fn with_cpu_count(&self, cpu_count: i64) -> Self {
+        Self {
+            cpu_count: Some(cpu_count),
+            ..self.clone()
+        }
+    }
+
     pub fn body(&self, timestamp: DateTime<Utc>) -> Value {
         let mut body = json!({
             "timestamp": rfc3339_nano(timestamp.into()),
@@ -73,6 +89,9 @@ impl EnvdInit {
         if !self.volume_mounts.is_empty() {
             body["volumeMounts"] = json!(self.volume_mounts);
         }
+        self.cpu_count
+            .iter()
+            .for_each(|cpu_count| body["cpuCount"] = json!(cpu_count));
         body
     }
 }
@@ -81,12 +100,17 @@ pub fn hash_access_token(token: &str) -> String {
     format!("{:x}", Sha512::digest(token.as_bytes()))
 }
 
-pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<u32, String> {
+pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<Initialised, String> {
     let mut attempts = 0;
     loop {
         attempts += 1;
         match attempt(address, settings, deadline).await {
-            Ok(response) if response.status == 204 => return Ok(attempts),
+            Ok(response) if response.status == 204 => {
+                return Ok(Initialised {
+                    attempts,
+                    cpus_header: response.cpus_header,
+                });
+            }
             Ok(response) => {
                 tracing::error!(
                     status_code = response.status,
@@ -106,6 +130,7 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
 struct InitResponse {
     status: u16,
     body: String,
+    cpus_header: String,
 }
 
 async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<InitResponse, String> {
@@ -131,11 +156,18 @@ async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<InitRespo
         .await
         .map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
+    let cpus_header = response.headers().get(CPUS_HEADER).map_or_else(String::new, |value| {
+        String::from_utf8_lossy(value.as_bytes()).into_owned()
+    });
     let body = match status {
         204 => String::new(),
         _ => body::error_body(BodyDataStream::new(response.into_body())).await,
     };
-    Ok(InitResponse { status, body })
+    Ok(InitResponse {
+        status,
+        body,
+        cpus_header,
+    })
 }
 
 fn init_request(address: SocketAddr, settings: &EnvdInit) -> Result<Request<Full<Bytes>>, String> {
@@ -276,6 +308,34 @@ mod tests {
     }
 
     #[test]
+    fn the_cpu_count_is_sent_when_set() {
+        let timestamp = Utc.timestamp_opt(1_791_540_000, 1).unwrap();
+
+        assert_eq!(EnvdInit::default().with_cpu_count(2).body(timestamp)["cpuCount"], 2);
+        assert!(EnvdInit::default().body(timestamp).get("cpuCount").is_none());
+    }
+
+    #[tokio::test]
+    async fn init_hands_back_the_cpus_header() {
+        let (listener, address) = listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            while line != "\r\n" {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+            }
+            let response = "HTTP/1.1 204 No Content\r\nx-envd-cpus: {\"target\":2}\r\n\r\n";
+            reader.get_mut().write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let initialised = init(address, &settings(), soon(Duration::from_secs(5))).await.unwrap();
+
+        assert_eq!(initialised.cpus_header, r#"{"target":2}"#);
+    }
+
+    #[test]
     fn hash_matches_envd() {
         assert_eq!(
             hash_access_token("abc"),
@@ -312,7 +372,10 @@ mod tests {
         let settings = settings();
         let (initialised, _received) = tokio::join!(init(address, &settings, soon(Duration::from_secs(5))), late_envd);
 
-        assert!(initialised.unwrap() > 1, "the first attempts ran before envd listened");
+        assert!(
+            initialised.unwrap().attempts > 1,
+            "the first attempts ran before envd listened"
+        );
     }
 
     #[tokio::test]

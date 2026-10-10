@@ -31,7 +31,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/featureflags.rs  LaunchDarkly client (featureflags/client.rs: offline fallbacks, overrides), contexts.rs (sandbox,
                        team, service, kind contexts), flags.rs (every upstream flag with its fallback), prefetch.rs
   src/telemetry.rs     OpenTelemetry: metrics.rs, traces.rs, logs.rs (tracing bridge with target/level filters),
-                       endpoint.rs (OTEL_COLLECTOR_GRPC_ENDPOINT), identity.rs (resource), grpc.rs (otelgrpc server
+                       endpoint.rs (OTEL_COLLECTOR_GRPC_ENDPOINT), fc.rs (vcpu_limit counter), identity.rs (resource), grpc.rs (otelgrpc server
                        spans, traceparent, rpc.server.duration), report.rs (span errors), server/ (upstream instruments)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
@@ -90,7 +90,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (TemplateCache: 25h sliding TTL, Arc pins, 1 min grace, add_snapshot), metadata.rs
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
-  src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset
+  src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset;
+                       cgroup/cpu_limit.rs (cpu.max quota, threaded vcpu child holding the fc_vcpu threads)
   src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (FC output to tracing with a
                        2000-byte tail and the FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
   src/volumes.rs       VolumeService (upstream pkg/volumes): service.rs (VolumeServer, volume and path confinement, gRPC
@@ -101,22 +102,25 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        chrooted.rs + chrooted/ (upstream pkg/chrooted: Chrooted confined by openat2 RESOLVE_IN_ROOT
                        through rustix; resolve.rs symlink walk, remove.rs, names.rs, info.rs, file.rs, metrics.rs);
                        the PERSISTENT_VOLUME_MOUNTS config is server/config/volume_mounts.rs
-                       memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
+                       memory_info.rs (GET /memory, /memory/mappings), mmds.rs, vcpus.rs (MAX_VCPUS, machine sizes, fc_vcpu
+                       thread count, snapshot capacity refusal), process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed
                        pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
                        trace.rs (PrefetchTracker, Trace intersection), prefetch.rs + prefetch/ (source.rs init/last-cycle/both,
                        last_cycle.rs, plan.rs, flags.rs worker settings)
   src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0);
-                       envd/process.rs (Connect process.Start client, bash -l -c as a user)
+                       envd/process.rs (Connect process.Start client, bash -l -c as a user), body.rs (bounded reads of
+                       guest responses), cpus.rs (X-Envd-Cpus check)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
+                       vcpu_limit.rs (resume VM size, boot quota, confine vCPU threads),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload;
                        snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff),
                        resume.rs (snapshot load over uffd),
                        harvest.rs + harvest/ (pause harvest: throwaway deny-egress resume recording a fresh trace)
   src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution,
-                       config/binaries.rs: kernel and Firecracker per version),
+                       config/binaries.rs: kernel and Firecracker per version), vcpus.rs (Create vcpu validation),
                        upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
                        node/checkpoint.rs (Checkpoint resume-fresh), lifecycle.rs (task per sandbox: commands, end_time
                        expiry, death watch), service.rs (SandboxService), registry.rs (Go map semantics: reserve,

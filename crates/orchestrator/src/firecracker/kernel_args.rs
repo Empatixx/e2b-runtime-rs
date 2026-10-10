@@ -5,7 +5,11 @@ use crate::network::slot::{GUEST_IP, TAP_IP, TAP_NAME};
 const GUEST_NETMASK: &str = "255.255.255.252";
 const GUEST_DEVICE: &str = "eth0";
 const EXT4_ROOT_FLAGS: &str = "discard";
-const RESERVED: [&str; 11] = [
+const RESERVED: [&str; 15] = [
+    "maxcpus",
+    "nr_cpus",
+    "possible_cpus",
+    "nosmp",
     "init",
     "clocksource",
     "root",
@@ -25,6 +29,7 @@ pub struct BootOptions {
     pub kernel_logs: bool,
     pub systemd_to_kernel_logs: bool,
     pub kvm_clock: bool,
+    pub boot_cpus: i64,
     pub cmdline_args: BTreeMap<String, String>,
 }
 
@@ -35,6 +40,7 @@ impl BootOptions {
             kernel_logs: false,
             systemd_to_kernel_logs: false,
             kvm_clock: true,
+            boot_cpus: 0,
             cmdline_args: BTreeMap::new(),
         }
     }
@@ -66,6 +72,9 @@ impl BootOptions {
         }
         if self.systemd_to_kernel_logs {
             args.insert("systemd.journald.forward_to_console".to_owned(), String::new());
+        }
+        if self.boot_cpus > 0 {
+            args.insert("maxcpus".to_owned(), self.boot_cpus.to_string());
         }
         if self.kernel_logs || self.systemd_to_kernel_logs {
             args.remove("quiet");
@@ -139,5 +148,35 @@ mod tests {
             validate_cmdline_args(&options.cmdline_args),
             Err("guest kernel cmdline parameter \"init\" is reserved by the orchestrator".to_owned())
         );
+    }
+
+    #[test]
+    fn every_cpu_parameter_the_orchestrator_owns_is_reserved() {
+        for name in ["maxcpus", "nr_cpus", "possible_cpus", "nosmp"] {
+            let args = BTreeMap::from([(name.to_owned(), "1".to_owned())]);
+
+            assert_eq!(
+                validate_cmdline_args(&args),
+                Err(format!(
+                    "guest kernel cmdline parameter \"{name}\" is reserved by the orchestrator"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn boot_cpus_cap_the_cpus_the_guest_brings_up() {
+        let options = BootOptions {
+            boot_cpus: 2,
+            cmdline_args: BTreeMap::from([("maxcpus".to_owned(), "16".to_owned())]),
+            ..BootOptions::new("/sbin/init")
+        };
+
+        assert!(
+            options.kernel_args("arm64").contains(" maxcpus=2 "),
+            "{}",
+            options.kernel_args("arm64")
+        );
+        assert!(!BootOptions::new("/sbin/init").kernel_args("arm64").contains("maxcpus"));
     }
 }

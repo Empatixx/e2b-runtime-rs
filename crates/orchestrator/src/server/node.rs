@@ -34,6 +34,7 @@ use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
+use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::featureflags::{FeatureFlags, FlagContext};
 use crate::firecracker::version::{supports_huge_pages, supports_memfd};
@@ -109,6 +110,7 @@ struct ResumeRequest<'a> {
     snapfile: &'a Path,
     prefetch: Option<MemoryPrefetch>,
     prefetch_settings: PrefetchSettings,
+    recorded_vm_vcpus: i64,
     slot: Slot,
     init: EnvdInit,
     lifecycle: &'a Lifecycle,
@@ -337,6 +339,10 @@ impl Node {
     }
 
     fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
+        let metadata = match local.snapshot.vm_vcpus {
+            0 => metadata,
+            vcpus => metadata.with_vcpu_count(vcpus),
+        };
         let metadata_file = metadata_path(local);
         std::fs::write(&metadata_file, metadata.to_json())
             .map_err(|e| format!("write {}: {e}", metadata_file.display()))?;
@@ -594,6 +600,7 @@ impl Node {
                 .map_err(|e| StartFailure::Failed(format!("failed to deny egress for resumed sandbox: {e}")))?;
         }
         let prefetch = metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned();
+        let recorded_vm_vcpus = metadata.as_ref().map_or(0, |metadata| metadata.vcpu_count);
         let prefetch_settings = self.prefetch_settings(&config);
         let init = EnvdInit {
             access_token: config.envd_access_token.clone(),
@@ -611,12 +618,13 @@ impl Node {
                 snapfile: &snapfile,
                 prefetch,
                 prefetch_settings,
+                recorded_vm_vcpus,
                 slot,
                 init,
                 lifecycle: &lifecycle,
             })
             .await
-            .map_err(StartFailure::Failed)?;
+            .map_err(|e| resume_failure(&config, &build, e))?;
         let slot = lease.keep().ok_or_else(slot_taken_back)?;
         Ok(lifecycle::spawn(
             sandbox,
@@ -655,6 +663,7 @@ impl Node {
             snapfile,
             prefetch,
             prefetch_settings,
+            recorded_vm_vcpus,
             slot,
             init,
             lifecycle,
@@ -685,6 +694,10 @@ impl Node {
             .envd_timeout(self.runtime_flags.envd_timeout())
             .maybe_prefetch(prefetch)
             .prefetch_settings(prefetch_settings)
+            .vcpus(config.vcpu.max(0) as u32)
+            .max_vcpus(config.max_vcpus.max(0) as u32)
+            .recorded_vm_vcpus(recorded_vm_vcpus)
+            .envd_version(&config.envd_version)
             .use_memfd(
                 supports_memfd(&config.firecracker_version)
                     && self.runtime_flags.use_memfd(FlagContext::sandbox_runtime(
@@ -700,6 +713,24 @@ impl Node {
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await
+    }
+}
+
+fn resume_failure(config: &SandboxConfig, build: &Build, error: String) -> StartFailure {
+    match is_exceeds_snapshot(&error) {
+        true => {
+            tracing::warn!(
+                error = %error,
+                vcpu = config.vcpu,
+                max_vcpus = config.max_vcpus,
+                sandbox_id = %config.sandbox_id,
+                build_id = %build.build_id,
+                template_id = %config.template_id,
+                "resume refused: vcpu exceeds snapshot"
+            );
+            StartFailure::Rejected(Status::invalid_argument(error))
+        }
+        false => StartFailure::Failed(error),
     }
 }
 
@@ -890,6 +921,7 @@ mod tests {
                 memory_bytes: 0,
                 rootfs_bytes: 0,
                 tracked_writes: false,
+                vm_vcpus: 0,
             },
             files: SnapshotFiles {
                 snapfile: dir.join("snapfile"),

@@ -3,19 +3,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use opentelemetry::KeyValue;
 use tokio::sync::oneshot;
 
 use super::Sandbox;
 use super::config::{SandboxBuilder, sandbox_builder};
+use super::vcpu_limit::{limit_vcpus_before_resume, resolve_vm_vcpus, resume_vm_vcpus};
 use crate::block::build_file::BuildFile;
 use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
+use crate::firecracker::process::FirecrackerProcess;
+use crate::firecracker::vcpus::{exceeds_snapshot_error, vcpu_cap_resume_error};
 use crate::memory::handshake::UffdListener;
 use crate::memory::prefetch::plan::PrefetchPlan;
 use crate::memory::prefetch::{PrefetchStats, fetch_only, prefetch};
 use crate::memory::server::{MemoryServer, MemoryWatch, Prefaulter};
 use crate::memory::trace::Trace;
 use crate::system::all_ok;
+use crate::telemetry::report::report_error;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const NO_DEVICE: &str = "/dev/null";
@@ -32,6 +37,12 @@ impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
 
 impl Sandbox {
     async fn start_resumed(&mut self, snapfile: &Path) -> Result<(), String> {
+        self.resolved_vm_vcpus = resume_vm_vcpus(
+            i64::from(self.config.vcpus),
+            i64::from(self.config.max_vcpus),
+            self.config.recorded_vm_vcpus,
+        )?;
+        self.create_cgroup(self.resolved_vm_vcpus > i64::from(self.config.vcpus))?;
         let memfile = self.config.memfile.clone().ok_or("memfile is required to resume")?;
         std::fs::create_dir_all(&self.config.work_dir)
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
@@ -67,6 +78,7 @@ impl Sandbox {
                 .is_some_and(|memory| memory.memfd().is_some()),
         );
         client.set_rate_limits().await?;
+        self.cap_vcpus_before_resume()?;
         client
             .resume()
             .await
@@ -78,6 +90,27 @@ impl Sandbox {
         self.phases.mark("envd_init");
         self.phases.note("faults", self.faults_served());
         self.phases.note("prefetched", self.prefetch_stats.installed());
+        Ok(())
+    }
+
+    fn cap_vcpus_before_resume(&mut self) -> Result<(), String> {
+        let pid = self.resources.vm.as_ref().and_then(FirecrackerProcess::pid);
+        let recorded = self.config.recorded_vm_vcpus > 0;
+        let target = i64::from(self.config.vcpus);
+        let snapshot = pid.map_or(self.resolved_vm_vcpus, |pid| {
+            resolve_vm_vcpus(pid, &self.config.id, self.resolved_vm_vcpus, recorded)
+        });
+        self.resolved_vm_vcpus = snapshot;
+        let capped = limit_vcpus_before_resume(self.resources.cgroup.as_mut(), &self.config.id, target, snapshot);
+        vcpu_cap_resume_error(capped.err(), self.config.max_vcpus > 0)
+            .map_err(|e| format!("failed to start FC: {e}"))?;
+        if snapshot < target {
+            report_error(
+                "resumed with fewer vcpus than requested",
+                Some(&exceeds_snapshot_error(snapshot, target)),
+                &[KeyValue::new("sandbox.id", self.config.id.clone())],
+            );
+        }
         Ok(())
     }
 

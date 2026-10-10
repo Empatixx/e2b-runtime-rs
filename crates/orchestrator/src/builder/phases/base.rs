@@ -93,6 +93,7 @@ impl BaseLayers<'_> {
                 env_vars: Some(BTreeMap::new()),
             },
             from_image: Some(image.to_owned()),
+            vcpu_count: self.request.vcpus,
             ..TemplateMetadata::default()
         }
     }
@@ -261,6 +262,24 @@ mod tests {
             alias: "base".to_owned(),
             build_id: "b1".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_fresh_image_layer_records_the_vm_it_will_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(dir.path()).unwrap();
+        let request = request(image(), false);
+        let index = LayerIndex::new(storage.clone(), storage, "scope");
+
+        let metadata = BaseLayers {
+            index: &index,
+            request: &request,
+            kernel_version: "vmlinux-6.1.158",
+            firecracker_version: "v1.14-0.2.0",
+        }
+        .fresh_metadata("debian:12");
+
+        assert_eq!(metadata.vcpu_count, 2);
     }
 
     #[tokio::test]

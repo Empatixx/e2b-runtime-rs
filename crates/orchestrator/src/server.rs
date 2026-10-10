@@ -25,3 +25,4 @@ pub mod status;
 pub mod upload;
 pub mod uploads;
 pub mod user_error;
+pub mod vcpus;

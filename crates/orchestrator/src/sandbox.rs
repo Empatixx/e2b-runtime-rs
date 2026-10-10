@@ -3,18 +3,23 @@ pub mod harvest;
 pub mod resources;
 pub mod resume;
 pub mod snapshot;
+pub mod vcpu_limit;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use opentelemetry::KeyValue;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
 use self::config::{Rootfs, SandboxBuilder, SandboxConfig, sandbox_builder};
 use self::resources::Resources;
+use self::vcpu_limit::{boot_cpu_quota, guest_cpu_count, move_limit_to_vcpu_threads, record_boot_failure};
 use crate::builder::config::host_arch;
 use crate::cgroup::Cgroup;
+use crate::cgroup::cpu_limit::set_sandbox_cpu_limit;
+use crate::envd::cpus::verify_envd_cpu_count;
 use crate::envd::{self, ENVD_PORT};
 use crate::exposure::nbd::expose;
 use crate::firecracker::client::FirecrackerClient;
@@ -25,6 +30,7 @@ use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::prefetch::PrefetchStats;
 use crate::phases::PhaseTimer;
+use crate::telemetry::report::report_error;
 
 pub struct Death {
     pub reason: String,
@@ -37,6 +43,7 @@ pub struct Sandbox {
     resources: Resources,
     phases: PhaseTimer,
     prefetch_stats: Arc<PrefetchStats>,
+    resolved_vm_vcpus: i64,
 }
 
 impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
@@ -119,7 +126,9 @@ impl Sandbox {
     }
 
     fn new(mut config: SandboxConfig) -> Self {
+        let resolved_vm_vcpus = i64::from(config.vcpus).max(i64::from(config.max_vcpus));
         Self {
+            resolved_vm_vcpus,
             resources: Resources {
                 held: std::mem::take(&mut config.held),
                 ..Resources::default()
@@ -158,14 +167,24 @@ impl Sandbox {
     }
 
     async fn start(&mut self) -> Result<(), String> {
+        let target_vcpus = i64::from(self.config.vcpus);
+        let cpu_quota = boot_cpu_quota(target_vcpus, self.resolved_vm_vcpus);
+        self.create_cgroup(cpu_quota > 0)?;
         let rootfs = self.attach_disk_and_slot().await?;
         if let Some(hook) = self.config.pre_boot.take() {
             hook(rootfs.clone())
                 .await
                 .map_err(|e| format!("pre-boot hook failed: {e}"))?;
         }
+        self.limit_cgroup_before_boot(cpu_quota)?;
         let client = self.spawn_firecracker(rootfs).await?;
         self.boot(&client).await?;
+        move_limit_to_vcpu_threads(
+            self.resources.cgroup.as_mut(),
+            &self.config.id,
+            cpu_quota,
+            self.resolved_vm_vcpus,
+        );
         match self.config.wait_for_envd {
             true => self.wait_for_envd().await,
             false => Ok(()),
@@ -198,7 +217,7 @@ impl Sandbox {
     async fn spawn_firecracker(&mut self, rootfs: PathBuf) -> Result<FirecrackerClient, String> {
         std::fs::create_dir_all(&self.config.work_dir)
             .map_err(|e| format!("create work dir {}: {e}", self.config.work_dir.display()))?;
-        let cgroup = self.create_cgroup();
+        let cgroup = self.resources.cgroup.as_ref().map(|cgroup| cgroup.path().to_owned());
         let launch = Launch::builder()
             .binary(&self.config.firecracker)
             .socket(self.config.work_dir.join("firecracker.sock"))
@@ -214,20 +233,37 @@ impl Sandbox {
         Ok(self.resources.vm.insert(vm).client())
     }
 
-    fn create_cgroup(&mut self) -> Option<PathBuf> {
-        Cgroup::create(&self.config.cgroup_name)
-            .inspect_err(
-                |e| tracing::warn!(sandbox = %self.config.id, error = %e, "could not create the sandbox cgroup"),
-            )
-            .ok()
-            .map(|cgroup| self.resources.cgroup.insert(cgroup).path().to_owned())
+    fn create_cgroup(&mut self, needs_limit: bool) -> Result<(), String> {
+        match Cgroup::create(&self.config.cgroup_name) {
+            Ok(cgroup) => {
+                self.resources.cgroup = Some(cgroup);
+                Ok(())
+            }
+            Err(e) if needs_limit => Err(format!("failed to create cgroup for the vcpu limit: {e}")),
+            Err(e) => {
+                tracing::warn!(sandbox = %self.config.id, error = %e, "could not create the sandbox cgroup");
+                Ok(())
+            }
+        }
+    }
+
+    fn limit_cgroup_before_boot(&mut self, cpu_quota: i64) -> Result<(), String> {
+        if cpu_quota <= 0 {
+            return Ok(());
+        }
+        set_sandbox_cpu_limit(self.resources.cgroup.as_ref(), cpu_quota).map_err(|e| {
+            record_boot_failure();
+            format!("error limiting sandbox cgroup before boot: {e}")
+        })?;
+        self.config.boot.boot_cpus = i64::from(self.config.vcpus);
+        Ok(())
     }
 
     async fn boot(&self, client: &FirecrackerClient) -> Result<(), String> {
         let vm_config = VmConfig::builder()
             .kernel(GUEST_KERNEL)
             .rootfs(GUEST_ROOTFS)
-            .vcpus(self.config.vcpus)
+            .vcpus(self.resolved_vm_vcpus as u32)
             .memory_mib(self.config.memory_mib)
             .boot_args(self.config.boot.kernel_args(host_arch()))
             .maybe_io_engine(self.config.io_engine.as_deref())
@@ -256,14 +292,36 @@ impl Sandbox {
     pub async fn wait_for_envd(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + self.config.envd_timeout;
         let address = self.envd_address();
+        let settings = self.config.envd.with_cpu_count(self.guest_cpu_count());
         let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;
         let initialised = tokio::select! {
-            initialised = envd::init(address, &self.config.envd, deadline) => initialised,
+            initialised = envd::init(address, &settings, deadline) => initialised,
             exited = vm.exited() => return Err(exited.message),
         };
-        let attempts = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
-        self.phases.note("envd_attempts", attempts);
+        let initialised = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
+        self.phases.note("envd_attempts", initialised.attempts);
+        self.verify_cpu_count(&initialised.cpus_header);
         Ok(())
+    }
+
+    fn guest_cpu_count(&self) -> i64 {
+        guest_cpu_count(self.resolved_vm_vcpus, i64::from(self.config.vcpus))
+    }
+
+    fn verify_cpu_count(&self, header: &str) {
+        verify_envd_cpu_count(header, self.guest_cpu_count(), self.resolved_vm_vcpus)
+            .err()
+            .iter()
+            .for_each(|e| {
+                report_error(
+                    "envd did not take the cpu count",
+                    Some(e.as_str()),
+                    &[
+                        KeyValue::new("sandbox.id", self.config.id.clone()),
+                        KeyValue::new("envd.version", self.config.envd_version.clone()),
+                    ],
+                )
+            });
     }
 
     fn console_tail(&self) -> String {

@@ -9,6 +9,7 @@ use super::build_id;
 use super::lifecycle::{Command, SandboxHandle};
 use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
 use super::scheduling::from_headers;
+use super::vcpus::validate_vcpus;
 use crate::envd::version::check_for_snapshot;
 use crate::events::{KILLED, SandboxEvent, UPDATED};
 use crate::go_time::rfc3339;
@@ -132,6 +133,7 @@ impl SandboxServer {
         let config = request
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox config is required"))?;
+        validate_vcpus(config.vcpu, config.max_vcpus)?;
         let lifetime = Lifetime {
             start: request.start_time.map_or(SystemTime::UNIX_EPOCH, system_time),
             end: request.end_time.map_or(SystemTime::UNIX_EPOCH, system_time),
