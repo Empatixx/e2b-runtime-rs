@@ -125,10 +125,9 @@ impl Process for ProcessService {
         let user = request_user(ctx.extensions().get::<User>(), &defaults.user)?;
         let request = request.to_owned_message();
         let process_type = process_type(&request);
-        let placement = self.state.freezer.manager().placement(process_type);
         let launch = Launch {
             request,
-            placement,
+            freezer: self.state.freezer.clone(),
             process_type,
             user,
             workdir: defaults.workdir,
@@ -136,7 +135,7 @@ impl Process for ProcessService {
             deadline: ctx.deadline(),
         };
 
-        let (process, data) = spawn(launch, self.processes.clone())?;
+        let (process, data) = spawn(launch, self.processes.clone()).await?;
         connectrpc::Response::ok(live_events(
             process,
             data,

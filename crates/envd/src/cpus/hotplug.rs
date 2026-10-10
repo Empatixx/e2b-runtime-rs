@@ -798,9 +798,14 @@ mod tests {
         let blocker = gate.handle();
         let offlined = Arc::new(AtomicBool::new(false));
         let seen = offlined.clone();
+        let stuck = Arc::new(AtomicBool::new(false));
+        let entered = stuck.clone();
         sys.set_hook(move |cpu, online| {
             match (cpu, online) {
-                (2, true) => blocker.wait(),
+                (2, true) => {
+                    entered.store(true, Ordering::SeqCst);
+                    blocker.wait()
+                }
                 (2, false) => seen.store(true, Ordering::SeqCst),
                 _ => {}
             }
@@ -810,7 +815,7 @@ mod tests {
         fixture.start();
 
         fixture.manager.set_target(3).unwrap();
-        eventually(|| fixture.status().write_pending > Duration::ZERO).await;
+        eventually(|| stuck.load(Ordering::SeqCst)).await;
         fixture.manager.set_target(2).unwrap();
 
         gate.open();

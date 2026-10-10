@@ -93,6 +93,28 @@ fn is_nil_or_empty(env_vars: &Option<BTreeMap<String, String>>) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prefetch {
     pub memory: Option<MemoryPrefetch>,
+    #[serde(default, skip_serializing_if = "is_unset_origin")]
+    pub origin: Option<String>,
+}
+
+pub const PREFETCH_ORIGIN_BUILD: &str = "build";
+pub const PREFETCH_ORIGIN_CHECKPOINT: &str = "checkpoint";
+pub const PREFETCH_ORIGIN_HARVEST: &str = "harvest";
+
+fn is_unset_origin(origin: &Option<String>) -> bool {
+    origin.as_deref().is_none_or(str::is_empty)
+}
+
+impl Prefetch {
+    pub fn init_origin(prefetch: Option<&Self>) -> &str {
+        match prefetch {
+            Some(Prefetch {
+                memory: Some(memory),
+                origin,
+            }) if !memory.indices.is_empty() => origin.as_deref().filter(|origin| !origin.is_empty()).unwrap_or("unknown"),
+            _ => "none",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,13 +197,20 @@ impl TemplateMetadata {
         }
     }
 
-    pub fn with_prefetch(&self, memory: Option<MemoryPrefetch>) -> Self {
+    pub fn with_prefetch(&self, memory: Option<MemoryPrefetch>, origin: &str) -> Self {
         Self {
-            prefetch: Some(Prefetch { memory }),
+            prefetch: Some(Prefetch {
+                memory,
+                origin: Some(origin.to_owned()),
+            }),
             filesystem_only: false,
             fs_quiesced: false,
             ..self.clone()
         }
+    }
+
+    pub fn prefetch_init_origin(&self) -> &str {
+        Prefetch::init_origin(self.prefetch.as_ref())
     }
 
     pub fn memory_prefetch(&self) -> Option<&MemoryPrefetch> {
@@ -218,7 +247,7 @@ mod tests {
             String::from_utf8(paused().to_json()).unwrap(),
             r#"{"version":2,"template":{"build_id":"b1","kernel_version":"vmlinux-6.1.102","firecracker_version":"v1.14.1"},"context":{"user":"user","workdir":"/home/user","env_vars":{"A":"b"}}}"#
         );
-        let empty = paused().with_prefetch(None);
+        let empty = paused().with_prefetch(None, "");
         assert!(
             String::from_utf8(empty.to_json())
                 .unwrap()
@@ -226,13 +255,48 @@ mod tests {
         );
     }
 
+    fn one_block() -> MemoryPrefetch {
+        MemoryPrefetch {
+            indices: vec![1],
+            access_types: vec!["r".to_owned()],
+            block_size: 4096,
+        }
+    }
+
+    #[test]
+    fn the_origin_rides_with_the_mapping_through_the_file() {
+        let stamped = paused().with_prefetch(Some(one_block()), PREFETCH_ORIGIN_HARVEST);
+
+        let json = stamped.to_json();
+        let read = TemplateMetadata::from_json(&json).unwrap();
+
+        assert!(String::from_utf8(json).unwrap().ends_with(r#""block_size":4096},"origin":"harvest"}}"#));
+        assert_eq!(read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()), Some("harvest"));
+        assert_eq!(read.prefetch_init_origin(), "harvest");
+    }
+
+    #[test]
+    fn a_mapping_written_before_origins_existed_reads_back_as_unknown() {
+        let legacy = paused().with_prefetch(Some(one_block()), "");
+
+        let read = TemplateMetadata::from_json(&legacy.to_json()).unwrap();
+
+        assert_eq!(read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()), None);
+        assert_eq!(read.prefetch_init_origin(), "unknown");
+        assert_eq!(Prefetch::init_origin(None), "none");
+        assert_eq!(paused().with_prefetch(None, PREFETCH_ORIGIN_BUILD).prefetch_init_origin(), "none");
+    }
+
     #[test]
     fn a_trace_round_trips() {
-        let traced = paused().with_prefetch(Some(MemoryPrefetch {
-            indices: vec![812, 3],
-            access_types: vec!["r".to_owned(), "w".to_owned()],
-            block_size: 4096,
-        }));
+        let traced = paused().with_prefetch(
+            Some(MemoryPrefetch {
+                indices: vec![812, 3],
+                access_types: vec!["r".to_owned(), "w".to_owned()],
+                block_size: 4096,
+            }),
+            "",
+        );
 
         let json = traced.to_json();
 
@@ -302,7 +366,7 @@ mod tests {
     #[test]
     fn a_paused_build_keeps_the_context_and_drops_the_trace() {
         let build = Uuid::from_bytes([7; 16]);
-        let traced = paused().with_prefetch(Some(MemoryPrefetch::default()));
+        let traced = paused().with_prefetch(Some(MemoryPrefetch::default()), "");
 
         let versions = TemplateVersions {
             build_id: build.to_string(),
@@ -340,7 +404,10 @@ mod tests {
                 ..Start::default()
             }),
             from_image: Some("debian".to_owned()),
-            prefetch: Some(Prefetch { memory: None }),
+            prefetch: Some(Prefetch {
+                memory: None,
+                origin: None,
+            }),
             filesystem_only: true,
             fs_quiesced: true,
             ..TemplateMetadata::default()

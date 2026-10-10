@@ -16,7 +16,7 @@ use crate::proto::upgrade::{HandoverExit, HandoverProc, HandoverState};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub async fn resume(state: &Arc<AppState>) -> Result<HandoverReport, String> {
-    let resumed = resume_frozen(state);
+    let resumed = resume_frozen(state).await;
     if !matches!(resumed, Ok(Some(_)))
         && let Err(e) = state.freezer.unfreeze().await
     {
@@ -25,7 +25,7 @@ pub async fn resume(state: &Arc<AppState>) -> Result<HandoverReport, String> {
     resumed.map(Option::unwrap_or_default)
 }
 
-fn resume_frozen(state: &Arc<AppState>) -> Result<Option<HandoverReport>, String> {
+async fn resume_frozen(state: &Arc<AppState>) -> Result<Option<HandoverReport>, String> {
     let blob = match std::fs::read(HANDOVER_PATH) {
         Ok(blob) => blob,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -65,7 +65,9 @@ fn resume_frozen(state: &Arc<AppState>) -> Result<Option<HandoverReport>, String
         "re-adopted workload after envd self-upgrade"
     );
     state.freezer.set_guest_frozen_paths(&handover.guest_frozen_cgroups);
-    state.freezer.resume_frozen();
+    if let Err(e) = state.freezer.resume_frozen().await {
+        tracing::error!(error = %e, "inherited a frozen workload without the spawn barrier: only the pre-spawn probe guards process starts until /init");
+    }
     state.nfs.import(
         handover
             .mounts

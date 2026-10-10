@@ -511,3 +511,77 @@ async fn freeze_stops_the_workload_and_unfreeze_resumes_it() {
     assert_eq!(thawed, 204);
     assert!(state_after.contains("frozen 0"), "{state_after}");
 }
+
+fn no_wait() -> envd::cgroups::freeze::FreezeOptions {
+    envd::cgroups::freeze::FreezeOptions {
+        max_wait: Duration::ZERO,
+        mode: envd::cgroups::freeze::FreezeMode::Legacy,
+        max_cgroups: 0,
+    }
+}
+
+#[tokio::test]
+async fn a_start_into_a_frozen_workload_is_refused_as_unavailable() {
+    let (addr, state) = spawn_server_with_state().await;
+    state.freezer.freeze(no_wait()).await;
+
+    let (events, trailer) = collect(open(addr, "Start", start_body("echo", &["hello"])).await).await;
+
+    assert!(
+        events.is_empty(),
+        "no process may be started into a frozen cgroup: {events:?}"
+    );
+    assert_eq!(trailer["error"]["code"], "unavailable");
+    assert_eq!(
+        trailer["error"]["message"],
+        "error starting process 'echo hello': the target cgroup is frozen"
+    );
+}
+
+#[tokio::test]
+async fn a_pty_start_into_a_frozen_workload_is_refused_as_unavailable() {
+    let (addr, state) = spawn_server_with_state().await;
+    state.freezer.freeze(no_wait()).await;
+    let body = json!({
+        "process": { "cmd": "echo", "args": ["hello"], "cwd": "/tmp" },
+        "pty": { "size": { "cols": 80, "rows": 24 } }
+    });
+
+    let (events, trailer) = collect(open(addr, "Start", body).await).await;
+
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(trailer["error"]["code"], "unavailable");
+    assert_eq!(
+        trailer["error"]["message"],
+        "error starting pty with command 'echo hello' in dir '/tmp' with '80' cols and '24' rows: the target cgroup is frozen"
+    );
+}
+
+#[tokio::test]
+async fn the_system_tag_survives_the_frozen_window() {
+    let (addr, state) = spawn_server_with_state().await;
+    state.freezer.freeze(no_wait()).await;
+    let body = json!({ "process": { "cmd": "echo", "args": ["hello"] }, "tag": "_system" });
+
+    let (events, trailer) = collect(open(addr, "Start", body).await).await;
+
+    assert_eq!(
+        trailer,
+        json!({}),
+        "a system-tagged start was refused by the frozen window"
+    );
+    assert_eq!(output(&events, "stdout"), "hello\n");
+}
+
+#[tokio::test]
+async fn every_start_outcome_gives_its_admission_back() {
+    let (addr, state) = spawn_server_with_state().await;
+    let missing_cwd = json!({ "process": { "cmd": "echo", "cwd": "/nonexistent/cwd" } });
+    for body in [missing_cwd, start_body("echo", &["hello"])] {
+        collect(open(addr, "Start", body).await).await;
+    }
+
+    let (_, errors) = state.freezer.freeze(no_wait()).await;
+
+    assert!(errors.is_empty(), "a start leaked its admission: {errors:?}");
+}

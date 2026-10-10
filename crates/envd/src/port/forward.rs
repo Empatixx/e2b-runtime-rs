@@ -8,7 +8,8 @@ use nix::unistd::Pid;
 use parking_lot::{Mutex, MutexGuard};
 
 use super::scan::{Listener, local_listeners};
-use crate::cgroups::Placement;
+use crate::cgroups::freeze::WorkloadFreezer;
+use crate::cgroups::{Placement, ProcessType};
 use crate::proto::upgrade::ForwardedPort;
 
 const SCAN_INTERVAL: Duration = Duration::from_millis(1000);
@@ -25,8 +26,14 @@ pub struct Forwards {
 }
 
 pub struct Forwarder {
-    placement: Option<Placement>,
+    freezer: Arc<WorkloadFreezer>,
     forwards: Forwards,
+}
+
+enum Socat {
+    Running(u32),
+    Failed,
+    Refused,
 }
 
 impl Forwards {
@@ -77,8 +84,8 @@ pub fn export(forwards: &HashMap<String, Forward>) -> Vec<ForwardedPort> {
 }
 
 impl Forwarder {
-    pub fn new(placement: Option<Placement>, forwards: Forwards) -> Self {
-        Self { placement, forwards }
+    pub fn new(freezer: Arc<WorkloadFreezer>, forwards: Forwards) -> Self {
+        Self { freezer, forwards }
     }
 
     pub async fn run(self) {
@@ -101,7 +108,11 @@ impl Forwarder {
         for (key, listener) in &current {
             if !forwards.contains_key(key) {
                 tracing::debug!(ip = %listener.ip, port = listener.port, family = listener.family, state = "LISTEN", "Detected new opened port on localhost that is not forwarded");
-                let socat_pid = self.start(listener);
+                let socat_pid = match self.start(listener) {
+                    Socat::Running(pid) => Some(pid),
+                    Socat::Failed => None,
+                    Socat::Refused => continue,
+                };
                 forwards.insert(
                     key.clone(),
                     Forward {
@@ -117,15 +128,25 @@ impl Forwarder {
             .for_each(|(_, forward)| stop(forward));
     }
 
-    fn start(&self, listener: &Listener) -> Option<u32> {
+    fn start(&self, listener: &Listener) -> Socat {
         let args = socat_args(listener);
         let mut command = tokio::process::Command::new("socat");
         command.args(&args).process_group(0);
-        if let Some(procs) = self.placement.as_ref().map(Placement::raw_fd) {
+        if let Some(procs) = self
+            .freezer
+            .manager()
+            .placement(ProcessType::Socat)
+            .as_ref()
+            .map(Placement::raw_fd)
+        {
             unsafe { command.pre_exec(move || Placement::join(procs)) };
         }
         let line = format!("socat {}", args.join(" "));
         tracing::debug!(socat_cmd = %line, pid = listener.pid, family = listener.family, source_ip = GATEWAY_IP, port = listener.port, "About to start port forwarding");
+        if let Err(refused) = self.freezer.probe_thawed(ProcessType::Socat) {
+            tracing::debug!(port = listener.port, error = %refused, "Deferring port forwarding: the socat cgroup is frozen");
+            return Socat::Refused;
+        }
         match command.spawn() {
             Ok(mut child) => {
                 let pid = child.id();
@@ -140,11 +161,11 @@ impl Forwarder {
                         Ok(_) => {}
                     }
                 });
-                pid
+                pid.map_or(Socat::Failed, Socat::Running)
             }
             Err(e) => {
                 tracing::error!(socat_cmd = %line, error = %e, "Failed to start port forwarding - failed to start socat");
-                None
+                Socat::Failed
             }
         }
     }
@@ -179,6 +200,7 @@ fn socat_args(listener: &Listener) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cgroups::CgroupManager;
 
     #[test]
     fn socat_bridges_the_gateway_address_to_the_local_listener() {
@@ -198,5 +220,46 @@ mod tests {
                 "TCP6:localhost:3000"
             ]
         );
+    }
+
+    fn frozen_socat_forwarder(root: &Path) -> Forwarder {
+        let socats = root.join("socats");
+        std::fs::create_dir_all(&socats).unwrap();
+        std::fs::write(socats.join("cgroup.events"), "populated 1\nfrozen 1\n").unwrap();
+        let manager = CgroupManager::at_paths(root, &[(ProcessType::Socat, socats)]);
+        Forwarder::new(WorkloadFreezer::new(Arc::new(manager)), Forwards::default())
+    }
+
+    fn listener_on(port: u32) -> Listener {
+        Listener {
+            pid: 4242,
+            ip: "127.0.0.1".to_owned(),
+            port,
+            family: 4,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_port_skipped_while_the_socat_cgroup_is_frozen_is_retried_on_the_next_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let forwarder = frozen_socat_forwarder(root.path());
+        let key = "4242-65000";
+        let tracked = |forwarder: &Forwarder| forwarder.forwards.lock().contains_key(key);
+
+        forwarder.reconcile(vec![listener_on(65000)]);
+        forwarder.reconcile(vec![listener_on(65000)]);
+        assert!(
+            !tracked(&forwarder),
+            "a forward refused while the cgroup is frozen must not be recorded"
+        );
+
+        std::fs::write(root.path().join("socats/cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+
+        forwarder.reconcile(vec![listener_on(65000)]);
+        assert!(
+            tracked(&forwarder),
+            "once the cgroup is thawed the next scan must attempt the forward again"
+        );
+        forwarder.forwards.lock().values_mut().for_each(stop);
     }
 }

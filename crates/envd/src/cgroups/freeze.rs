@@ -12,6 +12,7 @@ use super::hierarchy::{
     AuditResult, PROC_SELF_CGROUP, allowlisted, audit_frozen_state, descend_set, join, sample_path, scan_guest_frozen,
     self_cgroup_path,
 };
+use super::spawn::SpawnBarrier;
 use super::{
     CgroupError, CgroupManager, Failure, ProcessType, children_of, freeze_at, freeze_requested_at, frozen_at,
     process_type_name, unfreeze_at,
@@ -22,7 +23,7 @@ pub const THAW_WATCHDOG_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const THAW_MAX_CGROUPS: usize = 8192;
 const FREEZE_MAX_CGROUPS: usize = 512;
 const FREEZE_POLL_INTERVAL: Duration = Duration::from_millis(2);
-const WORKLOAD_PROCESS_TYPES: [ProcessType; 2] = [ProcessType::User, ProcessType::Pty];
+pub const WORKLOAD_PROCESS_TYPES: [ProcessType; 2] = [ProcessType::User, ProcessType::Pty];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FreezeMode {
@@ -123,6 +124,7 @@ struct Poll {
 pub struct WorkloadFreezer {
     manager: Arc<CgroupManager>,
     lock: Arc<Semaphore>,
+    pub(super) spawns: SpawnBarrier,
     thawed: watch::Sender<u64>,
     sweep: Mutex<Sweep>,
     watchdog: Mutex<Watchdog>,
@@ -152,13 +154,24 @@ impl Target {
 
 impl WorkloadFreezer {
     pub fn new(manager: Arc<CgroupManager>) -> Arc<Self> {
-        Self::with(manager, THAW_WATCHDOG_WINDOW, PathBuf::from(PROC_SELF_CGROUP))
+        Self::with(
+            manager,
+            THAW_WATCHDOG_WINDOW,
+            PathBuf::from(PROC_SELF_CGROUP),
+            SpawnBarrier::default(),
+        )
     }
 
-    fn with(manager: Arc<CgroupManager>, watchdog_window: Duration, proc_self_cgroup: PathBuf) -> Arc<Self> {
+    fn with(
+        manager: Arc<CgroupManager>,
+        watchdog_window: Duration,
+        proc_self_cgroup: PathBuf,
+        spawns: SpawnBarrier,
+    ) -> Arc<Self> {
         Arc::new(Self {
             manager,
             lock: Arc::new(Semaphore::new(1)),
+            spawns,
             thawed: watch::Sender::new(0),
             sweep: Mutex::default(),
             watchdog: Mutex::default(),
@@ -221,9 +234,13 @@ impl WorkloadFreezer {
         self.sweep.lock().guest_frozen = relative.iter().map(|rel| join(root, rel)).collect();
     }
 
-    pub fn resume_frozen(self: &Arc<Self>) {
+    pub async fn resume_frozen(self: &Arc<Self>) -> Result<(), String> {
         self.sweep.lock().freeze_active = true;
         self.arm_watchdog();
+        self.spawns
+            .raise()
+            .await
+            .map_err(|e| format!("raise the spawn barrier for an inherited freeze: {e}"))
     }
 
     pub async fn freeze(self: &Arc<Self>, options: FreezeOptions) -> (FreezeResult, Vec<String>) {
@@ -251,6 +268,14 @@ impl WorkloadFreezer {
     }
 
     async fn freeze_locked(self: &Arc<Self>, options: FreezeOptions) -> (FreezeResult, Vec<String>) {
+        if let Err(refused) = self.spawns.raise().await {
+            let refusal = FreezeResult {
+                mode: options.mode,
+                failed: WORKLOAD_PROCESS_TYPES.len() as i64,
+                ..FreezeResult::default()
+            };
+            return (refusal, vec![refused.to_string()]);
+        }
         let mut result = FreezeResult::default();
         let started = Instant::now();
         let root = self.manager.walk_root().map(Path::to_path_buf);
@@ -284,11 +309,15 @@ impl WorkloadFreezer {
         result.failed += poll.failed;
         result.wait = started.elapsed().saturating_sub(result.sweep);
         errors.extend(poll.errors);
-        {
+        let window_open = {
             let mut sweep = self.sweep.lock();
             sweep.last_mode = Some(result.mode);
             sweep.generation += 1;
             sweep.freeze_active |= result.requested > 0;
+            sweep.freeze_active
+        };
+        if !window_open {
+            self.spawns.lower();
         }
         if result.requested > 0 {
             self.arm_watchdog();
@@ -452,16 +481,18 @@ impl WorkloadFreezer {
         let mut result = ThawResult::default();
         let root = self.manager.walk_root().map(Path::to_path_buf);
         let discover = root.is_some() && self.freeze_in_effect();
-        let mut errors: Vec<String> = WORKLOAD_PROCESS_TYPES
+        let static_failures: Vec<(ProcessType, CgroupError)> = WORKLOAD_PROCESS_TYPES
             .iter()
-            .filter_map(|process_type| {
-                self.manager
-                    .unfreeze(*process_type)
-                    .err()
-                    .map(|e| format!("unfreeze {} cgroup: {e}", process_type_name(*process_type)))
-            })
+            .filter_map(|process_type| self.manager.unfreeze(*process_type).err().map(|e| (*process_type, e)))
+            .collect();
+        let mut errors: Vec<String> = static_failures
+            .iter()
+            .map(|(process_type, e)| format!("unfreeze {} cgroup: {e}", process_type_name(*process_type)))
             .collect();
         result.failed += errors.len();
+        if static_failures.iter().all(|(_, e)| e.vanished()) {
+            self.spawns.lower();
+        }
         if let (true, Some(root)) = (discover, &root) {
             result.discovered = true;
             errors.extend(self.thaw_discovered(root, &mut result, max_cgroups));
@@ -604,6 +635,7 @@ fn record_vanished(result: &mut FreezeResult, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cgroups::spawn::SpawnRefused;
 
     struct Tree {
         dir: tempfile::TempDir,
@@ -637,10 +669,22 @@ mod tests {
         }
 
         fn freezer(&self) -> Arc<WorkloadFreezer> {
+            self.freezer_with_user_at("user")
+        }
+
+        fn freezer_with_user_at(&self, user: &str) -> Arc<WorkloadFreezer> {
+            self.freezer_configured(user, Duration::ZERO, SpawnBarrier::default())
+        }
+
+        fn freezer_with_barrier(&self, barrier: SpawnBarrier) -> Arc<WorkloadFreezer> {
+            self.freezer_configured("user", Duration::ZERO, barrier)
+        }
+
+        fn freezer_configured(&self, user: &str, window: Duration, spawns: SpawnBarrier) -> Arc<WorkloadFreezer> {
             let manager = CgroupManager {
                 root: self.dir.path().to_path_buf(),
                 cgroups: [
-                    (ProcessType::User, "user"),
+                    (ProcessType::User, user),
                     (ProcessType::Pty, "ptys"),
                     (ProcessType::Socat, "socats"),
                 ]
@@ -662,7 +706,7 @@ mod tests {
                 })
                 .collect(),
             };
-            WorkloadFreezer::with(Arc::new(manager), Duration::ZERO, self.proc_file.clone())
+            WorkloadFreezer::with(Arc::new(manager), window, self.proc_file.clone(), spawns)
         }
     }
 
@@ -733,7 +777,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_no_op_manager_reports_unobservable_and_audits_nothing() {
-        let freezer = WorkloadFreezer::with(Arc::default(), Duration::ZERO, PathBuf::from(PROC_SELF_CGROUP));
+        let freezer = WorkloadFreezer::with(
+            Arc::default(),
+            Duration::ZERO,
+            PathBuf::from(PROC_SELF_CGROUP),
+            SpawnBarrier::default(),
+        );
 
         let (result, errors) = freezer
             .freeze(options(FreezeMode::Hierarchy, Duration::from_millis(5)))
@@ -757,5 +806,352 @@ mod tests {
         assert_eq!(with(-3).max_cgroups(), 512);
         assert_eq!(with(20_000).max_cgroups(), 8192);
         assert_eq!(with(40).max_cgroups(), 40);
+    }
+
+    fn noop_freezer() -> Arc<WorkloadFreezer> {
+        WorkloadFreezer::with(
+            Arc::default(),
+            Duration::ZERO,
+            PathBuf::from(PROC_SELF_CGROUP),
+            SpawnBarrier::default(),
+        )
+    }
+
+    fn no_wait() -> FreezeOptions {
+        options(FreezeMode::Legacy, Duration::ZERO)
+    }
+
+    fn envd_tree() -> Tree {
+        Tree::new("envd.service", &["user", "ptys", "socats", "envd.service"])
+    }
+
+    fn break_freeze_file(tree: &Tree, cgroup: &str) {
+        let file = tree.path(cgroup).join("cgroup.freeze");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+    }
+
+    async fn drain_queued(barrier: &SpawnBarrier) {
+        for _ in 0..1000 {
+            if barrier.drain_is_queued() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("the raise never queued its drain");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_is_refused_for_the_whole_frozen_window() {
+        let freezer = noop_freezer();
+
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("no freeze in effect");
+
+        freezer.freeze(no_wait()).await;
+        assert_eq!(
+            freezer.begin_spawn(ProcessType::User).await.err(),
+            Some(SpawnRefused::WorkloadFrozen(None)),
+            "the sweep has returned but the workload is frozen until the resume thaw"
+        );
+
+        freezer.unfreeze().await.unwrap();
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("the thaw must re-admit spawns");
+    }
+
+    #[tokio::test]
+    async fn the_refusal_is_prompt_rather_than_a_timeout() {
+        let tree = envd_tree();
+        let freezer = tree.freezer_with_barrier(SpawnBarrier::with_waits(
+            Duration::from_secs(3600),
+            Duration::from_secs(3600),
+        ));
+        freezer.freeze(no_wait()).await;
+
+        let refused = tokio::time::timeout(Duration::from_secs(5), freezer.begin_spawn(ProcessType::User))
+            .await
+            .expect("the spawn waited on the semaphore instead of being refused by the held barrier");
+
+        assert_eq!(refused.err(), Some(SpawnRefused::WorkloadFrozen(None)));
+    }
+
+    #[tokio::test]
+    async fn a_freeze_drains_an_in_flight_spawn_before_writing() {
+        let tree = envd_tree();
+        let freezer = tree.freezer_with_barrier(SpawnBarrier::with_waits(
+            Duration::from_secs(3600),
+            Duration::from_millis(100),
+        ));
+        let in_flight = freezer.begin_spawn(ProcessType::User).await.unwrap();
+
+        let freezing = tokio::spawn({
+            let freezer = freezer.clone();
+            async move { freezer.freeze(no_wait()).await }
+        });
+        drain_queued(&freezer.spawns).await;
+        assert!(
+            !tree.requested("user"),
+            "the sweep wrote cgroup.freeze while a spawn was still in flight"
+        );
+        assert!(
+            !freezing.is_finished(),
+            "the freeze completed without waiting for the spawn"
+        );
+
+        drop(in_flight);
+
+        let (result, errors) = tokio::time::timeout(Duration::from_secs(2), freezing)
+            .await
+            .expect("the freeze did not proceed after the spawn returned")
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(result.requested, 2);
+        assert!(tree.requested("user"));
+    }
+
+    #[tokio::test]
+    async fn a_freeze_aborts_rather_than_freeze_over_a_wedged_spawn() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        let wedged = freezer.begin_spawn(ProcessType::User).await.unwrap();
+
+        let (result, errors) = freezer.freeze(no_wait()).await;
+
+        assert_eq!(
+            errors,
+            vec!["timed out waiting for an in-flight process spawn".to_owned()]
+        );
+        assert_eq!(result.requested, 0, "nothing may be requested when the drain failed");
+        assert!(
+            !result.all_frozen(),
+            "a freeze that froze nothing must not read as a workload that stopped"
+        );
+        assert!(!tree.requested("user") && !tree.requested("ptys"));
+        drop(wedged);
+    }
+
+    #[tokio::test]
+    async fn the_probe_refuses_a_freeze_the_guest_issued() {
+        let tree = envd_tree();
+        tree.set_frozen("user");
+        let freezer = tree.freezer();
+
+        let refused = freezer.begin_spawn(ProcessType::User).await.err().unwrap();
+
+        assert_eq!(
+            refused,
+            SpawnRefused::WorkloadFrozen(Some(format!("{} reads frozen", tree.path("user").display())))
+        );
+        freezer
+            .begin_spawn(ProcessType::Pty)
+            .await
+            .expect("a cgroup nobody froze is unaffected");
+    }
+
+    #[tokio::test]
+    async fn the_probe_refuses_an_unsettled_ancestor_freeze() {
+        let tree = Tree::new("envd.service", &["customer/nested", "ptys", "socats", "envd.service"]);
+        let freezer = tree.freezer_with_user_at("customer/nested");
+        std::fs::write(tree.path("customer").join("cgroup.freeze"), "1\n").unwrap();
+        assert_eq!(frozen_at(&tree.path("customer/nested")).ok(), Some(false));
+
+        let refused = freezer.begin_spawn(ProcessType::User).await.err().unwrap();
+
+        assert_eq!(
+            refused,
+            SpawnRefused::WorkloadFrozen(Some(format!(
+                "{} has a freeze requested",
+                tree.path("customer").display()
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_probe_tolerates_unreadable_state() {
+        let tree = envd_tree();
+        std::fs::remove_file(tree.path("user").join("cgroup.events")).unwrap();
+        std::fs::remove_file(tree.path("user").join("cgroup.freeze")).unwrap();
+
+        tree.freezer()
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("an unreadable cgroupfs must not become a process-start outage");
+    }
+
+    #[tokio::test]
+    async fn non_workload_cgroups_skip_the_barrier() {
+        let freezer = noop_freezer();
+        freezer.freeze(no_wait()).await;
+
+        for process_type in [ProcessType::Socat, ProcessType::System] {
+            freezer
+                .begin_spawn(process_type)
+                .await
+                .unwrap_or_else(|e| panic!("{process_type:?} is not a cgroup a sweep freezes: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_probe_still_covers_non_workload_cgroups() {
+        let tree = envd_tree();
+        tree.set_frozen("socats");
+
+        let refused = tree.freezer().begin_spawn(ProcessType::Socat).await;
+
+        assert!(matches!(refused, Err(SpawnRefused::WorkloadFrozen(Some(_)))));
+    }
+
+    #[tokio::test]
+    async fn concurrent_spawns_are_admitted_and_give_their_weight_back() {
+        let freezer = noop_freezer();
+
+        let mut admissions = Vec::new();
+        for _ in 0..32 {
+            admissions.push(freezer.begin_spawn(ProcessType::User).await.unwrap());
+        }
+        drop(admissions);
+
+        let (_, errors) = freezer.freeze(no_wait()).await;
+        assert!(
+            errors.is_empty(),
+            "a spawn's weight was not returned, so the drain could not complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_froze_nothing_admits_spawns() {
+        let tree = envd_tree();
+        break_freeze_file(&tree, "user");
+        break_freeze_file(&tree, "ptys");
+        let freezer = tree.freezer();
+
+        let (result, errors) = freezer.freeze(no_wait()).await;
+        assert_eq!((result.requested, errors.len()), (0, 2));
+
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("a sweep whose writes all failed opened no window");
+    }
+
+    #[tokio::test]
+    async fn a_dirty_thaw_keeps_refusing_spawns() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        freezer.freeze(no_wait()).await;
+        break_freeze_file(&tree, "user");
+        break_freeze_file(&tree, "ptys");
+
+        assert!(freezer.unfreeze().await.is_err());
+
+        assert_eq!(
+            freezer.begin_spawn(ProcessType::User).await.err(),
+            Some(SpawnRefused::WorkloadFrozen(None))
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_frozen_workload_raises_the_barrier() {
+        let freezer = noop_freezer();
+
+        freezer.resume_frozen().await.unwrap();
+
+        assert_eq!(
+            freezer.begin_spawn(ProcessType::User).await.err(),
+            Some(SpawnRefused::WorkloadFrozen(None))
+        );
+
+        freezer.unfreeze().await.unwrap();
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("the post-upgrade /init thaw must re-admit spawns");
+    }
+
+    #[tokio::test]
+    async fn a_second_freeze_inside_the_same_window_keeps_the_barrier() {
+        let freezer = noop_freezer();
+        freezer.freeze(no_wait()).await;
+
+        let (hold, _, errors) = freezer.freeze_hold(no_wait()).await;
+        assert!(
+            errors.is_empty(),
+            "a second freeze inside the same window drained against the first"
+        );
+        drop(hold);
+
+        assert_eq!(
+            freezer.begin_spawn(ProcessType::User).await.err(),
+            Some(SpawnRefused::WorkloadFrozen(None)),
+            "releasing the second freeze's hold must not lower the barrier"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vanished_static_cgroup_does_not_hold_the_barrier() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        std::fs::remove_file(tree.path("ptys").join("cgroup.freeze")).unwrap();
+
+        let (result, errors) = freezer.freeze(no_wait()).await;
+        assert_eq!(
+            (result.requested, errors.len()),
+            (1, 1),
+            "the user freeze must still open a window"
+        );
+        assert_eq!(
+            freezer
+                .begin_spawn(ProcessType::User)
+                .await
+                .err()
+                .map(|e| matches!(e, SpawnRefused::WorkloadFrozen(_))),
+            Some(true),
+            "the window is open until the thaw"
+        );
+
+        assert!(freezer.unfreeze().await.is_err(), "the pty thaw fails as well");
+
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("user was thawed and pty no longer exists, so a start must be admitted");
+    }
+
+    #[tokio::test]
+    async fn a_partial_thaw_of_the_guest_readmits_spawns() {
+        let tree = Tree::new("envd.service", &["user", "ptys", "socats", "envd.service", "customer"]);
+        let freezer = tree.freezer_configured("user", Duration::from_secs(3600), SpawnBarrier::default());
+        let (result, errors) = freezer.freeze(options(FreezeMode::Hierarchy, Duration::ZERO)).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            tree.requested("customer"),
+            "the fixture must model a guest cgroup we froze"
+        );
+        assert!(result.requested > 0);
+
+        let permit = freezer.lock.clone().acquire_owned().await.unwrap();
+        let (thaw, thaw_errors) = freezer.unfreeze_locked(1);
+        drop(permit);
+
+        assert!(!thaw_errors.is_empty());
+        assert!(thaw.truncated);
+        assert!(tree.requested("customer"));
+        freezer
+            .begin_spawn(ProcessType::User)
+            .await
+            .expect("user was thawed, so a start into it must be admitted");
+        assert!(
+            freezer.freeze_in_effect(),
+            "a dirty thaw keeps the freeze counted as in effect"
+        );
+        assert!(
+            freezer.watchdog.lock().cancel.is_some(),
+            "a dirty thaw keeps the watchdog armed"
+        );
     }
 }

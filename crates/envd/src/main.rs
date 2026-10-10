@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use envd::cgroups::ProcessType;
 use envd::cpus::sysfs::WRITE_ONLINE;
 use envd::logs::layer::JsonLines;
 use envd::port::forward::Forwarder;
@@ -70,10 +69,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             poller.deliver_mmds(opts);
         });
     }
-    let forwarder = Forwarder::new(
-        state.freezer.manager().placement(ProcessType::Socat),
-        state.forwards.clone(),
-    );
+    let forwarder = Forwarder::new(state.freezer.clone(), state.forwards.clone());
     tokio::spawn(forwarder.run());
     serve(listener, router::build_router(state)).await
 }

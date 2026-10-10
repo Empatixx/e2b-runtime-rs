@@ -20,6 +20,7 @@ An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179
 | connect-python legacy conversion | done | `middleware/legacy_sdk.rs`, `controllers/filesystem/legacy.rs` |
 | `/envs` Go encoder, DeadlineExceeded start errors | done | |
 | `cpuCount` on `/init`, `X-Envd-Cpus`, CPU hotplug worker, helper children handed over on upgrade (upstream `e7b859b`) | done | `cpus/`, `reaper.rs`, `reexec.rs`, `controllers/init.rs` |
+| Process starts kept out of the cgroup freeze window: spawn barrier, pre-spawn probe, `unavailable` refusal (upstream `21e78ef`) | done | `cgroups/spawn.rs`, `controllers/process/spawn.rs`, `port/forward.rs` |
 | Version | `0.9.0` as upstream | |
 
 Not ported on purpose:
@@ -310,6 +311,15 @@ R parses `cgroup_root` and `no_cgroups` but ignores them. G:
 - **Writer child:** each write runs in a child (`/proc/self/exe cpu-online PATH 0|1`, marked by `E2B_REEXEC_HELPER`), because a bring-up the kernel never finishes cannot be interrupted. The child accepts only a `cpuN/online` path.
 - **Handover:** the children's pids travel in `helper_pids` of the handover blob (schema unchanged). The new envd reaps them and waits for them before it reconciles.
 - Not Firecracker (`-isnotfc`): a manager that accepts everything and reports zeros.
+
+## 5c. Process starts and the freeze window (upstream `21e78ef`, G `internal/services/cgroups/spawn.go`)
+
+- **Barrier:** a start into `user` or `ptys` takes one unit of a semaphore. A freeze takes all of it before it writes `cgroup.freeze`, waits at most 250 ms for starts in flight, and keeps it until the thaw. When the wait runs out the freeze writes nothing, reports `failed: 2` and the error `timed out waiting for an in-flight process spawn`.
+- **Refusal:** a start that meets the raised barrier is refused at once. One that meets a barrier still being raised waits up to 100 ms. The Connect code is `unavailable`, the text is `error starting process 'echo hello': the target cgroup is frozen`. A pty start reads `error starting pty with command 'echo hello' in dir '/tmp' with '80' cols and '24' rows: the target cgroup is frozen`.
+- **Probe:** before every start (socat included) envd reads `cgroup.events` of the target and `cgroup.freeze` of it and its ancestors. A guest freeze reads `...: <path> reads frozen` or `...: <path> has a freeze requested`. A read that fails does not refuse the start.
+- **System tag and socat:** `_system` stays in envd's own cgroup and never meets the barrier. The socat cgroup gets the probe only. A forward refused by the probe is not recorded, so the next scan tries it again.
+- **Lowering:** a sweep that opened no window lowers the barrier. A thaw lowers it when `user` and `ptys` thawed, or vanished. A handover raises it again in the new image.
+- **Not ported:** the Go context errors (a caller that went away) have no counterpart, a dropped request just drops the wait.
 
 ## 6. `/files`
 

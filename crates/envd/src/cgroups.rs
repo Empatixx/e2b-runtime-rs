@@ -1,6 +1,7 @@
 pub mod freeze;
 pub mod hierarchy;
 pub mod memory;
+pub mod spawn;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -105,6 +106,25 @@ impl CgroupManager {
             eprintln!("falling back to no-op cgroup manager");
             Self::default()
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at_paths(root: &Path, paths: &[(ProcessType, PathBuf)]) -> Self {
+        let cgroups = paths
+            .iter()
+            .map(|(process_type, path)| {
+                let procs = OpenOptions::new().write(true).open("/dev/null").unwrap();
+                let cgroup = Cgroup {
+                    path: path.clone(),
+                    procs: Arc::new(procs),
+                };
+                (*process_type, cgroup)
+            })
+            .collect();
+        Self {
+            root: root.to_path_buf(),
+            cgroups,
+        }
     }
 
     pub fn placement(&self, process_type: ProcessType) -> Option<Placement> {

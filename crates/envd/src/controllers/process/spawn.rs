@@ -25,6 +25,8 @@ use super::registry::Processes;
 use super::terminal::{HandoverFds, Terminal, Writer};
 use crate::cgroups::Placement;
 use crate::cgroups::ProcessType;
+use crate::cgroups::freeze::WorkloadFreezer;
+use crate::cgroups::spawn::SpawnRefused;
 use crate::proto::process::__buffa::oneof::process_event::data_event::Output as Data;
 use crate::proto::process::process_event::{DataEvent, EndEvent};
 use crate::proto::process::{ProcessConfig, StartRequest};
@@ -109,7 +111,7 @@ impl Process {
 
 pub struct Launch {
     pub request: StartRequest,
-    pub placement: Option<Placement>,
+    pub freezer: Arc<WorkloadFreezer>,
     pub user: User,
     pub workdir: Option<String>,
     pub global_env: BTreeMap<String, String>,
@@ -133,10 +135,13 @@ struct Started {
     handover: HandoverFds,
 }
 
-pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>, Receiver<DataEvent>), ConnectError> {
+pub async fn spawn(
+    launch: Launch,
+    processes: Arc<Processes>,
+) -> Result<(Arc<Process>, Receiver<DataEvent>), ConnectError> {
     let Launch {
         mut request,
-        placement,
+        freezer,
         user,
         workdir,
         global_env,
@@ -169,7 +174,17 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
         .chain(command_line)
         .collect();
 
+    let placement = freezer.manager().placement(process_type);
     let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+    let admission = match expired {
+        true => None,
+        false => Some(
+            freezer
+                .begin_spawn(process_type)
+                .await
+                .map_err(|refused| refused_start(&request, &user_command, &cwd, &refused))?,
+        ),
+    };
     let started = match request.pty.as_option() {
         Some(pty) => unexpired(expired)
             .and_then(|()| {
@@ -214,6 +229,7 @@ pub fn spawn(launch: Launch, processes: Arc<Processes>) -> Result<(Arc<Process>,
                 start_error(&e, format!("error starting process '{user_command}': {cause}"))
             })?,
     };
+    drop(admission);
     let Started {
         child,
         stdin,
@@ -466,6 +482,19 @@ fn unexpired(expired: bool) -> io::Result<()> {
         true => Err(io::Error::new(io::ErrorKind::TimedOut, "context deadline exceeded")),
         false => Ok(()),
     }
+}
+
+fn refused_start(request: &StartRequest, user_command: &str, cwd: &Path, refused: &SpawnRefused) -> ConnectError {
+    let message = match request.pty.as_option() {
+        Some(pty) => format!(
+            "error starting pty with command '{user_command}' in dir '{}' with '{}' cols and '{}' rows: {refused}",
+            cwd.display(),
+            pty.size.cols,
+            pty.size.rows
+        ),
+        None => format!("error starting process '{user_command}': {refused}"),
+    };
+    ConnectError::new(ErrorCode::Unavailable, message)
 }
 
 fn start_error(err: &io::Error, message: String) -> ConnectError {
