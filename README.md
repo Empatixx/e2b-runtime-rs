@@ -149,15 +149,17 @@ With `ORCHESTRATOR_SERVICES=template-manager` the node also builds templates as 
 
 ### SDK against a microVM (Linux, KVM)
 
-On a Linux host with `/dev/kvm`, Docker and the `nbd` module loaded, run as a user with sudo:
+On a Linux host with `/dev/kvm`, Docker and the `nbd` module available, run as a user with sudo:
 
 ```bash
-sudo modprobe nbd nbds_max=16
+scripts/ci/nbd-host.sh                     # udev nowatch rule for /dev/nbd*, then modprobe nbd nbds_max=128
 scripts/ci/vm-assets.sh                    # Firecracker fork + guest kernel into /opt/e2b
 scripts/ci/guest-rootfs.sh                 # Debian guest with envd under systemd -> /opt/e2b/rootfs.ext4
 export E2B_FIRECRACKER=/opt/e2b/firecracker E2B_KERNEL=/opt/e2b/vmlinux E2B_ROOTFS=/opt/e2b/rootfs.ext4
 scripts/ci/vm-sdk-tests.sh                 # egress check + SDK tests against a cold-booted and a resumed sandbox
 ```
+
+`scripts/ci/nbd-host.sh` installs the udev rule upstream requires on every node (`ACTION=="add|change", KERNEL=="nbd*", OPTIONS:="nowatch"` in `/etc/udev/rules.d/97-nbd-device.rules`). Without it systemd-udevd watches each NBD device with inotify and probes it with blkid whenever it is closed; the probe races the next connect and disconnect, and requests can get stuck ([LKML](https://lore.kernel.org/lkml/20220422054224.19527-1-matthew.ruffell@canonical.com/)). Production nodes also need enough devices: one per running sandbox plus the `NBD_POOL_SIZE` warm pool.
 
 `cargo run -p orchestrator --example sandbox` (as root) boots one sandbox and forwards `127.0.0.1:49983` to envd in the VM until Ctrl-C, so `examples/sdk-playground` works against it. With `E2B_RESUME=1` it cold-boots, snapshots, and serves a sandbox resumed from that snapshot over userfaultfd.
 

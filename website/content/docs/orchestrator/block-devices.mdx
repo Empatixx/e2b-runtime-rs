@@ -26,3 +26,14 @@ On pause, the dirty blocks become the new build's rootfs diff.
 The overlay is exposed through **NBD** (Network Block Device). The orchestrator runs an NBD server in-process, connects it to a kernel `/dev/nbdN` device over a socket pair, and gives that path to Firecracker. Requests are served concurrently.
 
 Setting up an NBD device takes time, so a **device pool** keeps `NBD_POOL_SIZE` (default 64) devices ready, and a freed device is checked to be fully disconnected before it is reused.
+
+### Host setup
+
+Each node needs the `nbd` kernel module with enough devices, one for every running sandbox plus the warm pool, and a udev rule that stops systemd-udevd from watching NBD devices:
+
+```
+# /etc/udev/rules.d/97-nbd-device.rules
+ACTION=="add|change", KERNEL=="nbd*", OPTIONS:="nowatch"
+```
+
+Upstream requires the same rule. Without it, udev probes an NBD device with blkid every time the device is closed. The probe runs while the next sandbox connects or the last one disconnects, so it slows both down and can leave requests stuck ([LKML report](https://lore.kernel.org/lkml/20220422054224.19527-1-matthew.ruffell@canonical.com/)). `scripts/ci/nbd-host.sh` installs the rule and loads the module with 128 devices.

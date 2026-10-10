@@ -26,3 +26,14 @@ Při uspání se ze změněných bloků stane rozdíl rootfs nového buildu.
 Overlay se vystavuje přes **NBD** (Network Block Device). Orchestrator spouští NBD server přímo ve svém procesu, propojí ho s jaderným zařízením `/dev/nbdN` přes dvojici socketů a tu cestu předá Firecrackeru. Požadavky se obsluhují souběžně.
 
 Připravit NBD zařízení chvíli trvá, proto **pool zařízení** drží `NBD_POOL_SIZE` (výchozí 64) zařízení připravených a uvolněné zařízení se před dalším použitím ověří, že je úplně odpojené.
+
+### Nastavení hostitele
+
+Každý node potřebuje jaderný modul `nbd` s dostatkem zařízení, jedno pro každý běžící sandbox a k tomu pool připravených zařízení, a pravidlo pro udev, které systemd-udevd zakáže NBD zařízení sledovat:
+
+```
+# /etc/udev/rules.d/97-nbd-device.rules
+ACTION=="add|change", KERNEL=="nbd*", OPTIONS:="nowatch"
+```
+
+Stejné pravidlo vyžaduje i upstream. Bez něj udev při každém zavření NBD zařízení spustí blkid, který ze zařízení čte. To se děje ve chvíli, kdy se připojuje další sandbox nebo odpojuje ten předchozí, takže to obojí zpomalí a požadavky se mohou zaseknout ([hlášení v LKML](https://lore.kernel.org/lkml/20220422054224.19527-1-matthew.ruffell@canonical.com/)). Skript `scripts/ci/nbd-host.sh` pravidlo nainstaluje a načte modul se 128 zařízeními.
