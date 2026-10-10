@@ -65,7 +65,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The reboot path has no offline envd upgrade before the cold boot (`envdOfflineUpgradePreBoot`) | API |
 | The `resume-build` dev tool (`defaultRunVcpu`) has no Rust counterpart | later |
 
 ## Orchestrator: peer chunk sharing

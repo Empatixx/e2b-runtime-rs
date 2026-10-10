@@ -78,18 +78,29 @@ impl Skipped {
     }
 }
 
+pub struct OfflineTarget {
+    pub path: Option<PathBuf>,
+    pub to_version: String,
+    pub reason: String,
+    pub resolver: Option<Resolver>,
+}
+
 #[derive(Clone)]
 pub struct EnvdUpgrades {
     host_envd: PathBuf,
     cache: Option<Arc<Cache>>,
     flags: FeatureFlags,
+    stage_root: PathBuf,
 }
 
 impl EnvdUpgrades {
     pub fn new(host_envd: PathBuf, base_path: &Path, flags: FeatureFlags) -> Self {
         let cache =
             cache_dir(base_path).map(|dir| Arc::new(Cache::builder().dir(dir).probe(Arc::new(ExecProbe)).build()));
-        Self::with_cache(host_envd, cache, flags)
+        Self {
+            stage_root: base_path.to_path_buf(),
+            ..Self::with_cache(host_envd, cache, flags)
+        }
     }
 
     pub fn with_cache(host_envd: PathBuf, cache: Option<Arc<Cache>>, flags: FeatureFlags) -> Self {
@@ -97,6 +108,30 @@ impl EnvdUpgrades {
             host_envd,
             cache,
             flags,
+            stage_root: PathBuf::new(),
+        }
+    }
+
+    pub fn stage_root(&self) -> &Path {
+        &self.stage_root
+    }
+
+    pub async fn offline_target(&self, contexts: &[FlagContext], from_version: &str) -> OfflineTarget {
+        let target = self.flags.get(&envd_offline_upgrade_target(), contexts);
+        let resolver = self.resolver_for(contexts, Op::Offline);
+        match self.resolve(resolver.as_ref(), &target, from_version).await {
+            Ok(upgrade) => OfflineTarget {
+                path: Some(upgrade.path),
+                to_version: upgrade.version,
+                reason: String::new(),
+                resolver,
+            },
+            Err(decline) => OfflineTarget {
+                path: None,
+                to_version: String::new(),
+                reason: gated_reason(decline.reason(), deferral_outcome(resolver.as_ref())),
+                resolver,
+            },
         }
     }
 
@@ -162,10 +197,14 @@ impl EnvdUpgrades {
     }
 
     fn resolver(&self, contexts: &[FlagContext]) -> Option<Resolver> {
+        self.resolver_for(contexts, Op::Live)
+    }
+
+    fn resolver_for(&self, contexts: &[FlagContext], op: Op) -> Option<Resolver> {
         self.cache
             .clone()
             .filter(|_| self.flags.get(&envd_binary_cache(), contexts))
-            .map(|cache| Resolver::new(cache, Op::Live))
+            .map(|cache| Resolver::new(cache, op))
     }
 
     async fn resolve(&self, resolver: Option<&Resolver>, target: &str, from: &str) -> Result<Upgrade, Decline> {

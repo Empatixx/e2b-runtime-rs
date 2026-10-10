@@ -1,3 +1,4 @@
+pub mod envd_swap;
 mod jail;
 pub mod recovery;
 

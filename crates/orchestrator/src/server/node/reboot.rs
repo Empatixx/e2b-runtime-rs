@@ -1,3 +1,4 @@
+mod offline_upgrade;
 mod recovery;
 
 use std::time::{Duration, SystemTime};
@@ -91,9 +92,19 @@ impl Node {
             "sandbox.cpu_template",
             applied_digest(chosen.template.as_ref()).as_str(),
         );
-        let pre_boot = chain_pre_boot([self
+        let recovery = self
             .fs_recover_pre_boot(config, metadata.fs_quiesced, requested, fs_recovery)
-            .await]);
+            .await;
+        let offline_upgrade = offline_upgrade::OfflineUpgrade {
+            upgrades: &self.envd_upgrades,
+            sandbox_id: &config.sandbox_id,
+            template_id: &config.template_id,
+            from_version: &config.envd_version,
+            fs_quiesced: metadata.fs_quiesced,
+        }
+        .pre_boot()
+        .await;
+        let pre_boot = chain_pre_boot([recovery, offline_upgrade]);
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let overlay = self.layer_overlay(build, &work_dir)?;

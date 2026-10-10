@@ -63,3 +63,49 @@ impl FsRecoveryRun {
 pub fn record_fs_recovery_tooling_unsupported() {
     FS_RECOVERY_TOOLING_UNSUPPORTED.add(1, &[]);
 }
+
+static OFFLINE_UPGRADE_ATTEMPTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("orchestrator.envd.offline_upgrade.attempts")
+        .with_description("Cold-boot offline envd rootfs-swap attempts, by result and from/to version")
+        .with_unit("{attempt}")
+        .build()
+});
+
+static OFFLINE_UPGRADE_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    METER
+        .u64_histogram("orchestrator.envd.offline_upgrade.duration")
+        .with_description("Wall-time of the offline cold-boot envd rootfs swap (jailed debugfs)")
+        .with_unit("ms")
+        .build()
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineUpgradeAttempt<'a> {
+    pub result: &'a str,
+    pub from_version: &'a str,
+    pub to_version: &'a str,
+    pub refire: Option<bool>,
+}
+
+impl OfflineUpgradeAttempt<'_> {
+    pub fn record(&self) {
+        let attributes: Vec<KeyValue> = [
+            KeyValue::new("result", self.result.to_owned()),
+            KeyValue::new("from_version", self.from_version.to_owned()),
+            KeyValue::new("to_version", self.to_version.to_owned()),
+        ]
+        .into_iter()
+        .chain(self.refire.map(|refire| KeyValue::new("refire", refire)))
+        .collect();
+        OFFLINE_UPGRADE_ATTEMPTS.add(1, &attributes);
+    }
+
+    pub fn record_with_duration(&self, took: Duration) {
+        self.record();
+        OFFLINE_UPGRADE_DURATION.record(
+            took.as_millis() as u64,
+            &[KeyValue::new("result", self.result.to_owned())],
+        );
+    }
+}
