@@ -21,6 +21,7 @@ use crate::proto::{
     SandboxDeleteRequest, SandboxListResponse, SandboxPauseRequest, SandboxPauseResponse, SandboxUpdateRequest,
 };
 use crate::sandbox::snapshot::Snapshot;
+use crate::sandbox::snapshot::in_place::QuiesceFlags;
 use crate::telemetry::report::{ReportStatus, report_critical_error, report_error};
 use crate::telemetry::server::sandbox::{CreateOutcome, PauseOutcome, record_kill};
 use crate::telemetry::server::spans;
@@ -268,9 +269,13 @@ impl SandboxServer {
             .await
             .ok_or_else(|| Status::internal("failed to pause sandbox"))
             .report_critical("failed to mark sandbox as stopping", &sandbox_attribute(&id))?;
-        let snapshotted = tokio::spawn(pause(handle, request.build_id, request.template_id, disk).in_current_span())
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+        let filesystem_only = request
+            .filesystem_only
+            .then(|| self.node.quiesce_flags(&handle.info.lock().config));
+        let snapshotted =
+            tokio::spawn(pause(handle, request.build_id, request.template_id, disk, filesystem_only).in_current_span())
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
             .map(|snapshot| {
                 Response::new(SandboxPauseResponse {
@@ -360,6 +365,7 @@ async fn pause(
     build_id: String,
     template_id: String,
     disk: Option<Arc<PauseDiskReservation>>,
+    filesystem_only: Option<QuiesceFlags>,
 ) -> Result<Snapshot, String> {
     let build_id = match build_id::parse(&build_id) {
         Ok(build_id) => build_id,
@@ -377,6 +383,7 @@ async fn pause(
             span: Span::current(),
             reply,
             disk,
+            filesystem_only,
         })
         .await
         .map_err(|_| STOPPED.to_owned())?;

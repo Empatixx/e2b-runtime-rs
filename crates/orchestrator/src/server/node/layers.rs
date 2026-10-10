@@ -82,6 +82,30 @@ impl Node {
         Ok(())
     }
 
+    pub fn upload_filesystem(
+        &self,
+        layer: FilesystemSnapshot,
+        object_metadata: ObjectMetadata,
+        disk: Option<Arc<crate::server::pause_disk::PauseDiskReservation>>,
+    ) {
+        let build = layer.build.clone();
+        let storage = self.storage.clone();
+        let store = self.store.clone();
+        let peers = self.peers.clone();
+        let team_id = object_metadata.entries.get("team_id").cloned().unwrap_or_default();
+        let attempt = move || filesystem_upload_attempt(layer.clone(), storage.clone(), object_metadata.clone());
+        self.uploads
+            .start(build.build_id, parents(&build), attempt, move |outcome| {
+                tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
+                if outcome == super::Outcome::Failed {
+                    super::count_failed_snapshot_upload(&team_id, true);
+                }
+                store.unpin(build.build_id);
+                drop(disk);
+                tokio::spawn(async move { peers.finish(build.build_id, outcome == super::Outcome::Landed).await });
+            });
+    }
+
     pub fn spawn_filesystem_upload(
         &self,
         layer: FilesystemSnapshot,

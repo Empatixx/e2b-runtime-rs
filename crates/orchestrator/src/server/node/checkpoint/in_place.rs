@@ -156,6 +156,50 @@ impl Node {
         checkpoint.await.map_err(|_| stopped())?
     }
 
+    pub(crate) fn quiesce_flags(&self, config: &crate::proto::SandboxConfig) -> QuiesceFlags {
+        let contexts = pause_contexts(config);
+        QuiesceFlags {
+            sync_timeout_override_ms: self.feature_flags.get(&GUEST_SYNC_TIMEOUT_MS, &contexts),
+            freeze_via_exec: self.feature_flags.get(&FS_FREEZE_VIA_EXEC, &contexts),
+        }
+    }
+
+    pub(crate) async fn pause_filesystem_locally(
+        &self,
+        sandbox: &crate::sandbox::Sandbox,
+        parent: &SandboxInfo,
+        build_id: Uuid,
+        flags: QuiesceFlags,
+    ) -> Result<(FilesystemSnapshot, crate::sandbox::snapshot::Snapshot), String> {
+        let dir = self.templates.instance_dir(build_id);
+        let request = FilesystemCheckpointRequest {
+            dir: dir.clone(),
+            build_id,
+            flags,
+            team_id: parent.config.team_id.clone(),
+            balloon_mode: sandbox.balloon_mode().to_owned(),
+        };
+        let checkpoint = sandbox
+            .pause_filesystem(&request)
+            .await
+            .map_err(|failure| format!("error snapshotting sandbox: {}", failure.message))
+            .inspect_err(|_| discard(&dir))?;
+        let layer = self
+            .cache_checkpoint(parent, &checkpoint, &dir)
+            .await
+            .inspect_err(|_| discard(&dir))
+            .map_err(|e| format!("error snapshotting sandbox: {e}"))?;
+        let snapshot = crate::sandbox::snapshot::Snapshot {
+            build: checkpoint.build,
+            memfile_bytes: 0,
+            memory_bytes: 0,
+            rootfs_bytes: checkpoint.rootfs_bytes,
+            tracked_writes: false,
+            vm_vcpus: checkpoint.vm_vcpus,
+        };
+        Ok((layer, snapshot))
+    }
+
     async fn take_filesystem_checkpoint(
         &self,
         handle: &SandboxHandle,
@@ -212,7 +256,7 @@ impl Node {
         );
     }
 
-    async fn cache_checkpoint(
+    pub(crate) async fn cache_checkpoint(
         &self,
         parent: &SandboxInfo,
         checkpoint: &FilesystemCheckpoint,

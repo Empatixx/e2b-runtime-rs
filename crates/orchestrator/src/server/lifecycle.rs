@@ -24,6 +24,7 @@ use crate::memory::trace::Trace;
 use crate::network::pool::Release;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
+use crate::sandbox::snapshot::in_place::QuiesceFlags;
 use crate::sandbox::snapshot::in_place::memory::{MemoryCheckpoint, MemoryCheckpointRequest};
 use crate::sandbox::snapshot::in_place::{FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure};
 use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
@@ -61,6 +62,7 @@ pub enum Command {
         span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
         disk: Option<Arc<PauseDiskReservation>>,
+        filesystem_only: Option<QuiesceFlags>,
     },
     Checkpoint {
         build_id: Uuid,
@@ -134,6 +136,7 @@ enum Ending {
         span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
         disk: Option<Arc<PauseDiskReservation>>,
+        filesystem_only: Option<QuiesceFlags>,
     },
     Checkpoint {
         build_id: Uuid,
@@ -289,7 +292,14 @@ impl Running {
                 span,
                 reply,
                 disk,
-            } => self.pause(build_id, template_id, span, reply, disk).await,
+                filesystem_only,
+            } => match filesystem_only {
+                Some(flags) => {
+                    self.pause_filesystem(flags, build_id, template_id, span, reply, disk)
+                        .await
+                }
+                None => self.pause(build_id, template_id, span, reply, disk).await,
+            },
             Ending::Checkpoint { build_id, reply } => self.checkpoint(build_id, reply).await,
             Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
             Ending::Crashed { death } => tracing::info!(sandbox = %id, reason = %death.reason, "stopping sandbox"),
@@ -313,6 +323,37 @@ impl Running {
             .iter()
             .for_each(|proxy| proxy.remove_from_pool(&lifecycle.lifecycle_id));
         self.node.registry.finish(&lifecycle);
+    }
+
+    async fn pause_filesystem(
+        &self,
+        flags: QuiesceFlags,
+        build_id: Uuid,
+        template_id: String,
+        span: Span,
+        reply: oneshot::Sender<Result<Snapshot, String>>,
+        disk: Option<Arc<PauseDiskReservation>>,
+    ) {
+        let parent = self.info.lock().clone();
+        let paused = self
+            .node
+            .pause_filesystem_locally(&self.sandbox, &parent, build_id, flags)
+            .await;
+        if let Ok((layer, _)) = &paused {
+            self.node.events.publish(
+                SandboxEvent::new(PAUSED, &event_sandbox(&parent))
+                    .with_execution(&execution(&parent))
+                    .with_pause_mode(true),
+            );
+            let object_metadata = ObjectMetadata::default()
+                .with("template_id", template_id)
+                .with("team_id", &parent.config.team_id)
+                .with("build_origin", "pause");
+            self.node
+                .mark_written_when_ready(disk.clone(), crate::block::build_file::ready_now());
+            span.in_scope(|| self.node.upload_filesystem(layer.clone(), object_metadata, disk));
+        }
+        let _ = reply.send(paused.map(|(_, snapshot)| snapshot));
     }
 
     async fn pause(
@@ -379,7 +420,7 @@ impl Running {
                         }
                     }
                     Some(Command::Checkpoint { build_id, reply }) => return Ending::Checkpoint { build_id, reply },
-                    Some(Command::Pause { build_id, template_id, span, reply, disk }) => return Ending::Pause { build_id, template_id, span, reply, disk },
+                    Some(Command::Pause { build_id, template_id, span, reply, disk, filesystem_only }) => return Ending::Pause { build_id, template_id, span, reply, disk, filesystem_only },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },
                 () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },

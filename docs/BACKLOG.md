@@ -103,7 +103,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The memory in-place checkpoint is ported but untested against a real Firecracker (needs KVM, a Firecracker build that accepts `use_sync_wp` and a kernel with uffd-wp for anonymous memory; the Docker kernel on a Mac has none); the template build never installs a balloon device, so balloon-reporting sandboxes are not produced here | perf |
 | The filesystem-only checkpoint exports the rootfs synchronously from the live overlay; upstream can swap in a fresh COW cache and seal in the background (`defer-rootfs-export`) | perf |
 | Pause and checkpoint skip the cgroup freeze and unfreeze, the pre-pause reclaim, the hinting drain and the snapshot admission grace (`pause-admission-grace-milliseconds`) | perf |
-| The filesystem-only `Pause` RPC does not quiesce the guest yet; `GuestQuiesce` is ready for it | API |
 | A snapshot has no lineage (`AbandonsPredecessor`) in the template cache | later |
 | No end-to-end test of the filesystem-only in-place checkpoint over gRPC (needs KVM and a cluster with `filesystem-only-checkpoint` on) | API |
 

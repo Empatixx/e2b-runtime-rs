@@ -113,6 +113,28 @@ impl Sandbox {
         }
     }
 
+    pub async fn pause_filesystem(
+        &self,
+        request: &FilesystemCheckpointRequest,
+    ) -> Result<FilesystemCheckpoint, InPlaceFailure> {
+        let quiesce = self.guest_quiesce(request.flags);
+        let prepared = self.quiesce_guest(&quiesce, request).await?;
+        let exported = match self.pause_vm().await {
+            Ok(()) => self.export_filesystem(request, prepared.frozen).await,
+            Err(e) => Err(e),
+        };
+        match exported {
+            Ok(checkpoint) => {
+                count_fs_quiesced_pause(checkpoint.frozen);
+                Ok(checkpoint)
+            }
+            Err(error) => {
+                quiesce.rollback(prepared.method).await;
+                Err(InPlaceFailure::alive(error))
+            }
+        }
+    }
+
     async fn quiesce_guest(
         &self,
         quiesce: &GuestQuiesce,
