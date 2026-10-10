@@ -65,6 +65,16 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | `build-kernel-cmdline-args`, `build-cpu-template`, `free-page-reporting` and `free-page-hinting-config` are read from LaunchDarkly but not applied to the VM (`balloon` stays `{"reporting":false,"hinting":false}`) | template build |
 
+## Orchestrator: upstream sync (bfd917908 to 2a78eba4b)
+
+| Item | Target |
+|---|---|
+| The reboot CPU template override (`reboot-cpu-template-override`, `{"template":...}` wrapper) and the CPU template apply on a filesystem boot have no Rust counterpart | API |
+| Metrics keep the SDK default cardinality limit of 2000 series per interval: the Rust SDK preallocates by the limit, so it is not lifted for delta counters and histograms as upstream does | perf |
+| The disk estimate of a pause has no memfile dedup copy because the Rust node does not dedup memory diffs | later |
+| Team ID labels are missing on the metrics Rust does not record yet (envd init duration, rootfs and memory seal durations, snapshot diff sizes, build durations) | later |
+| No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
+
 ## Orchestrator: vCPU hotplug
 
 | Item | Target |

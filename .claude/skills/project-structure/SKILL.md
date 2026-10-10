@@ -12,7 +12,7 @@ Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/storage/         object_store backends (backend.rs: Storage::open per provider, signed UploadUrl;
                        backend/providers.rs: S3, GCS, Azure builders; backend/gcs/ ADC, credential flows, external
-                       accounts; backend/azure/ DefaultAzureCredential chain, AAD, WS-Trust, SAS; backend/aws.rs), spec.rs (StorageSpec, upstream storage URL
+                       accounts; backend/azure/ DefaultAzureCredential chain, AAD, WS-Trust, SAS; backend/aws.rs + aws/sse.rs S3 server-side encryption headers), object_path.rs (validate_object_path), spec.rs (StorageSpec, upstream storage URL
                        parsing), local_upload.rs (HMAC UploadSigner), build paths, header V3
   src/go_url.rs        Go net/url parse and String (go_url/escape.rs, go_url/query.rs url.Values)
   src/go_exec.rs       commands with Go exec error texts (exit status N, signal: killed, not found in $PATH);
@@ -32,7 +32,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        team, service, kind contexts), flags.rs (every upstream flag with its fallback), prefetch.rs
   src/telemetry.rs     OpenTelemetry: metrics.rs, traces.rs, logs.rs (tracing bridge with target/level filters),
                        endpoint.rs (OTEL_COLLECTOR_GRPC_ENDPOINT), fc.rs (vcpu_limit counter), identity.rs (resource), grpc.rs (otelgrpc server
-                       spans, traceparent, rpc.server.duration), report.rs (span errors), server/ (upstream instruments)
+                       spans, traceparent, rpc.server.duration with sandbox.resume and team.id from metadata), report.rs (span errors), server/ (upstream instruments; network.rs slot return duration)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
@@ -128,7 +128,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        scheduling.rs (SchedulingMetadata from headers), user_error.rs (UserError status details),
                        host_stats.rs and oom_monitor.rs (per-sandbox collectors), status.rs (NodeStatus, override rules, outstanding work), metrics.rs (host
                        metrics poller, /proc parsers), info.rs (InfoService), health.rs (/health on the tonic router),
-                       admission.rs (max sandboxes from flags; admission/semaphore.rs resizable starting semaphore), shutdown.rs (drain), app.rs (App: one axum
+                       admission.rs (max sandboxes from flags; admission/semaphore.rs resizable starting semaphore), pause_disk.rs (BuildDisk, PauseDiskReservation: refuse a pause the build filesystem cannot hold; node/pause_disk.rs admits it), shutdown.rs (drain), app.rs (App: one axum
                        router for SandboxService, InfoService, grpc health and /health), retry.rs (upload retry
                        policy), uploads.rs (Uploads: background snapshot uploads, parents land first)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/*.proto (no package upstream)
