@@ -41,7 +41,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Matters from |
 |---|---|
 | Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | perf |
-| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn | perf |
+| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn. A netlink port was measured on the Azure test node and reverted: a CONNECT right after a device is released stalls 100 to 250 ms (upstream shows the same stall in its slow resumes), while the ioctl connect takes about 17 ms. The fixed port (one shared netlink connection on its own thread, upstream's close order) is kept outside the repository in `~/e2b-azure/nbd-netlink/` on the maintainer's machine | perf |
 
 ## Orchestrator: async pause (M11)
 
