@@ -383,7 +383,11 @@ mod tests {
         assert!(matches!(spanning, PageData::Owned(_)));
         assert_eq!(
             (&*mapped, &*zeroes, &*spanning),
-            (&[2; 4096][..], &[0; 4096][..], &[vec![1; 96], vec![2; 104]].concat()[..])
+            (
+                &[2; 4096][..],
+                &[0; 4096][..],
+                &[vec![1; 96], vec![2; 104]].concat()[..]
+            )
         );
     }
 

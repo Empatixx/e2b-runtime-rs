@@ -135,9 +135,7 @@ fn fetched_extents(
         .map(move |extent| {
             let memfile = memfile.clone();
             async move {
-                let data = memfile
-                    .slice(extent.offset(block_size), extent.bytes(block_size))
-                    .await;
+                let data = memfile.slice(extent.offset(block_size), extent.bytes(block_size)).await;
                 FetchedExtent { extent, data }
             }
         })
