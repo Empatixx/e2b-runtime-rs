@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 
 pub const INDEX_VERSION: &str = "v2";
 const GO_NIL: &str = "<nil>";
+const FILES_HASH_LENGTH: usize = 64;
 
 pub fn hash_keys<'a>(base: &str, keys: impl IntoIterator<Item = &'a str>) -> String {
     let digest = keys
@@ -33,6 +34,13 @@ impl BaseKey<'_> {
             .into_iter()
             .chain(self.envd_memory_protection.then_some(protection.as_str()));
         hash_keys(INDEX_VERSION, keys)
+    }
+}
+
+pub fn validate_files_hash(hash: &str) -> Result<(), String> {
+    match hash.len() == FILES_HASH_LENGTH && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
+        true => Ok(()),
+        false => Err(format!("invalid files hash: {}", crate::go_strconv::quote(hash))),
     }
 }
 

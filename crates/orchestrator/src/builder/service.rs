@@ -10,6 +10,7 @@ use tokio_util::task::TaskTracker;
 use tonic::{Request, Response, Status};
 
 use super::builds::{BuildCache, BuildInfo, BuildResult};
+use super::hash::validate_files_hash;
 use super::index::layer_files_path;
 use super::logs::LogQuery;
 use super::phase::{BuildError, CANCELLED};
@@ -200,6 +201,11 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
                 "template build requires either fromImage or fromTemplate",
             ));
         }
+        config
+            .steps
+            .iter()
+            .filter_map(|step| step.files_hash.as_deref())
+            .try_for_each(|hash| validate_files_hash(hash).map_err(Status::invalid_argument))?;
         let info = self
             .builds
             .register(&config.build_id)
@@ -281,6 +287,7 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
         request: Request<InitLayerFileUploadRequest>,
     ) -> Result<Response<InitLayerFileUploadResponse>, Status> {
         let request = request.into_inner();
+        validate_files_hash(&request.hash).map_err(Status::invalid_argument)?;
         let scope = request.cache_scope.clone().unwrap_or(request.template_id.clone());
         let path = layer_files_path(&scope, &request.hash);
         self.build_storage
@@ -320,6 +327,7 @@ mod tests {
     use crate::builder::phase::INTERNAL_ERROR_MESSAGE;
     use crate::go_url::GoUrl;
     use crate::proto::TemplateConfig;
+    use crate::proto::TemplateStep;
     use crate::storage::local_upload::UploadSigner;
     use crate::storage::spec::StorageSpec;
 
@@ -347,6 +355,9 @@ mod tests {
             .boxed()
         }
     }
+
+    const FILES_HASH_1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const FILES_HASH_2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
     struct Fixture {
         server: TemplateServer<Stub>,
@@ -414,6 +425,51 @@ mod tests {
                 "template build requires either fromImage or fromTemplate"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn a_step_with_a_malformed_files_hash_is_rejected() {
+        let fixture = fixture();
+        let mut request = create("b0", "");
+        request.get_mut().template.as_mut().unwrap().steps = vec![TemplateStep {
+            r#type: "COPY".to_owned(),
+            args: vec!["src".to_owned(), "/dst".to_owned()],
+            files_hash: Some(format!("../{}", "0".repeat(64))),
+            force: None,
+        }];
+
+        let error = fixture.server.template_create(request).await.unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().starts_with("invalid files hash: "));
+        assert!(fixture.server.builds.get("b0").is_err());
+    }
+
+    #[tokio::test]
+    async fn layer_file_upload_rejects_an_invalid_hash_before_touching_storage() {
+        let fixture = fixture();
+        let uppercase = FILES_HASH_1.replace('1', "A");
+        for hash in [
+            String::new(),
+            uppercase,
+            format!("../{FILES_HASH_1}"),
+            format!("/{FILES_HASH_1}"),
+            FILES_HASH_1[..63].to_owned(),
+            format!("{FILES_HASH_1}/x"),
+        ] {
+            let error = fixture
+                .server
+                .init_layer_file_upload(Request::new(InitLayerFileUploadRequest {
+                    template_id: "t1".to_owned(),
+                    hash: hash.clone(),
+                    cache_scope: None,
+                }))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{hash:?}");
+        }
+        assert!(!fixture._dir.path().join("t1").exists());
     }
 
     #[tokio::test]
@@ -607,12 +663,12 @@ mod tests {
         };
         fixture
             .storage
-            .put("t1/files/h1.tar", Bytes::from_static(b"tar"))
+            .put(&format!("t1/files/{FILES_HASH_1}.tar"), Bytes::from_static(b"tar"))
             .await
             .unwrap();
 
-        let hit = upload("h1").await.unwrap().into_inner();
-        let miss = upload("h2").await.unwrap_err();
+        let hit = upload(FILES_HASH_1).await.unwrap().into_inner();
+        let miss = upload(FILES_HASH_2).await.unwrap_err();
 
         assert_eq!((hit.present, hit.url), (true, None));
         assert_eq!(
@@ -639,7 +695,7 @@ mod tests {
         let response = server
             .init_layer_file_upload(Request::new(InitLayerFileUploadRequest {
                 template_id: "t1".to_owned(),
-                hash: "h1".to_owned(),
+                hash: FILES_HASH_1.to_owned(),
                 cache_scope: Some("scope".to_owned()),
             }))
             .await
@@ -650,7 +706,10 @@ mod tests {
         assert!(response.headers.is_empty());
         let url = GoUrl::parse(&response.url.unwrap()).unwrap();
         assert_eq!((url.host.as_str(), url.path.as_str()), ("node:5008", "/upload"));
-        assert_eq!(url.query().values["path"], vec!["scope/files/h1.tar".to_owned()]);
+        assert_eq!(
+            url.query().values["path"],
+            vec![format!("scope/files/{FILES_HASH_1}.tar")]
+        );
         assert!(dir.path().join("scope/files").is_dir());
     }
 }
