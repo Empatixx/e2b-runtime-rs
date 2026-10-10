@@ -220,7 +220,12 @@ async fn resumed_sandbox_keeps_files_and_answers_quickly() {
 
     let template = templates.cache.get(build_id);
     let loaded = template.build().await.unwrap();
-    assert_eq!(loaded, build);
+    let uploaded = Build {
+        memfile: build.memfile.finalized(),
+        rootfs: build.rootfs.finalized(),
+        ..build.clone()
+    };
+    assert_eq!(loaded, uploaded);
     let snapfile = template.snapfile().await.unwrap();
     let started = Instant::now();
     let resumed = templates
