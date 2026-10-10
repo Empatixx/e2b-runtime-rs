@@ -223,7 +223,7 @@ impl Sandbox {
 
     async fn settled_removals(&self) -> Result<RoaringBitmap, String> {
         match self.resources.memory.as_ref() {
-            Some(memory) => memory.settle().await.map(|()| memory.removed_pages()),
+            Some(memory) => memory.settle().await.map(|()| memory.empty_pages()),
             None => Ok(RoaringBitmap::new()),
         }
     }

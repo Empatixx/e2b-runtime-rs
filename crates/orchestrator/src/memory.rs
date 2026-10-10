@@ -1,3 +1,4 @@
+pub mod balloon_mode;
 pub mod cow_window;
 pub mod dedup;
 #[cfg(target_os = "linux")]

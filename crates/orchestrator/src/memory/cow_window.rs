@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use roaring::RoaringBitmap;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -33,7 +33,7 @@ pub struct CowWindow {
     sink: Arc<dyn PageSink>,
     tracker: Option<Arc<PageTracker>>,
     copied: AtomicBitmap,
-    claims: Mutex<HashMap<u32, watch::Receiver<bool>>>,
+    claims: Mutex<HashMap<u32, Arc<Flight>>>,
     remaining: AtomicI64,
     canceled: AtomicBool,
     cancel_cause: OnceLock<String>,
@@ -68,11 +68,11 @@ impl CowWindow {
         window
     }
 
-    pub async fn ensure_copied(&self, page: u32) -> bool {
-        self.capture(page, CaptureSource::Fault).await
+    pub fn ensure_copied(&self, page: u32) -> bool {
+        self.capture(page, CaptureSource::Fault)
     }
 
-    async fn capture(&self, page: u32, via: CaptureSource) -> bool {
+    fn capture(&self, page: u32, via: CaptureSource) -> bool {
         if !self.pages.contains(page) || self.canceled.load(Ordering::Acquire) {
             return false;
         }
@@ -81,17 +81,17 @@ impl CowWindow {
         }
         match self.claim(page) {
             Claim::Settled => !self.canceled.load(Ordering::Acquire),
-            Claim::Waiting(mut finished) => {
-                let _ = finished.wait_for(|finished| *finished).await;
+            Claim::Waiting(flight) => {
+                flight.wait();
                 true
             }
-            Claim::Won(finished) => {
+            Claim::Won(flight) => {
                 self.copy_page(page);
                 if self.copied.get(page) {
                     record_cow_capture(via);
                 }
                 self.claims.lock().remove(&page);
-                let _ = finished.send(true);
+                flight.land();
                 true
             }
         }
@@ -102,12 +102,12 @@ impl CowWindow {
         if self.copied.get(page) || self.canceled.load(Ordering::Acquire) {
             return Claim::Settled;
         }
-        if let Some(finished) = claims.get(&page) {
-            return Claim::Waiting(finished.clone());
+        if let Some(flight) = claims.get(&page) {
+            return Claim::Waiting(flight.clone());
         }
-        let (finished, waiting) = watch::channel(false);
-        claims.insert(page, waiting);
-        Claim::Won(finished)
+        let flight = Arc::new(Flight::default());
+        claims.insert(page, flight.clone());
+        Claim::Won(flight)
     }
 
     fn copy_page(&self, page: u32) {
@@ -140,7 +140,16 @@ impl CowWindow {
         self.copied.set(page);
     }
 
-    pub async fn sweep(&self, interrupted: &CancellationToken) -> Result<(), String> {
+    pub async fn sweep(self: &Arc<Self>, interrupted: &CancellationToken) -> Result<(), String> {
+        let window = self.clone();
+        let interrupted = interrupted.clone();
+        tokio::task::spawn_blocking(move || window.capture_all(&interrupted))
+            .await
+            .map_err(|e| format!("CoW window sweep task: {e}"))?;
+        self.wait().await
+    }
+
+    fn capture_all(&self, interrupted: &CancellationToken) {
         for page in &self.pages {
             if self.canceled.load(Ordering::Acquire) {
                 break;
@@ -150,9 +159,8 @@ impl CowWindow {
                 self.cancel("CoW window: sweep interrupted: context canceled".to_owned());
                 break;
             }
-            self.capture(page, CaptureSource::Sweep).await;
+            self.capture(page, CaptureSource::Sweep);
         }
-        self.wait().await
     }
 
     pub fn cancel(&self, error: String) {
@@ -180,16 +188,10 @@ impl CowWindow {
         }
     }
 
-    pub async fn cancel_and_drain(&self, error: String) {
+    pub fn cancel_and_drain(&self, error: String) {
         self.cancel(error);
-        loop {
-            let claim = self.claims.lock().values().next().cloned();
-            match claim {
-                None => return,
-                Some(mut finished) => {
-                    let _ = finished.wait_for(|finished| *finished).await;
-                }
-            }
+        while let Some(flight) = self.claims.lock().values().next().cloned() {
+            flight.wait();
         }
     }
 
@@ -218,8 +220,28 @@ impl CowWindow {
 
 enum Claim {
     Settled,
-    Waiting(watch::Receiver<bool>),
-    Won(watch::Sender<bool>),
+    Waiting(Arc<Flight>),
+    Won(Arc<Flight>),
+}
+
+#[derive(Default)]
+struct Flight {
+    landed: Mutex<bool>,
+    arrived: Condvar,
+}
+
+impl Flight {
+    fn wait(&self) {
+        let mut landed = self.landed.lock();
+        while !*landed {
+            self.arrived.wait(&mut landed);
+        }
+    }
+
+    fn land(&self) {
+        *self.landed.lock() = true;
+        self.arrived.notify_all();
+    }
 }
 
 #[cfg(test)]
@@ -298,7 +320,7 @@ mod tests {
             let window = fixture.window.clone();
             let source = fixture.source.clone();
             tokio::spawn(async move {
-                window.ensure_copied(page).await;
+                window.ensure_copied(page);
                 source.overwrite_page(page, 0xEE);
             })
         });
@@ -336,7 +358,7 @@ mod tests {
             let window = window.clone();
             let live = live.clone();
             tokio::spawn(async move {
-                window.ensure_copied(page).await;
+                window.ensure_copied(page);
                 live.overwrite_page(page, 0xEE);
             })
         });
@@ -365,7 +387,7 @@ mod tests {
             let window = fixture.window.clone();
             tokio::spawn(async move {
                 for page in 0..PAGES {
-                    window.ensure_copied(page).await;
+                    window.ensure_copied(page);
                 }
             })
         });
@@ -388,10 +410,7 @@ mod tests {
 
         fixture.window.cancel("checkpoint aborted".to_owned());
 
-        assert!(
-            !fixture.window.ensure_copied(3).await,
-            "a canceled window owns no pages"
-        );
+        assert!(!fixture.window.ensure_copied(3), "a canceled window owns no pages");
         assert_eq!(fixture.sink.write_count(3 * PAGE_SIZE), 0, "no copy after cancel");
         assert!(fixture.window.wait().await.unwrap_err().starts_with(CANCELED));
         let swept = fixture.window.sweep(&never_interrupted()).await;
@@ -410,7 +429,7 @@ mod tests {
 
         assert!(swept.unwrap_err().starts_with(CANCELED));
         assert!(fixture.window.wait().await.unwrap_err().starts_with(CANCELED));
-        fixture.window.ensure_copied(7).await;
+        fixture.window.ensure_copied(7);
     }
 
     #[tokio::test]
@@ -420,7 +439,7 @@ mod tests {
         tracker.set_range(0..PAGES, PageState::Dirty);
         let fixture = fixture(PAGES, 0..PAGES, Some(tracker.clone()));
 
-        assert!(fixture.window.ensure_copied(5).await, "page 5 belongs to the window");
+        assert!(fixture.window.ensure_copied(5), "page 5 belongs to the window");
         tracker.mark_written(5);
         fixture.window.sweep(&never_interrupted()).await.unwrap();
         fixture.window.wait().await.unwrap();
@@ -457,7 +476,7 @@ mod tests {
         assert!(fixture.window.overlaps(5, 6), "exact window page");
         assert!(!fixture.window.overlaps(10, 16), "above the set");
 
-        assert!(fixture.window.ensure_copied(5).await);
+        assert!(fixture.window.ensure_copied(5));
         assert!(fixture.window.overlaps(5, 6), "a captured page still trips");
         fixture.window.sweep(&never_interrupted()).await.unwrap();
         assert!(fixture.window.overlaps(0, 16), "a fully captured window still trips");
@@ -487,7 +506,7 @@ mod tests {
                 let window = fixture.window.clone();
                 let source = fixture.source.clone();
                 tokio::spawn(async move {
-                    window.ensure_copied(page).await;
+                    window.ensure_copied(page);
                     source.overwrite_first_byte(page, 0xAA);
                 })
             });
@@ -503,7 +522,7 @@ mod tests {
     async fn a_cancel_that_lost_the_done_race_stays_authoritative() {
         let fixture = fixture(1, [0], None);
 
-        assert!(fixture.window.ensure_copied(0).await);
+        assert!(fixture.window.ensure_copied(0));
         fixture
             .window
             .cancel("REMOVE zapped uncaptured window pages".to_owned());
@@ -534,7 +553,7 @@ mod tests {
     async fn cancel_and_drain_returns_when_no_copy_is_in_flight() {
         let fixture = fixture(4, 0..4, None);
 
-        fixture.window.cancel_and_drain("teardown".to_owned()).await;
+        fixture.window.cancel_and_drain("teardown".to_owned());
 
         assert!(fixture.window.cancel_cause().is_some());
     }
@@ -578,13 +597,13 @@ mod tests {
         for (name, source) in sources {
             let packed = MemorySink::new(dirty.len() as u64 * PAGE_SIZE);
             let pages = bitmap(dirty);
-            let window = CowWindow::new(
+            let window = Arc::new(CowWindow::new(
                 pages.clone(),
                 PAGE_SIZE,
                 source,
                 Arc::new(PackedPageSink::new(pages, PAGE_SIZE, packed.clone())),
                 None,
-            );
+            ));
 
             window.sweep(&never_interrupted()).await.unwrap();
             window.wait().await.unwrap();

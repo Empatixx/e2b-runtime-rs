@@ -2,19 +2,28 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use linux_raw_sys::general::{
-    UFFD_EVENT_PAGEFAULT, UFFD_EVENT_REMOVE, UFFD_PAGEFAULT_FLAG_WP, UFFD_PAGEFAULT_FLAG_WRITE, UFFDIO_COPY_MODE_WP,
-    uffd_msg, uffdio_copy, uffdio_range,
+    UFFD_EVENT_PAGEFAULT, UFFD_EVENT_REMOVE, UFFD_PAGEFAULT_FLAG_MINOR, UFFD_PAGEFAULT_FLAG_WP,
+    UFFD_PAGEFAULT_FLAG_WRITE, UFFDIO_COPY_MODE_DONTWAKE, UFFDIO_COPY_MODE_WP, uffd_msg, uffdio_copy, uffdio_range,
+    uffdio_writeprotect, uffdio_zeropage,
 };
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 const UFFD_MSG_SIZE: usize = size_of::<uffd_msg>();
+const WRITE_PROTECT_MODE_WP: u64 = 1;
 const EVENTS_PER_READ: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    PageFault { address: u64, write: bool },
-    Remove { start: u64, end: u64 },
+    PageFault {
+        address: u64,
+        write: bool,
+        write_protect: bool,
+    },
+    Remove {
+        start: u64,
+        end: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,16 +35,48 @@ pub enum CopyOutcome {
     NoWriteProtect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyMode {
+    pub write_protect: bool,
+    pub wake: bool,
+}
+
+impl CopyMode {
+    pub const PLAIN: CopyMode = CopyMode {
+        write_protect: false,
+        wake: true,
+    };
+    pub const PROTECTED: CopyMode = CopyMode {
+        write_protect: true,
+        wake: true,
+    };
+    pub const PROTECTED_WITHOUT_WAKE: CopyMode = CopyMode {
+        write_protect: true,
+        wake: false,
+    };
+
+    fn bits(self) -> u64 {
+        let protect = if self.write_protect { UFFDIO_COPY_MODE_WP } else { 0 };
+        let dont_wake = if self.wake { 0 } else { UFFDIO_COPY_MODE_DONTWAKE };
+        u64::from(protect | dont_wake)
+    }
+}
+
 #[derive(Debug)]
 pub struct Uffd {
     fd: OwnedFd,
 }
 
 mod ioctls {
-    use linux_raw_sys::general::{_UFFDIO_COPY, _UFFDIO_WAKE, UFFDIO, uffdio_copy, uffdio_range};
+    use linux_raw_sys::general::{
+        _UFFDIO_COPY, _UFFDIO_WAKE, _UFFDIO_WRITEPROTECT, _UFFDIO_ZEROPAGE, UFFDIO, uffdio_copy, uffdio_range,
+        uffdio_writeprotect, uffdio_zeropage,
+    };
 
     nix::ioctl_read!(wake, UFFDIO, _UFFDIO_WAKE, uffdio_range);
     nix::ioctl_readwrite!(copy, UFFDIO, _UFFDIO_COPY, uffdio_copy);
+    nix::ioctl_readwrite!(zeropage, UFFDIO, _UFFDIO_ZEROPAGE, uffdio_zeropage);
+    nix::ioctl_readwrite!(write_protect, UFFDIO, _UFFDIO_WRITEPROTECT, uffdio_writeprotect);
 }
 
 impl Uffd {
@@ -64,22 +105,55 @@ impl Uffd {
     }
 
     pub fn copy(&self, dst: u64, src: &[u8], write_protect: bool) -> io::Result<CopyOutcome> {
+        let mode = match write_protect {
+            true => CopyMode::PROTECTED,
+            false => CopyMode::PLAIN,
+        };
+        self.copy_with(dst, src, mode)
+    }
+
+    pub fn copy_with(&self, dst: u64, src: &[u8], mode: CopyMode) -> io::Result<CopyOutcome> {
         let len = src.len() as u64;
         let mut request = uffdio_copy {
             dst,
             src: src.as_ptr() as u64,
             len,
-            mode: if write_protect { UFFDIO_COPY_MODE_WP.into() } else { 0 },
+            mode: mode.bits(),
             copy: 0,
         };
         match unsafe { ioctls::copy(self.fd.as_raw_fd(), &mut request) } {
             Ok(_) if request.copy == len as i64 => Ok(CopyOutcome::Copied),
-            Err(Errno::EINVAL) if write_protect => Ok(CopyOutcome::NoWriteProtect),
+            Err(Errno::EINVAL) if mode.write_protect => Ok(CopyOutcome::NoWriteProtect),
             Ok(_) | Err(Errno::EAGAIN) => Ok(CopyOutcome::Retry),
             Err(Errno::EEXIST) => Ok(CopyOutcome::AlreadyPresent),
             Err(Errno::ESRCH) => Ok(CopyOutcome::Gone),
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn zero(&self, start: u64, len: u64) -> io::Result<CopyOutcome> {
+        let mut request = uffdio_zeropage {
+            range: uffdio_range { start, len },
+            mode: 0,
+            zeropage: 0,
+        };
+        match unsafe { ioctls::zeropage(self.fd.as_raw_fd(), &mut request) } {
+            Ok(_) if request.zeropage == len as i64 => Ok(CopyOutcome::Copied),
+            Ok(_) | Err(Errno::EAGAIN) => Ok(CopyOutcome::Retry),
+            Err(Errno::EEXIST) => Ok(CopyOutcome::AlreadyPresent),
+            Err(Errno::ESRCH) => Ok(CopyOutcome::Gone),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn write_protect(&self, start: u64, len: u64, protect: bool) -> io::Result<()> {
+        let mut request = uffdio_writeprotect {
+            range: uffdio_range { start, len },
+            mode: if protect { WRITE_PROTECT_MODE_WP } else { 0 },
+        };
+        unsafe { ioctls::write_protect(self.fd.as_raw_fd(), &mut request) }
+            .map(|_| ())
+            .map_err(io::Error::from)
     }
 
     pub fn wake(&self, start: u64, len: u64) -> io::Result<()> {
@@ -104,13 +178,13 @@ fn parse_events(bytes: &[u8]) -> io::Result<Vec<Event>> {
 fn parse_event(message: &[u8; UFFD_MSG_SIZE]) -> io::Result<Event> {
     let word = |index: usize| u64::from_ne_bytes(message[8 + index * 8..16 + index * 8].try_into().unwrap_or_default());
     match u32::from(message[0]) {
-        UFFD_EVENT_PAGEFAULT if word(0) & u64::from(UFFD_PAGEFAULT_FLAG_WP) != 0 => Err(io::Error::other(format!(
-            "write-protect fault at {:#x}: firecracker registered memory without WP_ASYNC",
-            word(1)
-        ))),
+        UFFD_EVENT_PAGEFAULT if word(0) & u64::from(UFFD_PAGEFAULT_FLAG_MINOR) != 0 => {
+            Err(io::Error::other("unexpected MINOR pagefault event, closing UFFD"))
+        }
         UFFD_EVENT_PAGEFAULT => Ok(Event::PageFault {
             address: word(1),
             write: word(0) & u64::from(UFFD_PAGEFAULT_FLAG_WRITE) != 0,
+            write_protect: word(0) & u64::from(UFFD_PAGEFAULT_FLAG_WP) != 0,
         }),
         UFFD_EVENT_REMOVE => Ok(Event::Remove {
             start: word(0),
@@ -201,6 +275,14 @@ pub mod testing {
             )
         }
 
+        pub fn register_sync_write_protected(&self) -> Option<Uffd> {
+            self.register_with(
+                UFFDIO_REGISTER_MODE_MISSING | UFFDIO_REGISTER_MODE_WP,
+                UFFD_FEATURE_EVENT_REMOVE,
+            )
+            .ok()
+        }
+
         pub fn write_protected(address: u64) -> bool {
             let page = address / 4096;
             let mut entry = [0u8; 8];
@@ -284,7 +366,8 @@ mod tests {
             events,
             vec![Event::PageFault {
                 address: pages.address() + 2 * PAGE,
-                write: false
+                write: false,
+                write_protect: false
             }]
         );
         let source = vec![0xAB; PAGE as usize];
@@ -351,15 +434,31 @@ mod tests {
     }
 
     #[test]
-    fn synchronous_write_protect_faults_are_errors() {
+    fn synchronous_write_protect_faults_are_events() {
         let mut message = [0u8; UFFD_MSG_SIZE];
         message[0] = UFFD_EVENT_PAGEFAULT as u8;
         message[8..16].copy_from_slice(&u64::from(UFFD_PAGEFAULT_FLAG_WP | UFFD_PAGEFAULT_FLAG_WRITE).to_ne_bytes());
         message[16..24].copy_from_slice(&0x7000u64.to_ne_bytes());
 
         assert_eq!(
+            parse_events(&message).unwrap(),
+            vec![Event::PageFault {
+                address: 0x7000,
+                write: true,
+                write_protect: true
+            }]
+        );
+    }
+
+    #[test]
+    fn minor_faults_are_errors() {
+        let mut message = [0u8; UFFD_MSG_SIZE];
+        message[0] = UFFD_EVENT_PAGEFAULT as u8;
+        message[8..16].copy_from_slice(&u64::from(UFFD_PAGEFAULT_FLAG_MINOR).to_ne_bytes());
+
+        assert_eq!(
             parse_events(&message).unwrap_err().to_string(),
-            "write-protect fault at 0x7000: firecracker registered memory without WP_ASYNC"
+            "unexpected MINOR pagefault event, closing UFFD"
         );
     }
 

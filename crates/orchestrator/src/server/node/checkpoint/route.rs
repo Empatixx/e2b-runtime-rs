@@ -1,5 +1,3 @@
-use crate::template::metadata::Balloon;
-
 pub const IN_PLACE: &str = "in_place";
 pub const SYNC_WP_OFF: &str = "sync_wp_off";
 pub const FLAG_OFF: &str = "flag_off";
@@ -7,33 +5,7 @@ pub const FC_UNSUPPORTED: &str = "fc_unsupported";
 pub const BALLOON_REPORTING: &str = "balloon_reporting";
 pub const BALLOON_UNKNOWN: &str = "balloon_unknown";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BalloonMode {
-    Unknown,
-    None,
-    Reporting,
-    Hinting,
-}
-
-impl BalloonMode {
-    pub fn stamped(balloon: Option<Balloon>) -> Self {
-        match balloon {
-            None => Self::Unknown,
-            Some(Balloon { reporting: true, .. }) => Self::Reporting,
-            Some(Balloon { hinting: true, .. }) => Self::Hinting,
-            Some(_) => Self::None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::None => "none",
-            Self::Reporting => "reporting",
-            Self::Hinting => "hinting",
-        }
-    }
-}
+pub use crate::memory::balloon_mode::BalloonMode;
 
 pub fn early_route(sync_wp: bool, flag_on: bool, firecracker_supported: impl FnOnce() -> bool) -> Option<&'static str> {
     if !sync_wp {
@@ -70,6 +42,7 @@ fn reporting_route(
 
 #[cfg(test)]
 mod tests {
+    use crate::template::metadata::Balloon;
     use std::cell::Cell;
 
     use super::*;

@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -10,24 +10,36 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use self::deferred::DeferredFaults;
 use self::read_retry::with_read_retries;
 use self::retry_timer::RetryTimer;
 use self::state::SharedState;
+use super::balloon_mode::BalloonMode;
+use super::cow_window::{CowWindow, PageSink, PageSource, coalesce_write_protect_runs};
+use super::page_tracker::{ExportedPages, PageState};
 use super::prefetch::{Installer, Prefaulted};
 use super::region::Regions;
 use super::trace::{Access, Trace};
 use super::uffd::{CopyOutcome, Event, Uffd};
 use crate::block::build_file::BuildFile;
 use crate::block::page_data::PageData;
+use crate::telemetry::uffd::{FaultResult, PageClass, record_memfile_leg_fault, record_prefault, record_serve};
 
+mod counters;
+mod deferred;
 mod read_retry;
+mod resolve;
 mod retry_timer;
 mod state;
+mod wp_failures;
 mod write_protect;
+
+pub use self::counters::ServeStats;
 
 const MAX_FAULTS_IN_FLIGHT: usize = 4096;
 const RETRY_DELAY: Duration = Duration::from_millis(1);
 const STOPPED: &str = "the memory server has stopped";
+const SMALL_PAGE: u64 = 4096;
 
 type Settled = oneshot::Sender<()>;
 
@@ -60,10 +72,11 @@ async fn request_settle(settles: &mpsc::UnboundedSender<Settled>) -> Result<(), 
     reply.await.map_err(|_| STOPPED.to_owned())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fault {
     address: u64,
     write: bool,
+    write_protect: bool,
 }
 
 struct Serving {
@@ -75,7 +88,8 @@ struct Serving {
 
 impl MemoryServer {
     pub fn start(uffd: Uffd, regions: Regions, memfile: Arc<BuildFile>, memfd: Option<File>) -> io::Result<Self> {
-        let state = Arc::new(SharedState::new(regions.page_size()));
+        let generation = memfile.header().metadata.generation;
+        let state = Arc::new(SharedState::new(regions.page_size(), generation));
         let uffd = Arc::new(AsyncFd::new(uffd)?);
         let serving = Serving {
             uffd: uffd.clone(),
@@ -133,15 +147,84 @@ impl MemoryServer {
     }
 
     pub fn faults_served(&self) -> u64 {
-        self.state.served()
+        self.state.stats().pages.max(0) as u64
+    }
+
+    pub fn serve_stats(&self) -> ServeStats {
+        self.state.stats()
+    }
+
+    pub fn wp_faults_resolved(&self) -> i64 {
+        self.state.stats().wp_faults
+    }
+
+    pub fn set_balloon_mode(&self, mode: BalloonMode) {
+        self.state.set_balloon_mode(mode);
     }
 
     pub fn write_protecting(&self) -> bool {
         self.state.write_protecting()
     }
 
-    pub fn removed_pages(&self) -> RoaringBitmap {
-        self.state.removed()
+    pub fn empty_pages(&self) -> RoaringBitmap {
+        self.state.tracker.export().empty
+    }
+
+    pub fn page_state(&self, page: u32) -> PageState {
+        self.state.page_state(page)
+    }
+
+    pub async fn export_page_states(&self) -> Result<ExportedPages, String> {
+        self.settle().await?;
+        Ok(self.state.tracker.export())
+    }
+
+    pub fn arm_write_protect(&self, pages: &RoaringBitmap) -> Result<(), String> {
+        coalesce_write_protect_runs(pages, &self.regions)
+            .map_err(|e| format!("arm write-protect: {e}"))?
+            .into_iter()
+            .try_for_each(|run| {
+                self.uffd
+                    .get_ref()
+                    .write_protect(run.start, run.length, true)
+                    .map_err(|e| {
+                        format!(
+                            "arm write-protect [{:#x}, {:#x}): {e}",
+                            run.start,
+                            run.start + run.length
+                        )
+                    })
+            })
+    }
+
+    pub fn begin_cow_export(
+        &self,
+        pages: &RoaringBitmap,
+        source: Arc<dyn PageSource>,
+        sink: Arc<dyn PageSink>,
+    ) -> Result<Arc<CowWindow>, String> {
+        self.arm_write_protect(pages)?;
+        let window = Arc::new(CowWindow::new(
+            pages.clone(),
+            self.regions.page_size(),
+            source,
+            sink,
+            Some(self.state.tracker.clone()),
+        ));
+        self.state.install_cow_window(window.clone());
+        Ok(window)
+    }
+
+    pub async fn end_cow_export(&self, window: &Arc<CowWindow>) {
+        let _ = self.settle().await;
+        self.state.uninstall_cow_window(window);
+    }
+
+    pub fn cancel_active_cow_window(&self, error: String) {
+        if let Some(window) = self.state.take_cow_window() {
+            crate::telemetry::uffd::record_cow_cancel("teardown");
+            window.cancel_and_drain(error);
+        }
     }
 
     pub async fn settle(&self) -> Result<(), String> {
@@ -165,7 +248,12 @@ impl MemoryServer {
 
     pub async fn stop(self) -> Result<(), String> {
         let _ = self.stop.send(());
-        self.task.await.map_err(|e| format!("memory server task: {e}"))?
+        let served = self.task.await.map_err(|e| format!("memory server task: {e}"))?;
+        self.state.take_cow_window().into_iter().for_each(|window| {
+            crate::telemetry::uffd::record_cow_cancel("teardown");
+            window.cancel_and_drain("memory server stopped".to_owned());
+        });
+        served
     }
 }
 
@@ -190,32 +278,55 @@ impl Installer for Prefaulter {
     }
 
     fn prefault(&self, offset: u64, data: &[u8]) -> Result<Prefaulted, String> {
+        let started = Instant::now();
         let page_size = self.regions.page_size();
-        if data.len() as u64 != page_size {
-            return Err(format!(
-                "prefault of {} bytes, the page size is {page_size}",
-                data.len()
-            ));
-        }
-        let page = (offset / page_size) as u32;
         let installing = self.state.installing();
         if installing.closed {
             return Ok(Prefaulted::Closed);
         }
-        let Some(address) = self.regions.address_of(offset) else {
-            return Ok(Prefaulted::Skipped);
+        let (prefaulted, result) = self.install_prefetched(offset, data, page_size)?;
+        let bytes = match prefaulted {
+            Prefaulted::Installed => page_size,
+            _ => 0,
         };
+        record_prefault(self.state.generation, result, started.elapsed(), bytes);
+        Ok(prefaulted)
+    }
+}
+
+impl Prefaulter {
+    fn install_prefetched(
+        &self,
+        offset: u64,
+        data: &[u8],
+        page_size: u64,
+    ) -> Result<(Prefaulted, FaultResult), String> {
+        let Some(address) = self.regions.address_of(offset) else {
+            return Err(format!(
+                "failed to get host virtual address: offset {offset:#x} is outside guest memory"
+            ));
+        };
+        if data.len() as u64 != page_size {
+            return Err(format!(
+                "data length ({}) does not match pagesize ({page_size})",
+                data.len()
+            ));
+        }
+        let page = (offset / page_size) as u32;
         if !self.state.is_untouched(page) {
-            return Ok(Prefaulted::Skipped);
+            return Ok((Prefaulted::Skipped, FaultResult::Skipped));
         }
         match self.state.copy_page(self.uffd.get_ref(), address, data, true)? {
             CopyOutcome::Copied => {
-                self.state.touched(page, Access::Prefetch);
-                Ok(Prefaulted::Installed)
+                self.state.installed(page, Access::Prefetch, false);
+                Ok((Prefaulted::Installed, FaultResult::Installed))
             }
-            CopyOutcome::AlreadyPresent => Ok(Prefaulted::Present),
-            CopyOutcome::Retry | CopyOutcome::NoWriteProtect => Ok(Prefaulted::Deferred),
-            CopyOutcome::Gone => Err("the guest memory is gone".to_owned()),
+            CopyOutcome::AlreadyPresent => {
+                self.state.trace_prefetch(page);
+                Ok((Prefaulted::Present, FaultResult::Present))
+            }
+            CopyOutcome::Retry | CopyOutcome::NoWriteProtect => Ok((Prefaulted::Deferred, FaultResult::Deferred)),
+            CopyOutcome::Gone => Ok((Prefaulted::Skipped, FaultResult::Discarded)),
         }
     }
 }
@@ -227,7 +338,7 @@ impl Serving {
         mut settles: mpsc::UnboundedReceiver<Settled>,
     ) -> Result<(), String> {
         let mut in_flight = FuturesUnordered::new();
-        let mut retries = Vec::new();
+        let mut deferred = DeferredFaults::default();
         let mut waiting = Vec::new();
         let mut retry_timer = RetryTimer::new(RETRY_DELAY);
         loop {
@@ -235,23 +346,28 @@ impl Serving {
             tokio::select! {
                 _ = &mut stopped => return Ok(()),
                 Some(waiter) = settles.recv() => waiting.push(waiter),
-                events = self.next_events(&mut retry_timer, !retries.is_empty()), if room => {
+                events = self.next_events(&mut retry_timer, !deferred.is_empty()), if room => {
                     let faults = match events {
                         Ok(events) => self.record_removals(events),
                         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                         Err(e) => return Err(format!("read uffd events: {e}")),
                     };
-                    in_flight.extend(retries.drain(..).chain(faults).map(|fault| self.serve_fault(fault)));
+                    let mut dispatch = DeferredFaults::default();
+                    dispatch.extend(deferred.drain());
+                    dispatch.extend(faults);
+                    in_flight.extend(dispatch.drain().into_iter().map(|fault| self.serve_fault(fault)));
                 }
                 Some(served) = in_flight.next() => {
-                    let was_idle = retries.is_empty();
-                    retries.extend(served?);
-                    if was_idle && !retries.is_empty() {
+                    let was_idle = deferred.is_empty();
+                    if let Some(retry) = served? {
+                        deferred.push(retry);
+                    }
+                    if was_idle && !deferred.is_empty() {
                         retry_timer.arm();
                     }
                 }
             }
-            if in_flight.is_empty() && retries.is_empty() {
+            if in_flight.is_empty() && deferred.is_empty() {
                 let faults = self.settle_waiting(&mut waiting)?;
                 in_flight.extend(faults.into_iter().map(|fault| self.serve_fault(fault)));
             }
@@ -295,7 +411,15 @@ impl Serving {
         events
             .into_iter()
             .filter_map(|event| match event {
-                Event::PageFault { address, write } => Some(Fault { address, write }),
+                Event::PageFault {
+                    address,
+                    write,
+                    write_protect,
+                } => Some(Fault {
+                    address,
+                    write,
+                    write_protect,
+                }),
                 Event::Remove { start, end } => {
                     self.mark_removed(start, end);
                     None
@@ -306,63 +430,137 @@ impl Serving {
 
     fn mark_removed(&self, start: u64, end: u64) {
         let page_size = self.regions.page_size();
-        let pages = (start..end)
-            .step_by(page_size as usize)
-            .filter_map(|address| self.regions.offset_of(address).ok())
-            .map(|offset| (offset / page_size) as u32);
-        self.state.mark_removed(pages);
+        match self.regions.offset_of(start) {
+            Ok(offset) => {
+                let first = (offset / page_size) as u32;
+                let pages = ((end - start) / page_size) as u32;
+                self.state.mark_removed(first..first + pages);
+            }
+            Err(e) => tracing::error!(start, error = %e, "UFFD REMOVE: failed to map start address"),
+        }
     }
 
     async fn serve_fault(&self, fault: Fault) -> Result<Option<Fault>, String> {
+        match fault.write_protect {
+            true => self.resolve_write_protect(fault),
+            false => self.serve_missing(fault).await,
+        }
+    }
+
+    async fn serve_missing(&self, fault: Fault) -> Result<Option<Fault>, String> {
+        let started = Instant::now();
         let page = fault.address & !(self.regions.page_size() - 1);
-        self.install(page, fault.write)
+        let mut served = Served::default();
+        let outcome = self
+            .install(page, fault.write, &mut served)
             .await
-            .map_err(|e| format!("serve page at {page:#x}: {e}"))
-            .map(|outcome| matches!(outcome, CopyOutcome::Retry).then_some(fault))
+            .map_err(|e| format!("serve page at {page:#x}: {e}"));
+        if outcome.is_err() {
+            served.result = FaultResult::Error;
+        }
+        self.state
+            .counters
+            .record_serve(served.class, served.result, served.bytes);
+        record_serve(
+            self.state.balloon_mode(),
+            self.state.generation,
+            served.class,
+            served.result,
+            started.elapsed(),
+            served.bytes.max(0) as u64,
+        );
+        outcome.map(|outcome| matches!(outcome, CopyOutcome::Retry).then_some(fault))
     }
 
-    async fn install(&self, page: u64, write: bool) -> Result<CopyOutcome, String> {
+    async fn install(&self, page: u64, write: bool, served: &mut Served) -> Result<CopyOutcome, String> {
         let offset = self.regions.offset_of(page)?;
-        let bytes = with_read_retries(|| self.page_bytes(offset)).await?;
-        self.install_bytes(page, offset, bytes, write)
+        let index = (offset / self.regions.page_size()) as u32;
+        let source = match self.state.page_state(index) {
+            PageState::Dirty | PageState::Clean => {
+                served.class = PageClass::Resident;
+                served.result = FaultResult::Present;
+                return Ok(CopyOutcome::AlreadyPresent);
+            }
+            PageState::Zero | PageState::Removed => {
+                served.class = PageClass::Zero;
+                None
+            }
+            PageState::NotPresent => {
+                served.class = PageClass::New;
+                Some(
+                    with_read_retries(|| self.page_bytes(offset))
+                        .await
+                        .inspect_err(|_| record_memfile_leg_fault())?,
+                )
+            }
+        };
+        self.install_bytes(page, index, source, write, served)
     }
 
-    fn install_bytes(&self, page: u64, offset: u64, bytes: PageData, write: bool) -> Result<CopyOutcome, String> {
-        let index = (offset / self.regions.page_size()) as u32;
+    fn install_bytes(
+        &self,
+        page: u64,
+        index: u32,
+        source: Option<PageData>,
+        write: bool,
+        served: &mut Served,
+    ) -> Result<CopyOutcome, String> {
+        let page_size = self.regions.page_size();
         let _installing = self.state.installing();
-        let bytes = match self.state.is_removed(index) {
-            true => PageData::zeroes(bytes.len()),
-            false => bytes,
+        let bytes = match (self.state.page_state(index), source) {
+            (PageState::Dirty | PageState::Clean, _) => {
+                served.class = PageClass::Resident;
+                served.result = FaultResult::Present;
+                return Ok(CopyOutcome::AlreadyPresent);
+            }
+            (PageState::Zero | PageState::Removed, _) | (PageState::NotPresent, None) => None,
+            (PageState::NotPresent, Some(bytes)) => Some(bytes),
         };
-        let outcome = self.state.copy_page(self.uffd.get_ref(), page, &bytes, !write)?;
-        self.after_copy(page, outcome)?;
-        if matches!(outcome, CopyOutcome::Copied | CopyOutcome::AlreadyPresent) {
-            let access = if write { Access::Write } else { Access::Read };
-            self.state.touched(index, access);
+        let zero_filled = bytes.is_none();
+        let outcome = match (&bytes, write, page_size) {
+            (None, true, SMALL_PAGE) => self.uffd.get_ref().zero(page, page_size).map_err(|e| e.to_string())?,
+            (None, _, _) => {
+                self.state
+                    .copy_page(self.uffd.get_ref(), page, &PageData::zeroes(page_size as usize), !write)?
+            }
+            (Some(bytes), _, _) => self.state.copy_page(self.uffd.get_ref(), page, bytes, !write)?,
+        };
+        let access = if write { Access::Write } else { Access::Read };
+        match outcome {
+            CopyOutcome::Copied => {
+                served.result = FaultResult::Installed;
+                served.bytes = page_size as i64;
+                self.state.installed(index, access, zero_filled);
+            }
+            CopyOutcome::AlreadyPresent => {
+                served.result = FaultResult::Present;
+                self.uffd.get_ref().wake(page, page_size).map_err(|e| e.to_string())?;
+                self.state.installed(index, access, zero_filled);
+            }
+            CopyOutcome::Retry => served.result = FaultResult::Deferred,
+            CopyOutcome::Gone => served.result = FaultResult::Discarded,
+            CopyOutcome::NoWriteProtect => {}
         }
         Ok(outcome)
     }
 
-    fn after_copy(&self, page: u64, outcome: CopyOutcome) -> Result<(), String> {
-        match outcome {
-            CopyOutcome::Copied => {
-                self.state.count_served();
-                Ok(())
-            }
-            CopyOutcome::AlreadyPresent => self
-                .uffd
-                .get_ref()
-                .wake(page, self.regions.page_size())
-                .map_err(|e| e.to_string()),
-            CopyOutcome::Retry | CopyOutcome::Gone | CopyOutcome::NoWriteProtect => Ok(()),
-        }
-    }
-
     async fn page_bytes(&self, offset: u64) -> Result<PageData, String> {
-        let page_size = self.regions.page_size();
-        match self.state.is_removed((offset / page_size) as u32) {
-            true => Ok(PageData::zeroes(page_size as usize)),
-            false => self.memfile.slice(offset, page_size as usize).await,
+        self.memfile.slice(offset, self.regions.page_size() as usize).await
+    }
+}
+
+struct Served {
+    class: PageClass,
+    result: FaultResult,
+    bytes: i64,
+}
+
+impl Default for Served {
+    fn default() -> Self {
+        Self {
+            class: PageClass::Unknown,
+            result: FaultResult::Installed,
+            bytes: 0,
         }
     }
 }
@@ -541,7 +739,7 @@ mod tests {
             .unwrap();
         assert_eq!(read_page(&fixture.pages, 1).await, 0);
 
-        assert_eq!(fixture.server.removed_pages().iter().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(fixture.server.empty_pages().iter().collect::<Vec<_>>(), vec![1]);
         fixture.server.stop().await.unwrap();
     }
 
@@ -650,7 +848,10 @@ mod tests {
 
         assert_eq!(fixture.server.prefault(PAGE, &page), Ok(Prefaulted::Installed));
         assert_eq!(fixture.server.prefault(PAGE, &page), Ok(Prefaulted::Skipped));
-        assert_eq!(fixture.server.prefault(10 * PAGE, &page), Ok(Prefaulted::Skipped));
+        assert_eq!(
+            fixture.server.prefault(10 * PAGE, &page),
+            Err("failed to get host virtual address: offset 0xa000 is outside guest memory".to_owned())
+        );
         assert_eq!(read_page(&fixture.pages, 1).await, 9);
         assert_eq!(read_page(&fixture.pages, 0).await, 1);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -686,7 +887,7 @@ mod tests {
 
         fixture.server.settle().await.unwrap();
 
-        assert_eq!(fixture.server.removed_pages().iter().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(fixture.server.empty_pages().iter().collect::<Vec<_>>(), vec![1]);
         fixture.server.stop().await.unwrap();
     }
 
@@ -747,5 +948,199 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    struct SyncFixture {
+        pages: Arc<Pages>,
+        server: MemoryServer,
+        memfile: Arc<BuildFile>,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn sync_fixture(page_count: u64) -> Option<SyncFixture> {
+        if !available() {
+            eprintln!("skipping: userfaultfd needs root");
+            return None;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store")).unwrap();
+        let build_id = Uuid::new_v4();
+        let content: Vec<u8> = (0..page_count)
+            .flat_map(|page| vec![page as u8 + 1; PAGE as usize])
+            .collect();
+        storage
+            .put(&Artifact::Memfile.object(build_id), Bytes::from(content))
+            .await
+            .unwrap();
+        let header = Header::new(Metadata::template(build_id, PAGE, page_count * PAGE), Vec::new()).unwrap();
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let memfile = Arc::new(BuildFile::new(header, Artifact::Memfile, store));
+        let pages = Arc::new(Pages::map((page_count * PAGE) as usize));
+        let Some(uffd) = pages.register_sync_write_protected() else {
+            eprintln!("skipping: this kernel has no uffd write-protect for anonymous memory");
+            return None;
+        };
+        let regions = Regions::parse(
+            format!(
+                r#"[{{"base_host_virt_addr":{},"size":{},"offset":0,"page_size":4096}}]"#,
+                pages.address(),
+                page_count * PAGE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let server = MemoryServer::start(uffd, regions, memfile.clone(), None).unwrap();
+        Some(SyncFixture {
+            pages,
+            server,
+            memfile,
+            _dir: dir,
+        })
+    }
+
+    async fn write_page(pages: &Arc<Pages>, page: u64, value: u8) {
+        let pages = pages.clone();
+        tokio::task::spawn_blocking(move || pages.write_byte((page * PAGE) as usize, value))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_write_to_a_protected_page_is_resolved_and_promoted_to_dirty() {
+        let Some(fixture) = sync_fixture(2).await else { return };
+        assert_eq!(read_page(&fixture.pages, 0).await, 1);
+        assert_eq!(fixture.server.page_state(0), PageState::Clean);
+
+        write_page(&fixture.pages, 0, 0x42).await;
+
+        assert_eq!(
+            fixture.server.page_state(0),
+            PageState::Dirty,
+            "resolve must promote the page to dirty"
+        );
+        assert_eq!(fixture.server.wp_faults_resolved(), 1);
+        assert_eq!(fixture.pages.read_byte(0), 0x42);
+        fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_write_protect_fault_on_an_absent_page_installs_the_armed_zero_page() {
+        let Some(fixture) = sync_fixture(2).await else { return };
+        assert_eq!(read_page(&fixture.pages, 1).await, 2);
+        let pages = fixture.pages.clone();
+        tokio::task::spawn_blocking(move || pages.discard(PAGE as usize, PAGE as usize))
+            .await
+            .unwrap();
+        fixture.server.settle().await.unwrap();
+        assert_eq!(fixture.server.page_state(1), PageState::Removed);
+
+        let wake = Fault {
+            address: fixture.pages.address() + PAGE,
+            write: true,
+            write_protect: true,
+        };
+        let serving = Serving {
+            uffd: fixture.server.uffd.clone(),
+            regions: fixture.server.regions.clone(),
+            memfile: fixture.memfile.clone(),
+            state: fixture.server.state.clone(),
+        };
+        assert_eq!(serving.resolve_write_protect(wake), Ok(None));
+
+        assert_eq!(fixture.server.page_state(1), PageState::Zero);
+        assert!(
+            Pages::write_protected(fixture.pages.address() + PAGE),
+            "the probe must install armed"
+        );
+        fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_cow_fault_path_captures_the_pre_image_before_the_write_lands() {
+        use crate::memory::cow_window::{PageSink, PageSource};
+        use std::borrow::Cow;
+
+        struct LiveSource(Arc<Pages>);
+        impl PageSource for LiveSource {
+            fn read_page(&self, offset: u64, length: u64) -> io::Result<Cow<'_, [u8]>> {
+                Ok(Cow::Owned(
+                    (0..length as usize)
+                        .map(|at| self.0.read_byte(offset as usize + at))
+                        .collect(),
+                ))
+            }
+        }
+        struct Capture(parking_lot::Mutex<Vec<(u64, Vec<u8>)>>);
+        impl PageSink for Capture {
+            fn write_page(&self, data: &[u8], offset: u64) -> io::Result<()> {
+                self.0.lock().push((offset, data.to_vec()));
+                Ok(())
+            }
+        }
+
+        let Some(fixture) = sync_fixture(4).await else { return };
+        for page in 0..4 {
+            read_page(&fixture.pages, page).await;
+        }
+        let sink = Arc::new(Capture(parking_lot::Mutex::default()));
+        let dirty: RoaringBitmap = (0..4).collect();
+        let window = fixture
+            .server
+            .begin_cow_export(&dirty, Arc::new(LiveSource(fixture.pages.clone())), sink.clone())
+            .unwrap();
+
+        write_page(&fixture.pages, 0, 0x99).await;
+
+        let captured = sink.0.lock().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, 0);
+        assert!(
+            captured[0].1.iter().all(|byte| *byte == 1),
+            "the sink must hold the pre-write content"
+        );
+        window.sweep(&tokio_util::sync::CancellationToken::new()).await.unwrap();
+        fixture.server.end_cow_export(&window).await;
+        fixture.server.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_remove_against_a_window_page_trips_the_window() {
+        use crate::memory::cow_window::{PageSink, PageSource};
+        use std::borrow::Cow;
+
+        struct Zeros;
+        impl PageSource for Zeros {
+            fn read_page(&self, _offset: u64, length: u64) -> io::Result<Cow<'_, [u8]>> {
+                Ok(Cow::Owned(vec![0; length as usize]))
+            }
+        }
+        struct Void;
+        impl PageSink for Void {
+            fn write_page(&self, _data: &[u8], _offset: u64) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let Some(fixture) = sync_fixture(4).await else { return };
+        for page in 0..4 {
+            read_page(&fixture.pages, page).await;
+        }
+        let dirty: RoaringBitmap = (0..4).collect();
+        let window = fixture
+            .server
+            .begin_cow_export(&dirty, Arc::new(Zeros), Arc::new(Void))
+            .unwrap();
+
+        let pages = fixture.pages.clone();
+        tokio::task::spawn_blocking(move || pages.discard(PAGE as usize, PAGE as usize))
+            .await
+            .unwrap();
+        fixture.server.settle().await.unwrap();
+
+        let cause = window.cancel_cause().unwrap_or_default();
+        assert!(cause.contains("REMOVE zapped window pages"), "{cause}");
+        let swept = window.sweep(&tokio_util::sync::CancellationToken::new()).await;
+        assert!(swept.unwrap_err().contains("memory CoW window canceled"));
+        fixture.server.stop().await.unwrap();
     }
 }
