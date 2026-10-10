@@ -19,10 +19,12 @@ use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
 use crate::firecracker::exit::{CrashCause, ExitInfo};
+use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::trace::Trace;
 use crate::network::pool::Release;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
+use crate::sandbox::snapshot::in_place::memory::{MemoryCheckpoint, MemoryCheckpointRequest};
 use crate::sandbox::snapshot::in_place::{FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure};
 use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
 use crate::sandbox::{Death, Sandbox};
@@ -48,6 +50,7 @@ pub struct SandboxInfo {
     pub started_at: SystemTime,
     pub oom_watermark: SharedWatermark,
     pub envd_upgraded: bool,
+    pub use_sync_wp: bool,
 }
 
 pub enum Command {
@@ -69,6 +72,13 @@ pub enum Command {
     CheckpointInPlace {
         request: FilesystemCheckpointRequest,
         reply: oneshot::Sender<Result<FilesystemCheckpoint, InPlaceFailure>>,
+    },
+    CheckpointMemoryInPlace {
+        request: MemoryCheckpointRequest,
+        reply: oneshot::Sender<Result<MemoryCheckpoint, InPlaceFailure>>,
+    },
+    ResolveBalloonMode {
+        reply: oneshot::Sender<BalloonMode>,
     },
     Extend,
 }
@@ -353,6 +363,15 @@ impl Running {
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
                     Some(Command::CheckpointInPlace { request, reply }) => {
                         let checkpointed = self.sandbox.checkpoint_filesystem_in_place(&request).await;
+                        let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
+                        drop(reply.send(checkpointed));
+                        if lost {
+                            return Ending::Stop { reason: "lost during an in-place checkpoint".to_owned() };
+                        }
+                    }
+                    Some(Command::ResolveBalloonMode { reply }) => drop(reply.send(self.sandbox.resolve_balloon_mode().await)),
+                    Some(Command::CheckpointMemoryInPlace { request, reply }) => {
+                        let checkpointed = self.sandbox.checkpoint_memory_in_place(&request).await;
                         let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
                         drop(reply.send(checkpointed));
                         if lost {

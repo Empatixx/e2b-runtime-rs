@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::envd::EnvdInit;
 use crate::firecracker::kernel_args::BootOptions;
+use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::slot::Slot;
 use crate::template::metadata::{CpuTemplate, MemoryPrefetch};
@@ -72,6 +73,8 @@ pub struct SandboxConfig {
     pub sandbox_type: String,
     pub workdir_withheld: bool,
     pub throwaway: bool,
+    pub use_sync_wp: bool,
+    pub balloon_mode: BalloonMode,
 }
 
 impl SandboxConfig {
@@ -123,6 +126,8 @@ impl SandboxConfig {
         #[builder(default = DEFAULT_SANDBOX_TYPE.to_owned())] sandbox_type: String,
         #[builder(default)] workdir_withheld: bool,
         #[builder(default)] throwaway: bool,
+        #[builder(default)] use_sync_wp: bool,
+        #[builder(default)] balloon_mode: BalloonMode,
     ) -> Self {
         Self {
             cgroup_name: format!("sbx-{id}-{}", Uuid::new_v4().simple()),
@@ -164,6 +169,8 @@ impl SandboxConfig {
             sandbox_type,
             workdir_withheld,
             throwaway,
+            use_sync_wp,
+            balloon_mode,
         }
     }
 }

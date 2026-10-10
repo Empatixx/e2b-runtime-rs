@@ -179,45 +179,13 @@ impl MemoryServer {
         Ok(self.state.tracker.export())
     }
 
-    pub fn arm_write_protect(&self, pages: &RoaringBitmap) -> Result<(), String> {
-        coalesce_write_protect_runs(pages, &self.regions)
-            .map_err(|e| format!("arm write-protect: {e}"))?
-            .into_iter()
-            .try_for_each(|run| {
-                self.uffd
-                    .get_ref()
-                    .write_protect(run.start, run.length, true)
-                    .map_err(|e| {
-                        format!(
-                            "arm write-protect [{:#x}, {:#x}): {e}",
-                            run.start,
-                            run.start + run.length
-                        )
-                    })
-            })
-    }
-
-    pub fn begin_cow_export(
-        &self,
-        pages: &RoaringBitmap,
-        source: Arc<dyn PageSource>,
-        sink: Arc<dyn PageSink>,
-    ) -> Result<Arc<CowWindow>, String> {
-        self.arm_write_protect(pages)?;
-        let window = Arc::new(CowWindow::new(
-            pages.clone(),
-            self.regions.page_size(),
-            source,
-            sink,
-            Some(self.state.tracker.clone()),
-        ));
-        self.state.install_cow_window(window.clone());
-        Ok(window)
-    }
-
-    pub async fn end_cow_export(&self, window: &Arc<CowWindow>) {
-        let _ = self.settle().await;
-        self.state.uninstall_cow_window(window);
+    pub fn exporter(&self) -> CowExporter {
+        CowExporter {
+            uffd: self.uffd.clone(),
+            regions: self.regions.clone(),
+            state: self.state.clone(),
+            settles: self.settles.clone(),
+        }
     }
 
     pub fn cancel_active_cow_window(&self, error: String) {
@@ -254,6 +222,51 @@ impl MemoryServer {
             window.cancel_and_drain("memory server stopped".to_owned());
         });
         served
+    }
+}
+
+#[derive(Clone)]
+pub struct CowExporter {
+    uffd: Arc<AsyncFd<Uffd>>,
+    regions: Regions,
+    state: Arc<SharedState>,
+    settles: mpsc::UnboundedSender<Settled>,
+}
+
+impl CowExporter {
+    pub fn arm_write_protect(&self, pages: &RoaringBitmap) -> Result<(), String> {
+        coalesce_write_protect_runs(pages, &self.regions)
+            .map_err(|e| format!("arm write-protect: {e}"))?
+            .into_iter()
+            .try_for_each(|run| {
+                self.uffd
+                    .get_ref()
+                    .write_protect(run.start, run.length, true)
+                    .map_err(|e| format!("arm write-protect [{:#x}, {:#x}): {e}", run.start, run.start + run.length))
+            })
+    }
+
+    pub fn begin(
+        &self,
+        pages: &RoaringBitmap,
+        source: Arc<dyn PageSource>,
+        sink: Arc<dyn PageSink>,
+    ) -> Result<Arc<CowWindow>, String> {
+        self.arm_write_protect(pages)?;
+        let window = Arc::new(CowWindow::new(
+            pages.clone(),
+            self.regions.page_size(),
+            source,
+            sink,
+            Some(self.state.tracker.clone()),
+        ));
+        self.state.install_cow_window(window.clone());
+        Ok(window)
+    }
+
+    pub async fn end(&self, window: &Arc<CowWindow>) {
+        let _ = request_settle(&self.settles).await;
+        self.state.uninstall_cow_window(window);
     }
 }
 
@@ -1086,7 +1099,7 @@ mod tests {
         let dirty: RoaringBitmap = (0..4).collect();
         let window = fixture
             .server
-            .begin_cow_export(&dirty, Arc::new(LiveSource(fixture.pages.clone())), sink.clone())
+            .exporter().begin(&dirty, Arc::new(LiveSource(fixture.pages.clone())), sink.clone())
             .unwrap();
 
         write_page(&fixture.pages, 0, 0x99).await;
@@ -1099,7 +1112,7 @@ mod tests {
             "the sink must hold the pre-write content"
         );
         window.sweep(&tokio_util::sync::CancellationToken::new()).await.unwrap();
-        fixture.server.end_cow_export(&window).await;
+        fixture.server.exporter().end(&window).await;
         fixture.server.stop().await.unwrap();
     }
 
@@ -1128,7 +1141,7 @@ mod tests {
         let dirty: RoaringBitmap = (0..4).collect();
         let window = fixture
             .server
-            .begin_cow_export(&dirty, Arc::new(Zeros), Arc::new(Void))
+            .exporter().begin(&dirty, Arc::new(Zeros), Arc::new(Void))
             .unwrap();
 
         let pages = fixture.pages.clone();

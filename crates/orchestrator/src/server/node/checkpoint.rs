@@ -32,11 +32,11 @@ use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::report::{ReportStatus, report_critical_error};
 use crate::telemetry::server::sandbox::CheckpointOutcome;
 use crate::telemetry::server::spans;
+use crate::template::Template;
 use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
 
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 const BUILD_ORIGIN: &str = "snapshot_template";
-const RESUMED_WITH_SYNC_WP: bool = false;
 
 pub struct CheckpointRequest {
     pub build_id: String,
@@ -55,57 +55,72 @@ impl Node {
         let lifecycle = handle.lifecycle();
         let id = lifecycle.sandbox_id.clone();
         let fs_only = request.filesystem_only;
-        let (route, balloon_mode) = self.route_of(&handle.info.lock(), &id, fs_only)?;
+        let early = self.early_route_of(&handle.info.lock(), &id, fs_only)?;
+        let (route, balloon_mode) = self.settle_route(&handle, early).await;
         let started = Instant::now();
         let team_id = handle.info.lock().config.team_id.clone();
         spans::record_checkpoint_route(route, balloon_mode.as_str());
         let in_place = route == route::IN_PLACE;
         let checkpointed = match in_place {
             true => self.checkpoint_in_place(handle, request, balloon_mode).await,
-            false => self.checkpoint_routed(handle, request, lifecycle).await,
+            false => self
+                .checkpoint_routed(handle, request, lifecycle)
+                .await
+                .map(|scheduling| (scheduling, false)),
         };
+        let deferred = checkpointed.as_ref().is_ok_and(|(_, deferred)| *deferred);
         CheckpointOutcome {
             in_place,
             fs_only,
             route: route.to_owned(),
             balloon_mode: balloon_mode.as_str().to_owned(),
-            deferred: false,
+            deferred,
             success: checkpointed.is_ok(),
             team_id,
         }
         .record(started.elapsed());
-        checkpointed
+        checkpointed.map(|(scheduling, _)| scheduling)
     }
 
-    fn route_of(&self, info: &SandboxInfo, id: &str, fs_only: bool) -> Result<(&'static str, BalloonMode), Status> {
+    fn early_route_of(&self, info: &SandboxInfo, id: &str, fs_only: bool) -> Result<EarlyRoute, Status> {
         match fs_only {
             true => self
                 .feature_flags
                 .get(&FILESYSTEM_ONLY_CHECKPOINT, &flag_contexts(&info.config))
-                .then(|| (route::IN_PLACE, stamped_balloon(info)))
+                .then(|| EarlyRoute::Settled(route::IN_PLACE, stamped_balloon(info)))
                 .ok_or_else(|| filesystem_only_checkpoint_disabled(id)),
-            false => Ok(self.checkpoint_route(info)),
+            false => Ok(self.early_memory_route(info)),
         }
     }
 
-    fn checkpoint_route(&self, info: &SandboxInfo) -> (&'static str, BalloonMode) {
+    fn early_memory_route(&self, info: &SandboxInfo) -> EarlyRoute {
         let flags = &self.feature_flags;
         let contexts = flag_contexts(&info.config);
         let firecracker_version = info.config.firecracker_version.as_str();
-        let early = early_route(RESUMED_WITH_SYNC_WP, flags.get(&IN_PLACE_CHECKPOINT, &contexts), || {
+        let early = early_route(info.use_sync_wp, flags.get(&IN_PLACE_CHECKPOINT, &contexts), || {
             supports_in_place_checkpoint(firecracker_version)
         });
-        let stamped = stamped_balloon(info);
         match early {
-            Some(route) => (route, stamped),
-            None => (
-                balloon_route(
-                    BalloonMode::Unknown,
+            Some(route) => EarlyRoute::Settled(route, stamped_balloon(info)),
+            None => EarlyRoute::AskDevice,
+        }
+    }
+
+    async fn settle_route(&self, handle: &SandboxHandle, early: EarlyRoute) -> (&'static str, BalloonMode) {
+        match early {
+            EarlyRoute::Settled(route, mode) => (route, mode),
+            EarlyRoute::AskDevice => {
+                let mode = resolve_balloon_mode(handle).await;
+                let config = handle.info.lock().config.clone();
+                let flags = &self.feature_flags;
+                let contexts = flag_contexts(&config);
+                let route = balloon_route(
+                    mode,
                     || flags.get(&DEFER_MEMORY_EXPORT, &contexts),
                     || flags.get(&IN_PLACE_CHECKPOINT_REPORTING, &contexts),
-                ),
-                BalloonMode::Unknown,
-            ),
+                );
+                (route, mode)
+            }
         }
     }
 
@@ -212,13 +227,17 @@ impl Node {
     }
 
     async fn embed_prefetch(&self, resumed: &SandboxHandle, local: &LocalSnapshot) {
-        let Some(prefetch) = trace(resumed).await.map(|trace| trace.to_mapping()) else {
+        let template = resumed.info.lock().template.clone();
+        self.embed_prefetch_from(trace(resumed).await, &template, local).await;
+    }
+
+    async fn embed_prefetch_from(&self, trace: Option<Trace>, template: &Arc<Template>, local: &LocalSnapshot) {
+        let Some(prefetch) = trace.map(|trace| trace.to_mapping()) else {
             return;
         };
         if prefetch.indices.is_empty() {
             return;
         }
-        let template = resumed.info.lock().template.clone();
         let updated = template
             .metadata()
             .await
@@ -291,6 +310,19 @@ impl Node {
     }
 }
 
+enum EarlyRoute {
+    Settled(&'static str, BalloonMode),
+    AskDevice,
+}
+
+async fn resolve_balloon_mode(handle: &SandboxHandle) -> BalloonMode {
+    let (reply, mode) = oneshot::channel();
+    match handle.commands.send(Command::ResolveBalloonMode { reply }).await {
+        Ok(()) => mode.await.unwrap_or_default(),
+        Err(_) => BalloonMode::Unknown,
+    }
+}
+
 fn stamped_balloon(info: &SandboxInfo) -> BalloonMode {
     BalloonMode::stamped(info.metadata.as_ref().and_then(|metadata| metadata.balloon))
 }
@@ -305,13 +337,13 @@ async fn snapshot(handle: &SandboxHandle, build_id: Uuid) -> Result<LocalSnapsho
     snapshot.await.map_err(|_| STOPPED.to_owned())?
 }
 
-async fn trace(handle: &SandboxHandle) -> Option<Trace> {
+pub(super) async fn trace(handle: &SandboxHandle) -> Option<Trace> {
     let (reply, trace) = oneshot::channel();
     handle.commands.send(Command::Trace { reply }).await.ok()?;
     trace.await.ok().flatten()
 }
 
-fn object_metadata(provenance: HashMap<String, String>, parent: &SandboxInfo) -> ObjectMetadata {
+pub(super) fn object_metadata(provenance: HashMap<String, String>, parent: &SandboxInfo) -> ObjectMetadata {
     ObjectMetadata {
         entries: provenance.into_iter().collect(),
     }
@@ -415,6 +447,7 @@ mod tests {
             },
             host_ip: Ipv4Addr::LOCALHOST,
             envd_upgraded: false,
+            use_sync_wp: false,
             slot: Slot::new(41).unwrap(),
             scheduling: SchedulingMetadata::default(),
             template: Arc::new(Template::filesystem_layer(
@@ -436,21 +469,30 @@ mod tests {
             hinting: false,
         };
 
-        let (route, mode) = fixture
+        let early = fixture
             .node
-            .route_of(&info(Some(reporting), "v1.14-0.2.1"), "ckpt", false)
+            .early_route_of(&info(Some(reporting), "v1.14-0.2.1"), "ckpt", false)
             .unwrap();
 
-        assert_eq!((route, mode.as_str()), (route::SYNC_WP_OFF, "reporting"));
+        assert!(matches!(
+            early,
+            EarlyRoute::Settled(route::SYNC_WP_OFF, BalloonMode::Reporting)
+        ));
     }
 
     #[tokio::test]
     async fn a_filesystem_only_checkpoint_goes_in_place_on_its_own_flag() {
         let fixture = node(&[("in-place-checkpoint", false), ("filesystem-only-checkpoint", true)]);
 
-        let (route, mode) = fixture.node.route_of(&info(None, "unparsable"), "ckpt", true).unwrap();
+        let early = fixture
+            .node
+            .early_route_of(&info(None, "unparsable"), "ckpt", true)
+            .unwrap();
 
-        assert_eq!((route, mode.as_str()), (route::IN_PLACE, "unknown"));
+        assert!(matches!(
+            early,
+            EarlyRoute::Settled(route::IN_PLACE, BalloonMode::Unknown)
+        ));
     }
 
     #[tokio::test]
@@ -459,8 +501,9 @@ mod tests {
 
         let refused = fixture
             .node
-            .route_of(&info(None, "v1.14-0.2.1"), "ckpt", true)
-            .unwrap_err();
+            .early_route_of(&info(None, "v1.14-0.2.1"), "ckpt", true)
+            .err()
+            .unwrap();
 
         assert_eq!(refused.code(), Code::FailedPrecondition);
         assert_eq!(

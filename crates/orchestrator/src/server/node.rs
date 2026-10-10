@@ -43,11 +43,12 @@ use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::upgrade::rollout::EnvdUpgrades;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
-use crate::featureflags::{FeatureFlags, FlagContext, memfile_diff_dedup};
+use crate::featureflags::{FeatureFlags, FlagContext, USE_SYNC_WP, memfile_diff_dedup};
 use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::firecracker::version::{supports_huge_pages, supports_memfd};
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
+use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::dedup::config::DedupConfig;
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::firewall::EgressRules;
@@ -70,6 +71,7 @@ use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::upload_limit::UploadLimiter;
 use crate::tcpfirewall::proxy::FirewallSandbox;
+use crate::telemetry::resume::record_wp_mode;
 use crate::telemetry::server::gauges::Allocated;
 use crate::template::cache::TemplateCache;
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
@@ -131,6 +133,7 @@ struct ResumeRequest<'a> {
     lifecycle: &'a Lifecycle,
     workdir_withheld: bool,
     throwaway: bool,
+    balloon_mode: BalloonMode,
 }
 
 struct StartRequest {
@@ -295,6 +298,16 @@ impl Node {
             .await
             .map_err(|e| format!("error snapshotting sandbox: {e}"))
             .inspect_err(|_| discard_snapshot_dir(&dir))?;
+        self.adopt_snapshot(local, parent, build_id, dir).await
+    }
+
+    pub(super) async fn adopt_snapshot(
+        &self,
+        local: LocalSnapshot,
+        parent: &SandboxInfo,
+        build_id: Uuid,
+        dir: PathBuf,
+    ) -> Result<LocalSnapshot, String> {
         let metadata = match &parent.metadata {
             Some(metadata) => metadata.clone(),
             None => self.parent_metadata(&parent.config.build_id).await,
@@ -736,12 +749,14 @@ impl Node {
                     lifecycle: &lifecycle,
                     workdir_withheld,
                     throwaway,
+                    balloon_mode: BalloonMode::stamped(metadata.as_ref().and_then(|metadata| metadata.balloon)),
                 })
                 .await
                 .map_err(|e| resume_failure(&config, &build, e))?
             }
         };
         let (sandbox, envd_upgraded) = self.upgraded(sandbox, &config, upgrade_envd).await?;
+        let use_sync_wp = sandbox.uses_sync_wp();
         let slot = lease.keep().ok_or_else(slot_taken_back)?;
         Ok(lifecycle::spawn(
             sandbox,
@@ -759,6 +774,7 @@ impl Node {
                 started_at: SystemTime::now(),
                 oom_watermark,
                 envd_upgraded,
+                use_sync_wp,
             },
             self.clone(),
             throwaway,
@@ -805,7 +821,12 @@ impl Node {
             lifecycle,
             workdir_withheld,
             throwaway,
+            balloon_mode,
         } = request;
+        let use_sync_wp = self.feature_flags.get(&USE_SYNC_WP, &prefetch::pause_contexts(config));
+        if !throwaway {
+            record_wp_mode(use_sync_wp);
+        }
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let rootfs = Arc::new(BuildFile::new(
@@ -850,6 +871,8 @@ impl Node {
             .hyperloop_ip(&self.orchestrator_ip)
             .workdir_withheld(workdir_withheld)
             .throwaway(throwaway)
+            .use_sync_wp(use_sync_wp)
+            .balloon_mode(balloon_mode)
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await

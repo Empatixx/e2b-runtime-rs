@@ -53,7 +53,7 @@ impl Sandbox {
         let prefaulter = self.start_prefetch(memfile.clone());
         let client = self.launch_with_rootfs().await?;
         self.phases.mark("rootfs+firecracker");
-        let loading = client.load_snapshot(snapfile, &socket, self.config.use_memfd);
+        let loading = client.load_snapshot(snapfile, &socket, self.config.use_memfd, self.config.use_sync_wp);
         let serving = serve_memory(listener, memfile, prefaulter);
         tokio::pin!(loading, serving);
         let (loaded, served) = tokio::select! {
@@ -67,6 +67,8 @@ impl Sandbox {
             self.resources.memory = Some(server);
         });
         all_ok([started, loaded]).map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
+        self.balloon.stamp(self.config.balloon_mode);
+        self.label_memory_with_balloon_mode();
         self.phases.mark("load_snapshot");
         self.phases.note("faults", self.faults_served());
         self.phases.note(
@@ -87,6 +89,8 @@ impl Sandbox {
         self.phases.mark("mmds");
         self.wait_for_envd_unless_memory_fails().await?;
         self.phases.mark("envd_init");
+        let probe = self.balloon.clone();
+        tokio::spawn(async move { probe.prime().await });
         self.phases.note("faults", self.faults_served());
         self.phases.note("prefetched", self.prefetch_stats.installed());
         Ok(())
@@ -141,6 +145,10 @@ impl Sandbox {
         let stats = self.prefetch_stats.clone();
         self.resources.prefetch = Some(tokio::spawn(replay(plan, memfile, installer, stats)));
         Some(prefaulter)
+    }
+
+    pub fn uses_sync_wp(&self) -> bool {
+        self.config.use_sync_wp
     }
 
     pub fn prefetch_summary(&self) -> Option<PrefetchSummary> {

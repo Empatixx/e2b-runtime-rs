@@ -1,3 +1,8 @@
+mod deferred_memory;
+mod export_union;
+mod fpr_resume;
+pub mod memory;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -274,6 +279,17 @@ fn record_freeze(request: &FilesystemCheckpointRequest, freeze: &Freeze, success
         balloon_mode: request.balloon_mode.clone(),
         success,
         team_id: request.team_id.clone(),
+    }
+    .record(freeze.started.elapsed());
+}
+
+fn record_freeze_for(team_id: &str, balloon_mode: &str, deferred: bool, freeze: &Freeze, success: bool) {
+    GuestFreezeOutcome {
+        deferred,
+        fs_only: false,
+        balloon_mode: balloon_mode.to_owned(),
+        success,
+        team_id: team_id.to_owned(),
     }
     .record(freeze.started.elapsed());
 }

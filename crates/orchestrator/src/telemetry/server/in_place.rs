@@ -131,3 +131,57 @@ impl ProcessRootfsOutcome {
 pub fn count_fs_quiesced_pause(quiesced: bool) {
     FS_QUIESCED_PAUSE.add(1, &[KeyValue::new("quiesced", quiesced)]);
 }
+
+static FPR_RESUME: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    counter(
+        "orchestrator.sandbox.fpr_resume",
+        "Free-page-reporting resumes after a CoW window, labeled by outcome (inline, retry, fenced, fc_exited, abandoned); produced only while in-place-checkpoint-reporting admits reporting balloons to the in-place path",
+        "{resume}",
+    )
+});
+
+static PROCESS_MEMORY_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    milliseconds(
+        "orchestrator.sandbox.snapshot.process_memory.duration",
+        "Time to export+diff the memory file during a pause snapshot (memory pauses only), labeled by in_place, deferred, balloon_mode and success",
+    )
+});
+
+static MEMORY_SEAL_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    milliseconds(
+        "orchestrator.sandbox.snapshot.memory_seal.duration",
+        "Time for the background CoW-window memory capture (off the in-place resume critical path), labeled by success",
+    )
+});
+
+pub fn record_fpr_resume(outcome: &str) {
+    FPR_RESUME.add(1, &[KeyValue::new("outcome", outcome.to_owned())]);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMemoryOutcome {
+    pub in_place: bool,
+    pub deferred: bool,
+    pub balloon_mode: String,
+    pub success: bool,
+    pub team_id: String,
+}
+
+impl ProcessMemoryOutcome {
+    pub fn record(&self, took: Duration) {
+        PROCESS_MEMORY_DURATION.record(
+            millis(took),
+            &[
+                KeyValue::new("in_place", self.in_place),
+                KeyValue::new("deferred", self.deferred),
+                KeyValue::new("balloon_mode", self.balloon_mode.clone()),
+                KeyValue::new("success", self.success),
+                team(&self.team_id),
+            ],
+        );
+    }
+}
+
+pub fn record_memory_seal(success: bool, took: Duration, team_id: &str) {
+    MEMORY_SEAL_DURATION.record(millis(took), &[KeyValue::new("success", success), team(team_id)]);
+}

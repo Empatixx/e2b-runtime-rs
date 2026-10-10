@@ -7,6 +7,7 @@ pub mod logs;
 pub mod metrics;
 pub mod reads;
 pub mod report;
+pub mod resume;
 pub mod server;
 pub mod traces;
 pub mod uffd;

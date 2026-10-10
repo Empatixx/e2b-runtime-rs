@@ -8,11 +8,15 @@ use tonic::Status;
 use uuid::Uuid;
 
 use super::route::BalloonMode;
-use super::{CheckpointRequest, object_metadata};
+use super::{CheckpointRequest, object_metadata, trace};
 use crate::events::{CHECKPOINTED, KILLED, SandboxEvent};
-use crate::featureflags::{FS_FREEZE_VIA_EXEC, GUEST_SYNC_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT};
+use crate::featureflags::{
+    DEFER_MEMORY_EXPORT, FS_FREEZE_VIA_EXEC, GUEST_SYNC_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
+    SYNC_WP_TRACKER_DIRTY,
+};
 use crate::proto::SchedulingMetadata;
 use crate::sandbox::snapshot::filesystem::FilesystemSnapshot;
+use crate::sandbox::snapshot::in_place::memory::{MemoryCheckpoint, MemoryCheckpointRequest};
 use crate::sandbox::snapshot::in_place::{
     FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure, LostSandbox, QuiesceFlags,
 };
@@ -43,16 +47,14 @@ impl Node {
         handle: SandboxHandle,
         request: CheckpointRequest,
         balloon_mode: BalloonMode,
-    ) -> Result<SchedulingMetadata, Status> {
+    ) -> Result<(SchedulingMetadata, bool), Status> {
         let parent = handle.info.lock().clone();
         let id = parent.config.sandbox_id.clone();
         let _guard = handle.begin_in_place_checkpoint().ok_or_else(|| {
             Status::failed_precondition(format!("a checkpoint is already in progress for sandbox '{id}'"))
         })?;
         if !request.filesystem_only {
-            return Err(Status::internal(format!(
-                "error snapshotting sandbox '{id}': the memory in-place checkpoint is not available"
-            )));
+            return self.checkpoint_memory(&handle, &parent, request, balloon_mode).await;
         }
         let attributes = [KeyValue::new("sandbox.id", id.clone())];
         let snapshot_error = |e: &str| Status::failed_precondition(format!("error snapshotting sandbox '{id}': {e}"));
@@ -75,7 +77,83 @@ impl Node {
             .await?;
         self.events
             .publish(SandboxEvent::new(CHECKPOINTED, &event_sandbox(&parent)));
-        Ok(from_headers(build_id, None, &checkpoint.build.rootfs, 0))
+        Ok((from_headers(build_id, None, &checkpoint.build.rootfs, 0), false))
+    }
+
+    async fn checkpoint_memory(
+        self: &Arc<Self>,
+        handle: &SandboxHandle,
+        parent: &SandboxInfo,
+        request: CheckpointRequest,
+        balloon_mode: BalloonMode,
+    ) -> Result<(SchedulingMetadata, bool), Status> {
+        let id = parent.config.sandbox_id.clone();
+        let attributes = [KeyValue::new("sandbox.id", id.clone())];
+        let snapshot_error = |e: &str| Status::failed_precondition(format!("error snapshotting sandbox '{id}': {e}"));
+        let build_id = build_id::parse(&request.build_id)
+            .map_err(|e| snapshot_error(&format!("error snapshotting sandbox: failed to parse build id: {e}")))?;
+        let dir = self.templates.instance_dir(build_id);
+        let contexts = pause_contexts(&parent.config);
+        let memory_request = MemoryCheckpointRequest {
+            dir: dir.clone(),
+            build_id,
+            team_id: parent.config.team_id.clone(),
+            balloon_mode: balloon_mode.as_str().to_owned(),
+            defer_export: self.feature_flags.get(&DEFER_MEMORY_EXPORT, &contexts),
+            tracker_dirty: parent.use_sync_wp && self.feature_flags.get(&SYNC_WP_TRACKER_DIRTY, &contexts),
+        };
+        let checkpoint = self
+            .take_memory_checkpoint(handle, memory_request)
+            .await
+            .map_err(|failure| self.checkpoint_failure(parent, failure))
+            .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
+        let deferred = checkpoint.deferred;
+        let local = self
+            .adopt_snapshot(checkpoint.snapshot, parent, build_id, dir.clone())
+            .await
+            .map_err(|e| snapshot_error(&e))
+            .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
+        self.embed_prefetch_from(
+            trace(handle).await,
+            &self.templates.get_for(build_id, parent.config.max_sandbox_length),
+            &local,
+        )
+        .await;
+        let object_metadata = object_metadata(request.provenance, parent);
+        if let Err(status) = self.persist_checkpoint(&local, object_metadata, &id, &attributes).await {
+            self.abandon_checkpoint(build_id);
+            return Err(status);
+        }
+        self.events
+            .publish(SandboxEvent::new(CHECKPOINTED, &event_sandbox(parent)));
+        let build = &local.snapshot.build;
+        Ok((
+            from_headers(
+                build.build_id,
+                Some(&build.memfile),
+                &build.rootfs,
+                local.snapshot.memfile_bytes,
+            ),
+            deferred,
+        ))
+    }
+
+    async fn take_memory_checkpoint(
+        &self,
+        handle: &SandboxHandle,
+        request: MemoryCheckpointRequest,
+    ) -> Result<MemoryCheckpoint, InPlaceFailure> {
+        let (reply, checkpoint) = oneshot::channel();
+        let stopped = || InPlaceFailure {
+            message: "the sandbox stopped".to_owned(),
+            lost: None,
+        };
+        handle
+            .commands
+            .send(Command::CheckpointMemoryInPlace { request, reply })
+            .await
+            .map_err(|_| stopped())?;
+        checkpoint.await.map_err(|_| stopped())?
     }
 
     async fn take_filesystem_checkpoint(

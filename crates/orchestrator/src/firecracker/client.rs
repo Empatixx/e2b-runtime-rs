@@ -4,7 +4,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1;
-use hyper::{Method, Request};
+use hyper::{Method, Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -109,10 +109,19 @@ impl FirecrackerClient {
         .await
     }
 
-    pub async fn load_snapshot(&self, snapfile: &Path, uffd_socket: &Path, use_memfd: bool) -> Result<(), String> {
+    pub async fn load_snapshot(
+        &self,
+        snapfile: &Path,
+        uffd_socket: &Path,
+        use_memfd: bool,
+        use_sync_wp: bool,
+    ) -> Result<(), String> {
         let mut backend = json!({ "backend_type": "Uffd", "backend_path": uffd_socket });
         if use_memfd {
             backend["use_memfd"] = json!(true);
+        }
+        if use_sync_wp {
+            backend["use_sync_wp"] = json!(true);
         }
         self.put(
             "/snapshot/load",
@@ -142,6 +151,40 @@ impl FirecrackerClient {
         self.get("/memory").await
     }
 
+    pub async fn balloon_caps(&self) -> Result<BalloonCaps, String> {
+        let call = "GET /balloon";
+        let (status, body) = self.exchange(Method::GET, "/balloon", None).await?;
+        match status {
+            StatusCode::BAD_REQUEST => Ok(BalloonCaps::default()),
+            status if status.is_success() => serde_json::from_slice::<BalloonDevice>(&body)
+                .map(|device| BalloonCaps {
+                    reporting: device.free_page_reporting,
+                    hinting: device.free_page_hinting,
+                })
+                .map_err(|e| format!("{call}: {e}")),
+            status => Err(format!("{call}: {status}: {}", String::from_utf8_lossy(&body))),
+        }
+    }
+
+    pub async fn pause_free_page_reporting(&self) -> Result<(), String> {
+        self.request(Method::PATCH, "/balloon/reporting/pause", None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn resume_free_page_reporting(&self) -> Result<(), String> {
+        self.request(Method::PATCH, "/balloon/reporting/resume", None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn free_page_reporting_paused(&self) -> Result<bool, String> {
+        let status: ReportingStatus = self.get("/balloon/reporting/status").await?;
+        status
+            .paused
+            .ok_or_else(|| "balloon free-page reporting status carried no paused field".to_owned())
+    }
+
     pub async fn put(&self, path: &str, body: Value) -> Result<(), String> {
         self.request(Method::PUT, path, Some(body)).await.map(|_| ())
     }
@@ -157,12 +200,27 @@ impl FirecrackerClient {
 
     async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<Bytes, String> {
         let call = format!("{method} {path}");
+        let (status, body) = self.exchange(method, path, body).await?;
+        status
+            .is_success()
+            .then_some(body.clone())
+            .ok_or_else(|| format!("{call}: {status}: {}", String::from_utf8_lossy(&body)))
+    }
+
+    async fn exchange(&self, method: Method, path: &str, body: Option<Value>) -> Result<(StatusCode, Bytes), String> {
+        let call = format!("{method} {path}");
         tokio::time::timeout(self.timeout, self.send(&call, method, path, body))
             .await
             .unwrap_or_else(|_| Err(format!("{call}: timed out after {:?}", self.timeout)))
     }
 
-    async fn send(&self, call: &str, method: Method, path: &str, body: Option<Value>) -> Result<Bytes, String> {
+    async fn send(
+        &self,
+        call: &str,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Bytes), String> {
         let stream = UnixStream::connect(&self.socket)
             .await
             .map_err(|e| format!("{call}: connect {}: {e}", self.socket.display()))?;
@@ -188,11 +246,27 @@ impl FirecrackerClient {
             .await
             .map(|collected| collected.to_bytes())
             .map_err(|e| format!("{call}: {e}"))?;
-        status
-            .is_success()
-            .then_some(body.clone())
-            .ok_or_else(|| format!("{call}: {status}: {}", String::from_utf8_lossy(&body)))
+        Ok((status, body))
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BalloonCaps {
+    pub reporting: bool,
+    pub hinting: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct BalloonDevice {
+    #[serde(default)]
+    free_page_reporting: bool,
+    #[serde(default)]
+    free_page_hinting: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ReportingStatus {
+    paused: Option<bool>,
 }
 
 fn machine_config(config: &VmConfig) -> serde_json::Value {
@@ -620,11 +694,21 @@ mod tests {
     async fn load_snapshot_uses_the_uffd_backend() {
         let calls = calls_after(Faults::default(), async |client| {
             client
-                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"), false)
+                .load_snapshot(
+                    Path::new("/run/sbx/snapfile"),
+                    Path::new("/run/sbx/uffd.sock"),
+                    false,
+                    false,
+                )
                 .await
                 .unwrap();
             client
-                .load_snapshot(Path::new("/run/sbx/snapfile"), Path::new("/run/sbx/uffd.sock"), true)
+                .load_snapshot(
+                    Path::new("/run/sbx/snapfile"),
+                    Path::new("/run/sbx/uffd.sock"),
+                    true,
+                    false,
+                )
                 .await
                 .unwrap();
         })
@@ -714,5 +798,110 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.resident.iter().collect::<Vec<_>>(), vec![0, 2, 64]);
         assert_eq!(info.empty.iter().collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_asks_for_synchronous_write_protect_when_told_to() {
+        let calls = calls_after(Faults::default(), async |client| {
+            client
+                .load_snapshot(Path::new("/s"), Path::new("/u.sock"), false, true)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            calls[0].body["mem_backend"],
+            json!({ "backend_type": "Uffd", "backend_path": "/u.sock", "use_sync_wp": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_balloon_device_decides_the_caps() {
+        let faults = Faults {
+            answers: &[(
+                "/balloon",
+                r#"{"amount_mib":0,"free_page_reporting":true,"free_page_hinting":false}"#,
+            )],
+            ..Faults::default()
+        };
+        let caps = std::sync::Arc::new(Mutex::new(None));
+        let seen = caps.clone();
+        calls_after(faults, async move |client| {
+            *seen.lock() = Some(client.balloon_caps().await.unwrap());
+        })
+        .await;
+
+        assert_eq!(
+            *caps.lock(),
+            Some(BalloonCaps {
+                reporting: true,
+                hinting: false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_balloon_device_means_no_caps() {
+        let faults = Faults {
+            fail: Some("/balloon"),
+            ..Faults::default()
+        };
+        let caps = std::sync::Arc::new(Mutex::new(None));
+        let seen = caps.clone();
+        calls_after(faults, async move |client| {
+            *seen.lock() = Some(client.balloon_caps().await.unwrap());
+        })
+        .await;
+
+        assert_eq!(*caps.lock(), Some(BalloonCaps::default()));
+    }
+
+    #[tokio::test]
+    async fn free_page_reporting_is_paused_resumed_and_confirmed_through_the_reporting_endpoints() {
+        let faults = Faults {
+            answers: &[("/balloon/reporting/status", r#"{"paused":true}"#)],
+            ..Faults::default()
+        };
+        let paused = std::sync::Arc::new(Mutex::new(false));
+        let seen = paused.clone();
+        let calls = calls_after(faults, async move |client| {
+            client.pause_free_page_reporting().await.unwrap();
+            *seen.lock() = client.free_page_reporting_paused().await.unwrap();
+            client.resume_free_page_reporting().await.unwrap();
+        })
+        .await;
+
+        assert!(*paused.lock());
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.method.as_str(), call.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("PATCH", "/balloon/reporting/pause"),
+                ("GET", "/balloon/reporting/status"),
+                ("PATCH", "/balloon/reporting/resume")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reporting_status_without_the_paused_field_is_an_error() {
+        let faults = Faults {
+            answers: &[("/balloon/reporting/status", "{}")],
+            ..Faults::default()
+        };
+        let error = std::sync::Arc::new(Mutex::new(String::new()));
+        let seen = error.clone();
+        calls_after(faults, async move |client| {
+            *seen.lock() = client.free_page_reporting_paused().await.unwrap_err();
+        })
+        .await;
+
+        assert_eq!(
+            *error.lock(),
+            "balloon free-page reporting status carried no paused field"
+        );
     }
 }

@@ -16,7 +16,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | perf |
-| Firecracker `use_sync_wp` (synchronous WP events) is not used; dirty tracking uses WP_ASYNC + `GET /memory/dirty`, so the in-place checkpoint stays off | perf |
 | Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | perf |
 | The uffd handshake socket is `0777` (upstream parity); `0600` would do, since Firecracker runs as root | API |
 
@@ -24,7 +23,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| In-place pause (snapshot and keep running, `ResumeInPlace`) | perf |
 | Deferred/background rootfs export (reflink, `copy_file_range`) and async memfile header | perf |
 | Dedup of the memory diff against the parent memfile | later |
 | If write-protect is unavailable the resumed pause falls back to resident−empty (correct but large); surface it as a metric | API |
@@ -116,7 +114,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The memory in-place checkpoint is not ported: it needs `use_sync_wp` in the uffd serve loop, the CoW window and deferred memory export, the balloon device read and the deferred rootfs seal; every memory checkpoint reports route `sync_wp_off` and resumes fresh | perf |
+| The memory in-place checkpoint is ported but untested against a real Firecracker (needs KVM, a Firecracker build that accepts `use_sync_wp` and a kernel with uffd-wp for anonymous memory; the Docker kernel on a Mac has none); the template build never installs a balloon device, so balloon-reporting sandboxes are not produced here | perf |
 | The filesystem-only checkpoint exports the rootfs synchronously from the live overlay; upstream can swap in a fresh COW cache and seal in the background (`defer-rootfs-export`) | perf |
 | Pause and checkpoint skip the cgroup freeze and unfreeze, the pre-pause reclaim, the hinting drain and the snapshot admission grace (`pause-admission-grace-milliseconds`) | perf |
 | The filesystem-only `Pause` RPC does not quiesce the guest yet; `GuestQuiesce` is ready for it | API |

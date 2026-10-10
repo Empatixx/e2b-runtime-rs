@@ -1,3 +1,4 @@
+pub mod balloon;
 pub mod config;
 pub mod harvest;
 pub mod reboot;
@@ -52,6 +53,8 @@ pub struct Sandbox {
     resolved_vm_vcpus: i64,
     reinit: parking_lot::Mutex<Option<tokio_util::sync::DropGuard>>,
     envd_report: parking_lot::Mutex<EnvdReport>,
+    memory_export: self::snapshot::in_place::memory::MemoryExport,
+    balloon: Arc<balloon::BalloonProbe>,
 }
 
 impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
@@ -147,6 +150,8 @@ impl Sandbox {
             prefetch_summary: None,
             reinit: parking_lot::Mutex::default(),
             envd_report: parking_lot::Mutex::default(),
+            memory_export: Default::default(),
+            balloon: Default::default(),
         }
     }
 
@@ -241,6 +246,7 @@ impl Sandbox {
         if let Some(console) = self.config.console.clone() {
             forward_console(vm.console_lines(), console);
         }
+        self.balloon.install_reader(balloon::cached_reader(vm.client()));
         Ok(self.resources.vm.insert(vm).client())
     }
 

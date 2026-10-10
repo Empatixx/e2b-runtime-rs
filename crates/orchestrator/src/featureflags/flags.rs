@@ -33,6 +33,9 @@ pub const MAX_SANDBOXES_PER_NODE: IntFlag = Flag::new("max-sandboxes-per-node", 
 pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-instances-per-node", 3);
 pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-incoming-connections", -1);
 
+pub const USE_SYNC_WP: BoolFlag = Flag::new("use-sync-wp", false);
+pub const SYNC_WP_TRACKER_DIRTY: BoolFlag = Flag::new("sync-wp-tracker-dirty", false);
+pub const MEMFD_BACKGROUND_COPY: BoolFlag = Flag::new("memfd-background-copy", true);
 pub const IN_PLACE_CHECKPOINT: BoolFlag = Flag::new("in-place-checkpoint", false);
 pub const FILESYSTEM_ONLY_CHECKPOINT: BoolFlag = Flag::new("filesystem-only-checkpoint", false);
 pub const IN_PLACE_CHECKPOINT_REPORTING: BoolFlag = Flag::new("in-place-checkpoint-reporting", false);

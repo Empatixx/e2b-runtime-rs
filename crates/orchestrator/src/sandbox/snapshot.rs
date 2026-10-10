@@ -221,6 +221,28 @@ impl Sandbox {
         })
     }
 
+    async fn tracker_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
+        if !self.uses_sync_wp() {
+            return Err("the tracker dirty source needs a sandbox resumed with synchronous write-protect".to_owned());
+        }
+        let memory = self
+            .resources
+            .memory
+            .as_ref()
+            .ok_or("the memory server is not running")?;
+        if memory.is_finished() {
+            return Err("the memory server has stopped; the guest memory is not consistent".to_owned());
+        }
+        let regions = client.memory_mappings().await?;
+        let exported = memory.export_page_states().await?;
+        Ok(MemoryPages {
+            tracked_writes: true,
+            regions,
+            dirty: exported.dirty,
+            empty: exported.empty,
+        })
+    }
+
     async fn settled_removals(&self) -> Result<RoaringBitmap, String> {
         match self.resources.memory.as_ref() {
             Some(memory) => memory.settle().await.map(|()| memory.empty_pages()),
