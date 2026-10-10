@@ -30,6 +30,8 @@ Limits and switches come from **LaunchDarkly** with upstream's flag names, conte
 | `use-memfd` | on | memfd-backed guest memory. |
 | `envd-timeout-milliseconds` | `ENVD_TIMEOUT` or 10 s | How long a resume waits for envd. |
 | `build-cache-max-usage-percentage` | 85 | When local diffs are evicted. |
+| `peer-to-peer-chunk-transfer` | off | A node reads a build that another node still uploads from that node. Needs Redis and a `NODE_IP` other than `localhost`. |
+| `peer-to-peer-async-checkpoint` | off | A checkpoint returns once its snapshot is cached; the upload runs in the background. |
 
 ## Telemetry
 

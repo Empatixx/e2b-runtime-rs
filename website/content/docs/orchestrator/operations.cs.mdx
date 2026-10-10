@@ -30,6 +30,8 @@ Limity a přepínače pocházejí z **LaunchDarkly** se stejnými názvy flagů,
 | `use-memfd` | zapnuto | Paměť hosta v memfd. |
 | `envd-timeout-milliseconds` | `ENVD_TIMEOUT` nebo 10 s | Jak dlouho probuzení čeká na envd. |
 | `build-cache-max-usage-percentage` | 85 | Kdy se mažou lokální rozdíly. |
+| `peer-to-peer-chunk-transfer` | vypnuto | Node čte build, který jiný node ještě nahrává, přímo z toho nodu. Potřebuje Redis a `NODE_IP` jiné než `localhost`. |
+| `peer-to-peer-async-checkpoint` | vypnuto | Checkpoint skončí, jakmile je snapshot v cache; upload běží na pozadí. |
 
 ## Telemetrie
 
