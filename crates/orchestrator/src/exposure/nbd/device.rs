@@ -4,21 +4,17 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use nix::libc;
-
 use super::ioctl;
-use super::netlink::{Connect, NbdNetlink};
 use super::pool::{DEFAULT_POOL_SIZE, DevicePool};
 
 const NOT_OPEN: &str = "no NBD device open to flush";
-const IO_TIMEOUT: Duration = Duration::from_secs(90);
-const DEAD_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const FLAGS: i32 = 1 | 32 | 64 | 256;
+const TIMEOUT_SECONDS: u64 = 90;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_RETRY: Duration = Duration::from_millis(25);
-const STATUS_POLL_INTERVAL: Duration = Duration::from_micros(100);
+const CONNECT_POLL_INTERVAL: Duration = Duration::from_micros(100);
 
 static POOL: OnceLock<DevicePool> = OnceLock::new();
 
@@ -53,38 +49,57 @@ pub struct NbdDevice {
 
 struct Attached {
     control: File,
-    _kernel_sockets: Vec<UnixStream>,
-    netlink: NbdNetlink,
+    kernel_socket: UnixStream,
+    worker: JoinHandle<io::Result<()>>,
     claim: Claim,
 }
 
 impl Attached {
-    async fn finish(self) -> io::Result<()> {
-        let disconnected = wait_for_state(&self.netlink, self.claim.index, false, DISCONNECT_TIMEOUT).await;
-        drop(self);
-        disconnected
+    fn finish(self) -> io::Result<()> {
+        let Self {
+            control,
+            kernel_socket,
+            worker,
+            claim,
+        } = self;
+        let served = worker.join().map_err(|_| io::Error::other("nbd worker panicked"));
+        drop(kernel_socket);
+        drop(control);
+        drop(claim);
+        served?
     }
 }
 
 impl NbdDevice {
-    pub async fn attach(kernel_sockets: Vec<UnixStream>, size: u64, block_size: u64) -> io::Result<Self> {
-        let netlink = NbdNetlink::open()?;
-        let claim = connect(&netlink, &kernel_sockets, size, block_size).await?;
-        match open_when_connected(&netlink, claim.index).await {
-            Ok(control) => Ok(Self {
-                index: claim.index,
-                attached: Some(Attached {
-                    control,
-                    _kernel_sockets: kernel_sockets,
-                    netlink,
-                    claim,
-                }),
-            }),
+    pub async fn attach(kernel_socket: UnixStream, size: u64, block_size: u64) -> io::Result<Self> {
+        let claim = Claim::take().await?;
+        let control = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device_path(claim.index))?;
+        if let Err(e) = configure(&control, &kernel_socket, size, block_size) {
+            reset(&control);
+            return Err(e);
+        }
+        let worker = match control.try_clone() {
+            Ok(worker_control) => spawn_worker(worker_control),
             Err(e) => {
-                let _ = netlink.disconnect(claim.index).await;
-                let _ = wait_for_state(&netlink, claim.index, false, DISCONNECT_TIMEOUT).await;
-                Err(e)
+                reset(&control);
+                return Err(e);
             }
+        };
+        let device = Self {
+            index: claim.index,
+            attached: Some(Attached {
+                control,
+                kernel_socket,
+                worker,
+                claim,
+            }),
+        };
+        match device.wait_until_connected(size).await {
+            Ok(()) => Ok(device),
+            Err(waited) => Err(device.abandon().await.err().unwrap_or(waited)),
         }
     }
 
@@ -109,86 +124,71 @@ impl NbdDevice {
             .map_err(|e| format!("flush NBD device: {e}"))?
     }
 
-    pub async fn disconnect(&self) -> io::Result<()> {
-        match self.attached.as_ref() {
-            Some(attached) => attached.netlink.disconnect(self.index).await,
-            None => Ok(()),
-        }
+    pub fn request_disconnect(&self) -> io::Result<()> {
+        self.attached
+            .as_ref()
+            .map_or(Ok(()), |attached| ioctl::disconnect(&attached.control))
     }
 
     pub async fn wait(mut self) -> io::Result<()> {
-        match self.attached.take() {
-            Some(attached) => attached.finish().await,
-            None => Ok(()),
+        let Some(attached) = self.attached.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || attached.finish())
+            .await
+            .map_err(io::Error::other)?
+    }
+
+    fn is_finished(&self) -> bool {
+        self.attached
+            .as_ref()
+            .is_none_or(|attached| attached.worker.is_finished())
+    }
+
+    async fn wait_until_connected(&self, size: u64) -> io::Result<()> {
+        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if pid_path(self.index()).exists() && self.reported_size() == Some(size) {
+                return Ok(());
+            }
+            if self.is_finished() {
+                return Err(io::Error::other(format!(
+                    "nbd{} stopped before connecting",
+                    self.index()
+                )));
+            }
+            tokio::time::sleep(CONNECT_POLL_INTERVAL).await;
         }
+        Err(io::Error::other(format!(
+            "nbd{} did not connect with {size} bytes (reports {:?})",
+            self.index(),
+            self.reported_size()
+        )))
+    }
+
+    fn reported_size(&self) -> Option<u64> {
+        std::fs::read_to_string(sys_path(self.index()).join("size"))
+            .ok()
+            .and_then(|sectors| sectors.trim().parse::<u64>().ok())
+            .map(|sectors| sectors * 512)
+    }
+
+    async fn abandon(self) -> io::Result<()> {
+        if let Some(attached) = self.attached.as_ref() {
+            let _ = ioctl::disconnect(&attached.control);
+            reset(&attached.control);
+        }
+        self.wait().await
     }
 }
 
 impl Drop for NbdDevice {
     fn drop(&mut self) {
-        let Some(attached) = self.attached.take() else {
-            return;
-        };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = attached.netlink.disconnect(attached.claim.index).await;
-                attached.finish().await
-            });
+        if let Some(attached) = self.attached.take() {
+            let _ = ioctl::disconnect(&attached.control);
+            std::thread::spawn(move || drop(attached.finish()));
         }
     }
-}
-
-async fn connect(netlink: &NbdNetlink, kernel_sockets: &[UnixStream], size: u64, block_size: u64) -> io::Result<Claim> {
-    let sockets: Vec<u32> = kernel_sockets.iter().map(|socket| socket.as_raw_fd() as u32).collect();
-    loop {
-        let claim = Claim::take().await?;
-        let request = Connect {
-            index: claim.index,
-            sockets: &sockets,
-            size,
-            block_size,
-            timeout: IO_TIMEOUT,
-            dead_connection_timeout: DEAD_CONNECTION_TIMEOUT,
-        };
-        match netlink.connect(&request).await {
-            Ok(_) => return Ok(claim),
-            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => return Err(e),
-            Err(e) => {
-                tracing::error!(error = %e, device_index = claim.index, "error opening NBD, retrying");
-                drop(claim);
-                tokio::time::sleep(CONNECT_RETRY).await;
-            }
-        }
-    }
-}
-
-async fn open_when_connected(netlink: &NbdNetlink, index: u32) -> io::Result<File> {
-    wait_for_state(netlink, index, true, CONNECT_TIMEOUT).await?;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(device_path(index))
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("error opening NBD device {}: {e}", device_path(index).display()),
-            )
-        })
-}
-
-async fn wait_for_state(netlink: &NbdNetlink, index: u32, connected: bool, timeout: Duration) -> io::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if netlink.is_connected(index).await.is_ok_and(|state| state == connected) {
-            return Ok(());
-        }
-        tokio::time::sleep(STATUS_POLL_INTERVAL).await;
-    }
-    let wanted = if connected { "connect" } else { "disconnect" };
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!("nbd{index} did not {wanted} within {timeout:?}"),
-    ))
 }
 
 fn flush_device(control: &File) -> Result<(), String> {
@@ -203,6 +203,27 @@ fn joined_failures(failures: [Option<String>; 2]) -> Result<(), String> {
         true => Ok(()),
         false => Err(failures.join("\n")),
     }
+}
+
+fn configure(control: &File, kernel_socket: &UnixStream, size: u64, block_size: u64) -> io::Result<()> {
+    ioctl::set_block_size(control, block_size)?;
+    ioctl::set_size_blocks(control, size / block_size)?;
+    ioctl::set_timeout(control, TIMEOUT_SECONDS)?;
+    ioctl::set_flags(control, FLAGS)?;
+    ioctl::set_sock(control, kernel_socket.as_raw_fd())
+}
+
+fn reset(control: &File) {
+    let _ = ioctl::clear_sock(control);
+    let _ = ioctl::set_size_blocks(control, 0);
+}
+
+fn spawn_worker(control: File) -> JoinHandle<io::Result<()>> {
+    std::thread::spawn(move || {
+        let served = ioctl::do_it(&control);
+        let _ = ioctl::clear_sock(&control);
+        served
+    })
 }
 
 fn device_count() -> u32 {
