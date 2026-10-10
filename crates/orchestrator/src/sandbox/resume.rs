@@ -15,7 +15,7 @@ use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::firecracker::vcpus::{exceeds_snapshot_error, vcpu_cap_resume_error};
 use crate::memory::handshake::UffdListener;
-use crate::memory::prefetch::plan::PrefetchPlan;
+use crate::memory::prefetch::plan::{PrefetchPlan, PrefetchSummary};
 use crate::memory::prefetch::{PrefetchStats, fetch_only, prefetch};
 use crate::memory::server::{MemoryServer, MemoryWatch, Prefaulter};
 use crate::memory::trace::Trace;
@@ -134,6 +134,7 @@ impl Sandbox {
             last_cycle_blocks = plan.last_cycle_blocks(),
             "resolved the resume prefetch"
         );
+        self.prefetch_summary = Some(plan.summary(self.config.prefetch_settings.source));
         if plan.is_empty() {
             return None;
         }
@@ -141,6 +142,10 @@ impl Sandbox {
         let stats = self.prefetch_stats.clone();
         self.resources.prefetch = Some(tokio::spawn(replay(plan, memfile, installer, stats)));
         Some(prefaulter)
+    }
+
+    pub fn prefetch_summary(&self) -> Option<PrefetchSummary> {
+        self.prefetch_summary
     }
 
     pub fn prefetched(&self) -> u64 {

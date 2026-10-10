@@ -1,8 +1,15 @@
 use super::last_cycle::{cap, diff_mapping};
-use super::source::PrefetchSettings;
+use super::source::{PrefetchSettings, PrefetchSource};
 use super::workers::PrefetchWorkers;
 use crate::storage::header::Header;
 use crate::template::metadata::MemoryPrefetch;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefetchSummary {
+    pub source: &'static str,
+    pub init_blocks: usize,
+    pub last_cycle_blocks: usize,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrefetchPlan {
@@ -21,6 +28,14 @@ impl PrefetchPlan {
                 .then(|| cap(diff_mapping(memfile), settings.last_cycle_max_mib))
                 .flatten(),
             workers: settings.workers,
+        }
+    }
+
+    pub fn summary(&self, source: PrefetchSource) -> PrefetchSummary {
+        PrefetchSummary {
+            source: source.as_str(),
+            init_blocks: self.init_blocks(),
+            last_cycle_blocks: self.last_cycle_blocks(),
         }
     }
 

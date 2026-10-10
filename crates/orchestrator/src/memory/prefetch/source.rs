@@ -20,6 +20,15 @@ impl PrefetchSource {
         }
     }
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Init => "init",
+            Self::LastCycle => "last-cycle",
+            Self::Both => "both",
+        }
+    }
+
     pub fn uses_init(self) -> bool {
         matches!(self, Self::Init | Self::Both)
     }

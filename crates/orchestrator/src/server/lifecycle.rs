@@ -28,6 +28,7 @@ use crate::sandbox::{Death, Sandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::server::sandbox::{record_crash, record_execution};
 use crate::template::Template;
+use crate::telemetry::server::spans;
 use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
@@ -152,6 +153,7 @@ struct Running {
     _oom: Option<OomMonitor>,
     throwaway: bool,
     _work: Work,
+    _execution: Span,
 }
 
 pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, throwaway: bool) -> SandboxHandle {
@@ -180,7 +182,13 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
             oom_watermark,
         )
     });
+    let execution = {
+        let info = handle.info.lock();
+        let init_origin = info.metadata.as_ref().map_or("none", TemplateMetadata::prefetch_init_origin);
+        spans::execution(&info.config, sandbox.prefetch_summary().as_ref(), init_origin)
+    };
     let running = Running {
+        _execution: execution,
         host_stats,
         _oom: oom,
         throwaway,

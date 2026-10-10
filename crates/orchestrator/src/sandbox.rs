@@ -29,6 +29,7 @@ use crate::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};
 use crate::firecracker::mmds::MmdsMetadata;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::prefetch::PrefetchStats;
+use crate::memory::prefetch::plan::PrefetchSummary;
 use crate::phases::PhaseTimer;
 use crate::telemetry::report::report_error;
 
@@ -43,6 +44,7 @@ pub struct Sandbox {
     resources: Resources,
     phases: PhaseTimer,
     prefetch_stats: Arc<PrefetchStats>,
+    prefetch_summary: Option<PrefetchSummary>,
     resolved_vm_vcpus: i64,
 }
 
@@ -136,6 +138,7 @@ impl Sandbox {
             config,
             phases: PhaseTimer::start(),
             prefetch_stats: Arc::default(),
+            prefetch_summary: None,
         }
     }
 
