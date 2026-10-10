@@ -8,6 +8,7 @@ pub mod header_poll;
 pub mod hinting;
 pub mod identity;
 pub mod logs;
+pub mod memfd;
 pub mod metrics;
 pub mod reads;
 pub mod reboot;

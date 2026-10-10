@@ -46,7 +46,9 @@ use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::upgrade::rollout::EnvdUpgrades;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
-use crate::featureflags::{FeatureFlags, FlagContext, USE_SYNC_WP, memfile_diff_dedup};
+use crate::featureflags::{
+    FeatureFlags, FlagContext, MEMFD_DEDUP_FREE_INDEX, MEMFD_DEDUP_INFLIGHT_SERVE, USE_SYNC_WP, memfile_diff_dedup,
+};
 use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::firecracker::version::{supports_huge_pages, supports_memfd};
 use crate::hoststats::StatsIdentity;
@@ -70,13 +72,16 @@ use crate::sandbox::config::sandbox_builder::{
     SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetSandboxType, SetTemplateId, SetWorkDir,
 };
 use crate::sandbox::rootfs::recovery::RecoveryRecord;
+use crate::sandbox::snapshot::provisional::ProvisionalMemfile;
 use crate::sandbox::snapshot::{LocalSnapshot, SnapshotOptions};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
+use crate::storage::header::Header;
 use crate::storage::upload_limit::UploadLimiter;
 use crate::tcpfirewall::proxy::FirewallSandbox;
 use crate::telemetry::resume::record_wp_mode;
 use crate::telemetry::server::gauges::Allocated;
+use crate::telemetry::template_cache::record_memfile_dedup_duration;
 use crate::template::cache::TemplateCache;
 use crate::template::lineage::{SnapshotLineage, UploadOutcome};
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
@@ -314,9 +319,13 @@ impl Node {
         lineage: SnapshotLineage,
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
+        let contexts = prefetch::pause_contexts(&parent.config);
+        let inflight_serve = self.feature_flags.get(&MEMFD_DEDUP_INFLIGHT_SERVE, &contexts);
         let options = SnapshotOptions {
             dedup: self.memfile_dedup(&parent.config),
             defer_rootfs,
+            inflight_serve,
+            free_index: inflight_serve && self.feature_flags.get(&MEMFD_DEDUP_FREE_INDEX, &contexts),
         };
         let local = sandbox
             .snapshot_with(&dir, build_id, options)
@@ -369,6 +378,7 @@ impl Node {
         disk: Option<Arc<PauseDiskReservation>>,
     ) {
         let build = local.snapshot.build.clone();
+        let upload_parents = local_parents(&local);
         let storage = self.storage.clone();
         let store = self.store.clone();
         let peers = self.peers.clone();
@@ -377,7 +387,7 @@ impl Node {
         let team_id = object_metadata.entries.get("team_id").cloned().unwrap_or_default();
         let attempt = move || upload_attempt(local.clone(), storage.clone(), object_metadata.clone());
         self.uploads
-            .start(build.build_id, parents(&build), attempt, move |outcome| {
+            .start(build.build_id, upload_parents, attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
                 if outcome == Outcome::Failed {
                     count_failed_snapshot_upload(&team_id, filesystem_only);
@@ -399,13 +409,14 @@ impl Node {
         object_metadata: ObjectMetadata,
     ) -> impl Future<Output = Result<(), String>> + Send + 'static {
         let build = local.snapshot.build.clone();
+        let upload_parents = local_parents(&local);
         let attempt = upload_attempt(local, self.storage.clone(), object_metadata);
         let uploads = self.uploads.clone();
         let store = self.store.clone();
         let peers = self.peers.clone();
         let templates = self.templates.clone();
         let task = tokio::spawn(async move {
-            let uploaded = uploads.run(build.build_id, parents(&build), attempt).await;
+            let uploaded = uploads.run(build.build_id, upload_parents, attempt).await;
             templates.finish_upload(build.build_id, landed_or_failed(uploaded.is_ok()));
             store.unpin(build.build_id);
             peers.finish(build.build_id, uploaded.is_ok()).await;
@@ -450,13 +461,21 @@ impl Node {
         std::fs::write(&metadata_file, metadata.to_json())
             .map_err(|e| format!("write {}: {e}", metadata_file.display()))?;
         register_local_diffs(&self.store, local)?;
-        self.templates.add_snapshot(
+        let template = self.templates.add_snapshot(
             local.snapshot.build.clone(),
             local.files.snapfile.clone(),
             metadata,
             dir,
             lineage,
         );
+        if let Some(provisional) = &local.provisional {
+            template.memfile_headers().set_durable(provisional.durable_header());
+            tokio::spawn(swap_provisional_header(
+                template,
+                provisional.clone(),
+                self.store.clone(),
+            ));
+        }
         Ok(())
     }
 
@@ -1069,26 +1088,61 @@ pub(crate) fn landed_or_failed(landed: bool) -> UploadOutcome {
 }
 
 fn parents(build: &Build) -> Vec<Uuid> {
-    build
-        .memfile
-        .mappings
+    parents_of(build.build_id, &[build.memfile.clone(), build.rootfs.clone()])
+}
+
+fn local_parents(local: &LocalSnapshot) -> Vec<Uuid> {
+    parents_of(local.snapshot.build.build_id, &local.upload_parents())
+}
+
+fn parents_of(build_id: Uuid, headers: &[Header]) -> Vec<Uuid> {
+    headers
         .iter()
-        .chain(&build.rootfs.mappings)
+        .flat_map(|header| &header.mappings)
         .map(|mapping| mapping.build_id)
-        .filter(|parent| !parent.is_nil() && *parent != build.build_id)
+        .filter(|parent| !parent.is_nil() && *parent != build_id)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
+async fn swap_provisional_header(template: Arc<Template>, provisional: ProvisionalMemfile, store: Arc<DiffStore>) {
+    match provisional.deduped.clone().await {
+        Ok(deduped) => {
+            if !template
+                .memfile_headers()
+                .swap_if_current(&provisional.header, &provisional.header, deduped.header)
+            {
+                tracing::info!("provisional memfile header swap: header already advanced; skipping");
+            }
+            record_memfile_dedup_duration(provisional.created.elapsed());
+        }
+        Err(e) => tracing::warn!(error = %e, "provisional memfile header swap: deduped header failed"),
+    }
+    store.unpin(provisional.build_id);
+    provisional.mark_swapped();
+}
+
 fn register_local_diffs(store: &DiffStore, local: &LocalSnapshot) -> Result<(), String> {
     let build_id = local.snapshot.build.build_id;
-    store.add_local_when(
-        build_id,
-        Artifact::Memfile,
-        &local.files.memfile,
-        local.memfile_ready.clone(),
-    );
+    match &local.provisional {
+        Some(provisional) => {
+            store.add_provisional(provisional.build_id, Artifact::Memfile, provisional.memfd.clone());
+            store.add_local_serving(
+                build_id,
+                Artifact::Memfile,
+                &local.files.memfile,
+                local.memfile_ready.clone(),
+                provisional.memfd.clone(),
+            );
+        }
+        None => store.add_local_when(
+            build_id,
+            Artifact::Memfile,
+            &local.files.memfile,
+            local.memfile_ready.clone(),
+        ),
+    }
     match local.rootfs_ready.clone().now_or_never() {
         None => {
             store.add_local_when(
@@ -1165,6 +1219,7 @@ mod tests {
                 rootfs_bytes: 0,
                 tracked_writes: false,
                 vm_vcpus: 0,
+                scheduling_memfile: None,
             },
             files: SnapshotFiles {
                 snapfile: dir.join("snapfile"),
@@ -1173,6 +1228,7 @@ mod tests {
             },
             memfile_ready: ready_now(),
             rootfs_ready: ready_now(),
+            provisional: None,
         }
     }
 

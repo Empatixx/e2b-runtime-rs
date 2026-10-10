@@ -1,7 +1,7 @@
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 
-use super::mapping::{from_blocks, merge, normalize, validate};
+use super::mapping::{from_blocks, identity_from_blocks, merge, normalize, validate};
 use std::collections::BTreeMap;
 
 use super::{BuildData, BuildMapping, Header, Metadata, PAGE_SIZE};
@@ -15,13 +15,31 @@ pub struct DiffMetadata {
 
 impl DiffMetadata {
     pub fn to_diff_header(&self, parent: &Header, build_id: Uuid) -> Result<Header, String> {
-        if self.block_size == 0 || !self.block_size.is_multiple_of(PAGE_SIZE) {
-            return Err(format!(
+        self.check_block_size()?;
+        self.header_with(parent, build_id, from_blocks(build_id, &self.dirty, self.block_size))
+    }
+
+    pub fn to_provisional_diff_header(&self, parent: &Header, build_id: Uuid) -> Result<Header, String> {
+        self.check_block_size()?;
+        self.header_with(
+            parent,
+            build_id,
+            identity_from_blocks(build_id, &self.dirty, self.block_size),
+        )
+        .map_err(|e| format!("invalid provisional header mappings: {e}"))
+    }
+
+    fn check_block_size(&self) -> Result<(), String> {
+        match self.block_size > 0 && self.block_size.is_multiple_of(PAGE_SIZE) {
+            true => Ok(()),
+            false => Err(format!(
                 "diff block size must be a positive multiple of {PAGE_SIZE}, got {}",
                 self.block_size
-            ));
+            )),
         }
-        let dirty = from_blocks(build_id, &self.dirty, self.block_size);
+    }
+
+    fn header_with(&self, parent: &Header, build_id: Uuid, dirty: Vec<BuildMapping>) -> Result<Header, String> {
         let empty = from_blocks(Uuid::nil(), &self.empty, self.block_size);
         let mappings = normalize(&merge(&parent.mappings, &merge(&dirty, &empty)));
 
@@ -77,6 +95,29 @@ mod tests {
 
     fn source() -> Header {
         Header::new(Metadata::template(id(1), BLOCK, 4 * BLOCK), Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn a_provisional_header_maps_dirty_blocks_at_their_own_offsets() {
+        let diff = DiffMetadata {
+            dirty: blocks(&[1, 3]),
+            empty: blocks(&[2]),
+            block_size: BLOCK,
+        };
+
+        let header = diff.to_provisional_diff_header(&source(), id(9)).unwrap();
+
+        let located: Vec<(Uuid, u64)> = (0..4)
+            .map(|block| header.locate(block * BLOCK).unwrap())
+            .map(|location| (location.build_id, location.storage_offset))
+            .collect();
+        assert_eq!(
+            located,
+            vec![(id(1), 0), (id(9), BLOCK), (Uuid::nil(), 0), (id(9), 3 * BLOCK)]
+        );
+        assert!(header.incomplete_pending_upload);
+        assert_eq!(header.metadata.build_id, id(9));
+        assert_eq!(header.metadata.generation, 1);
     }
 
     #[test]

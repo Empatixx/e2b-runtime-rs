@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::{Counter, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 const METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/template";
 
@@ -46,6 +46,16 @@ static SUPPRESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static MEMFILE_DEDUP_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    METER
+        .u64_histogram("orchestrator.sandbox.memfile_dedup.duration")
+        .with_description(
+            "Background memfile dedup latency, from the provisional header's creation at pause to the durable-header swap",
+        )
+        .with_unit("ms")
+        .build()
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissReason {
     Insert,
@@ -85,4 +95,8 @@ pub fn record_expired_held() {
 
 pub fn record_suppressed() {
     SUPPRESSED.add(1, &[]);
+}
+
+pub fn record_memfile_dedup_duration(took: std::time::Duration) {
+    MEMFILE_DEDUP_DURATION.record(took.as_millis() as u64, &[]);
 }

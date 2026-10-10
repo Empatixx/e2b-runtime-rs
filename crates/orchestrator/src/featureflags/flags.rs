@@ -36,6 +36,8 @@ pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-inc
 pub const USE_SYNC_WP: BoolFlag = Flag::new("use-sync-wp", false);
 pub const PREBOOT_FS_RECOVERY: BoolFlag = Flag::new("preboot-fs-recovery", false);
 pub const DEFER_ROOTFS_EXPORT: BoolFlag = Flag::new("defer-rootfs-export", false);
+pub const MEMFD_DEDUP_INFLIGHT_SERVE: BoolFlag = Flag::new("memfd-dedup-inflight-serve", false);
+pub const MEMFD_DEDUP_FREE_INDEX: BoolFlag = Flag::new("memfd-dedup-free-index", false);
 pub const SNAPSHOT_CACHE_RELEASE_SUPERSEDED: BoolFlag = Flag::new("snapshot-cache-release-superseded", false);
 pub const SNAPSHOT_CACHE_ANCESTOR_STORAGE_FALLBACK: BoolFlag =
     Flag::new("snapshot-cache-ancestor-storage-fallback", false);

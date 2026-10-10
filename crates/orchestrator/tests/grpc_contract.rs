@@ -152,6 +152,9 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         .override_flag("freeze-user-cgroup", true)
         .override_flag("collapse-envd-heap", true)
         .override_flag("defer-rootfs-export", true)
+        .override_flag("memfile-diff-dedup", serde_json::json!({"enabled": true}))
+        .override_flag("memfd-dedup-inflight-serve", true)
+        .override_flag("memfd-dedup-free-index", true)
         .override_flag(
             "guest-pause-reclaim",
             serde_json::json!({"sync": 2000, "drop_caches": 1000}),

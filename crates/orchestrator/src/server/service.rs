@@ -10,7 +10,6 @@ use super::lifecycle::{Command, SandboxHandle};
 use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
 use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
-use super::scheduling::from_headers;
 use super::vcpus::validate_vcpus;
 use crate::envd::version::check_for_snapshot;
 use crate::events::{KILLED, SandboxEvent, UPDATED};
@@ -301,12 +300,7 @@ impl SandboxServer {
         snapshotted
             .map(|snapshot| {
                 Response::new(SandboxPauseResponse {
-                    scheduling_metadata: Some(from_headers(
-                        snapshot.build.build_id,
-                        Some(&snapshot.build.memfile),
-                        &snapshot.build.rootfs,
-                        snapshot.memfile_bytes,
-                    )),
+                    scheduling_metadata: Some(snapshot.scheduling_metadata()),
                 })
             })
             .map_err(|e| Status::internal(format!("error snapshotting sandbox '{id}': {e}")))

@@ -68,7 +68,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | A peer transition re-reads the diff from storage with the header it already holds; the chunker reads only uncompressed objects, so a build a Go peer uploads compressed is unreadable after the transition (upstream reloads the header and its frame table) | later |
-| Nothing produces a provisional memfile header: the pause exports and dedups the memfile before the template is served, so the durable header API (`Template::durable_memfile_header`) always sees the final header | perf |
+| `snapshot-cache-drop-provisional-header` is not read and the `orchestrator.sandbox.snapshot.dead_structure_outcome` and `dead_structure_bytes` counters are not recorded; the provisional header stays in the template until the entry goes | later |
 
 ## Orchestrator: volumes
 

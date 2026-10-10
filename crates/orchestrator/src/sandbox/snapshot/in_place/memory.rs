@@ -10,11 +10,13 @@ use super::export_union::ExportBaseline;
 use super::fpr_resume::FprResume;
 use super::{Freeze, InPlaceFailure, LostSandbox, SANDBOX_LOST, record_freeze_for};
 use crate::block::build_file::{Ready, ready_now};
-use crate::memory::dedup::config::DedupConfig;
 use crate::memory::snapshot::diff_metadata;
 use crate::sandbox::Sandbox;
 use crate::sandbox::seal::SealSlot;
-use crate::sandbox::snapshot::{DiskExport, Exported, LocalSnapshot, MemoryPages, Snapshot, SnapshotFiles, exported};
+use crate::sandbox::snapshot::{
+    DiskExport, Exported, LocalSnapshot, MemfileExport, MemoryPages, SchedulingMemfile, Snapshot, SnapshotFiles,
+    SnapshotOptions, exported,
+};
 use crate::storage::build::Build;
 use crate::telemetry::server::in_place::ProcessMemoryOutcome;
 use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
@@ -57,6 +59,7 @@ struct ReportingHold {
 
 struct Exports {
     memfile: Exported,
+    scheduling: SchedulingMemfile,
     memory_bytes: u64,
     tracked_writes: bool,
     ready: Ready,
@@ -187,7 +190,7 @@ impl Sandbox {
             .ok_or_else(|| failed("firecracker reported no memory regions".to_owned()))?;
         let parent = self.memory_parent(page_size, memory_bytes).map_err(failed)?;
         let deferred = self.defer_memory(request, hold, &pages, page_size, &files);
-        let (memfile, ready, pending, was_deferred) = match deferred {
+        let (memfile, scheduling, ready, pending, was_deferred) = match deferred {
             Some(Ok(Deferred {
                 ready,
                 pending,
@@ -199,15 +202,24 @@ impl Sandbox {
                 record_snapshot_diff(&request.team_id, "memfile", &diff, &parent);
                 record_snapshot_dedup(&request.team_id, "memfile", &diff, None, false);
                 let memfile = exported(&diff, &parent, request.build_id).map_err(failed)?;
-                (memfile, ready, Some(pending), true)
+                let scheduling = SchedulingMemfile {
+                    parent: parent.clone(),
+                    new_bytes: diff.dirty.len() * diff.block_size,
+                };
+                (memfile, scheduling, ready, Some(pending), true)
             }
             other => {
                 if let Some(Err(e)) = other {
                     tracing::error!(error = %e, "defer-memory-export setup failed; using sync copy");
                 }
                 let pid = self.resources.vm.as_ref().and_then(|vm| vm.pid()).unwrap_or(0);
-                let (memfile, ready) = self
-                    .export_memory(pages, pid, &files.memfile, request.build_id, DedupConfig::default())
+                let MemfileExport {
+                    exported: memfile,
+                    ready,
+                    scheduling,
+                    ..
+                } = self
+                    .export_memory(pages, pid, &files.memfile, request.build_id, SnapshotOptions::default())
                     .await
                     .map_err(failed)?;
                 ready
@@ -217,7 +229,7 @@ impl Sandbox {
                 if hold.paused {
                     self.fpr_resume().run().await;
                 }
-                (memfile, ready_now(), None, false)
+                (memfile, scheduling, ready_now(), None, false)
             }
         };
         ProcessMemoryOutcome {
@@ -242,6 +254,7 @@ impl Sandbox {
         };
         Ok(Exports {
             memfile,
+            scheduling,
             memory_bytes,
             tracked_writes,
             ready,
@@ -319,10 +332,12 @@ impl Sandbox {
                     rootfs_bytes: exports.rootfs.exported.bytes,
                     tracked_writes: exports.tracked_writes,
                     vm_vcpus: self.resolved_vm_vcpus,
+                    scheduling_memfile: Some(exports.scheduling),
                 },
                 files,
                 memfile_ready: exports.ready,
                 rootfs_ready: exports.rootfs.sealed.clone(),
+                provisional: None,
             },
             deferred,
         })

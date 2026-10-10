@@ -67,6 +67,8 @@ While a sandbox runs, the `periodic` block of `free-page-hinting-config` starts 
 
 With `defer-rootfs-export` on, a pause only records which overlay blocks changed and builds the header. The blocks are written to the rootfs diff in the background, so the reply does not wait for that copy. The upload and a resume on the same node wait until the diff is complete. The `orchestrator.sandbox.snapshot.rootfs_seal.duration` metric records how long that background write takes.
 
+With `memfile-diff-dedup` and `memfd-dedup-inflight-serve` on, a pause does not wait for the memory dedup, like upstream. The new build first gets a provisional memfile header that points every dirty page at the still-open memfd. A resume on the same node reads from there at once. The dedup compares the pages against the parent in the background, writes the smaller diff and then swaps in the final header. Until that diff is complete, reads of it are also served from the memfd. The memfd is closed after the swap, or after 30 seconds if no swap comes. The upload always uses the final header. `orchestrator.sandbox.memfile_dedup.duration` measures the time from the pause to the swap.
+
 ## Checkpoint
 
 A checkpoint is a pause followed by an immediate resume of the new build. The sandbox keeps running, and the API can later resume it from that moment.

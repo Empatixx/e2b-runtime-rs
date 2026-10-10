@@ -33,6 +33,11 @@ impl BasePages for BuildFileBase {
     }
 }
 
+pub struct DedupPlan {
+    pub diff: DiffMetadata,
+    block_size: u64,
+}
+
 pub fn export_deduped(
     memory: &GuestMemory,
     regions: &[GuestRegion],
@@ -42,6 +47,19 @@ pub fn export_deduped(
     config: &DedupConfig,
     out: &mut impl Write,
 ) -> io::Result<DiffMetadata> {
+    let plan = plan_deduped(memory, regions, dirty, empty, base, config)?;
+    drain_deduped(memory, regions, &plan, out)?;
+    Ok(plan.diff)
+}
+
+pub fn plan_deduped(
+    memory: &GuestMemory,
+    regions: &[GuestRegion],
+    dirty: &RoaringBitmap,
+    empty: &RoaringBitmap,
+    base: &dyn BasePages,
+    config: &DedupConfig,
+) -> io::Result<DedupPlan> {
     let block_size = diff_metadata(regions, dirty, empty)?.block_size;
     let mut source = |absolute: u64| read_block(memory, regions, absolute / block_size, block_size);
     let mut plan = compare(
@@ -60,12 +78,25 @@ pub fn export_deduped(
         let first = u64::from(block) * ratio;
         plan.page_empty.insert_range(first as u32..(first + ratio) as u32);
     });
-    drain_dirty_pages(&mut source, &plan.page_dirty, block_size, out)?;
-    Ok(DiffMetadata {
-        empty: &plan.page_empty - &plan.page_dirty,
-        dirty: plan.page_dirty,
-        block_size: PAGE_SIZE,
+    Ok(DedupPlan {
+        diff: DiffMetadata {
+            empty: &plan.page_empty - &plan.page_dirty,
+            dirty: plan.page_dirty,
+            block_size: PAGE_SIZE,
+        },
+        block_size,
     })
+}
+
+pub fn drain_deduped(
+    memory: &GuestMemory,
+    regions: &[GuestRegion],
+    plan: &DedupPlan,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let block_size = plan.block_size;
+    let mut source = |absolute: u64| read_block(memory, regions, absolute / block_size, block_size);
+    drain_dirty_pages(&mut source, &plan.diff.dirty, block_size, out).map(drop)
 }
 
 fn read_block(memory: &GuestMemory, regions: &[GuestRegion], block: u64, block_size: u64) -> Result<Vec<u8>, String> {

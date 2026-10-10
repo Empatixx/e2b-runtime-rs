@@ -1,5 +1,6 @@
 pub mod filesystem;
 pub mod in_place;
+pub mod provisional;
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -11,6 +12,7 @@ use futures::FutureExt;
 use roaring::RoaringBitmap;
 use uuid::Uuid;
 
+use self::provisional::{DedupedMemfile, InflightDedup, ProvisionalMemfile};
 use super::Sandbox;
 use super::config::Rootfs;
 use crate::block::build_file::{BuildFile, Ready, ready_now};
@@ -22,6 +24,8 @@ use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::dedup::config::DedupConfig;
 use crate::memory::server::MemoryServer;
 use crate::memory::snapshot::{BuildFileBase, GuestMemory, diff_metadata, export_deduped, export_pages, memfile_pages};
+use crate::proto::SchedulingMetadata;
+use crate::server::scheduling::from_headers;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
@@ -38,6 +42,24 @@ pub struct Snapshot {
     pub rootfs_bytes: u64,
     pub tracked_writes: bool,
     pub vm_vcpus: i64,
+    pub scheduling_memfile: Option<SchedulingMemfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulingMemfile {
+    pub parent: Header,
+    pub new_bytes: u64,
+}
+
+impl Snapshot {
+    pub fn scheduling_metadata(&self) -> SchedulingMetadata {
+        from_headers(
+            self.build.build_id,
+            self.scheduling_memfile.as_ref().map(|memfile| &memfile.parent),
+            &self.build.rootfs,
+            self.scheduling_memfile.as_ref().map_or(0, |memfile| memfile.new_bytes),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +75,22 @@ pub struct LocalSnapshot {
     pub files: SnapshotFiles,
     pub memfile_ready: Ready,
     pub rootfs_ready: Ready,
+    pub provisional: Option<ProvisionalMemfile>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SnapshotOptions {
     pub dedup: DedupConfig,
     pub defer_rootfs: bool,
+    pub inflight_serve: bool,
+    pub free_index: bool,
+}
+
+struct MemfileExport {
+    exported: Exported,
+    ready: Ready,
+    provisional: Option<ProvisionalMemfile>,
+    scheduling: SchedulingMemfile,
 }
 
 pub struct DiskExport {
@@ -153,7 +185,7 @@ impl Sandbox {
     ) -> Result<LocalSnapshot, String> {
         let options = SnapshotOptions {
             dedup,
-            defer_rootfs: false,
+            ..SnapshotOptions::default()
         };
         self.snapshot_with(dir, build_id, options).await
     }
@@ -188,8 +220,13 @@ impl Sandbox {
         let pages = self.memory_pages(client).await?;
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
         let tracked_writes = pages.tracked_writes;
-        let (memfile, memfile_ready) = self
-            .export_memory(pages, pid, &files.memfile, build_id, options.dedup)
+        let MemfileExport {
+            exported: memfile,
+            ready: memfile_ready,
+            provisional,
+            scheduling,
+        } = self
+            .export_memory(pages, pid, &files.memfile, build_id, options)
             .await?;
         let disk = match self
             .export_disk_with(&files.rootfs, build_id, options.defer_rootfs)
@@ -213,12 +250,14 @@ impl Sandbox {
             rootfs_bytes: rootfs.bytes,
             tracked_writes,
             vm_vcpus: self.resolved_vm_vcpus,
+            scheduling_memfile: Some(scheduling),
         };
         Ok(LocalSnapshot {
             snapshot,
             files: files.clone(),
             memfile_ready,
             rootfs_ready: disk.sealed,
+            provisional,
         })
     }
 
@@ -378,8 +417,9 @@ impl Sandbox {
         pid: u32,
         path: &Path,
         build_id: Uuid,
-        dedup: DedupConfig,
-    ) -> Result<(Exported, Ready), String> {
+        options: SnapshotOptions,
+    ) -> Result<MemfileExport, String> {
+        let dedup = options.dedup;
         let page_size = pages
             .regions
             .first()
@@ -391,26 +431,46 @@ impl Sandbox {
         let pre =
             diff_metadata(&pages.regions, &pages.dirty, &pages.empty).map_err(|e| format!("export memfile: {e}"))?;
         record_snapshot_diff(&self.config.team_id, "memfile", &pre, &parent);
+        let scheduling = SchedulingMemfile {
+            parent: parent.clone(),
+            new_bytes: pre.dirty.len() * pre.block_size,
+        };
+        let memfd = self.resources.memory.as_ref().and_then(MemoryServer::memfd);
         if let Some(base) = self.config.memfile.clone().filter(|_| dedup.enabled) {
-            let memory = match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
+            if let Some(memfd) = memfd.clone().filter(|_| options.inflight_serve) {
+                let inflight = InflightDedup {
+                    memfd,
+                    pages,
+                    path,
+                    base,
+                    dedup,
+                    parent,
+                    build_id,
+                    team_id: self.config.team_id.clone(),
+                    pre,
+                    free_index: options.free_index,
+                };
+                return provisional_export(inflight, scheduling);
+            }
+            let memory = match memfd {
                 Some(memfd) => GuestMemory::Memfd(memfd),
                 None => GuestMemory::Process { pid },
             };
             let diff = deduped_export(memory, pages, path, base, dedup).await?;
             record_snapshot_dedup(&self.config.team_id, "memfile", &pre, Some(&diff), dedup.best_effort);
-            return Ok((exported(&diff, &parent, build_id)?, ready_now()));
+            return settled(exported(&diff, &parent, build_id)?, ready_now(), scheduling);
         }
         record_snapshot_dedup(&self.config.team_id, "memfile", &pre, None, false);
-        match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
+        match memfd {
             Some(memfd) => {
                 let diff = pre;
                 let ready = background_copy(GuestMemory::Memfd(memfd), pages, path);
-                Ok((exported(&diff, &parent, build_id)?, ready))
+                settled(exported(&diff, &parent, build_id)?, ready, scheduling)
             }
             None => {
                 let memory = GuestMemory::Process { pid };
                 let diff = blocking("export memfile", move || write_pages(&memory, &pages, &path)).await?;
-                Ok((exported(&diff, &parent, build_id)?, ready_now()))
+                settled(exported(&diff, &parent, build_id)?, ready_now(), scheduling)
             }
         }
     }
@@ -532,6 +592,29 @@ fn background_copy(memory: GuestMemory, pages: MemoryPages, path: PathBuf) -> Re
     .shared()
 }
 
+fn settled(exported: Exported, ready: Ready, scheduling: SchedulingMemfile) -> Result<MemfileExport, String> {
+    Ok(MemfileExport {
+        exported,
+        ready,
+        provisional: None,
+        scheduling,
+    })
+}
+
+fn provisional_export(inflight: InflightDedup, scheduling: SchedulingMemfile) -> Result<MemfileExport, String> {
+    let bytes = inflight.pre.dirty.len() * inflight.pre.block_size;
+    let (provisional, ready) = inflight.start()?;
+    Ok(MemfileExport {
+        exported: Exported {
+            header: provisional.header.clone(),
+            bytes,
+        },
+        ready,
+        provisional: Some(provisional),
+        scheduling,
+    })
+}
+
 fn exported(diff: &DiffMetadata, parent: &Header, build_id: Uuid) -> Result<Exported, String> {
     Ok(Exported {
         header: diff.to_diff_header(parent, build_id)?,
@@ -634,18 +717,38 @@ impl LocalSnapshot {
             .shared()
     }
 
+    pub async fn durable_memfile(&self) -> Result<DedupedMemfile, String> {
+        match &self.provisional {
+            Some(provisional) => provisional.deduped.clone().await,
+            None => Ok(DedupedMemfile {
+                header: self.snapshot.build.memfile.clone(),
+                bytes: self.snapshot.memfile_bytes,
+            }),
+        }
+    }
+
+    pub fn upload_parents(&self) -> Vec<Header> {
+        let build = &self.snapshot.build;
+        let memfile = self
+            .provisional
+            .as_ref()
+            .map_or(&build.memfile, |provisional| &provisional.parent);
+        vec![memfile.clone(), build.rootfs.clone()]
+    }
+
     pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
         self.memfile_ready.clone().await?;
         self.rootfs_ready.clone().await?;
+        let memfile_diff = self.durable_memfile().await?;
         let build = &self.snapshot.build;
         let paths = build.paths();
         let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
         let (memfile_bytes, rootfs_bytes) = (
-            build.memfile.finalized().serialize()?,
+            memfile_diff.header.finalized().serialize()?,
             build.rootfs.finalized().serialize()?,
         );
-        let memfile_metadata = data_metadata(metadata, &build.memfile, self.snapshot.memfile_bytes);
+        let memfile_metadata = data_metadata(metadata, &memfile_diff.header, memfile_diff.bytes);
         let rootfs_metadata = data_metadata(metadata, &build.rootfs, self.snapshot.rootfs_bytes);
         tokio::try_join!(
             storage.put_file_with(&snapfile, &self.files.snapfile, metadata),
@@ -653,7 +756,7 @@ impl LocalSnapshot {
                 storage,
                 &memfile,
                 &self.files.memfile,
-                self.snapshot.memfile_bytes,
+                memfile_diff.bytes,
                 &memfile_metadata
             ),
             body(

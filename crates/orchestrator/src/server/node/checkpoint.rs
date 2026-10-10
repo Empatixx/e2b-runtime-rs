@@ -27,7 +27,6 @@ use crate::server::build_id;
 use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
 use crate::server::registry::{Lifecycle, StopReserved};
 use crate::server::retry::ATTEMPT_TIMEOUT;
-use crate::server::scheduling::from_headers;
 use crate::server::snapshot_admission::{PENDING_TEXT, Refusal, await_snapshot_admission};
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
@@ -215,13 +214,7 @@ impl Node {
         let info = resumed.info.lock().clone();
         self.events
             .publish(SandboxEvent::new(CHECKPOINTED, &event_sandbox(&info)));
-        let build = &local.snapshot.build;
-        Ok(from_headers(
-            build.build_id,
-            Some(&build.memfile),
-            &build.rootfs,
-            local.snapshot.memfile_bytes,
-        ))
+        Ok(local.snapshot.scheduling_metadata())
     }
 
     async fn resume_checkpoint(

@@ -9,9 +9,10 @@ use roaring::RoaringBitmap;
 
 use crate::firecracker::memory_info::GuestRegion;
 mod deduped;
+pub mod inflight;
 
 use crate::storage::header::DiffMetadata;
-pub use deduped::{BuildFileBase, export_deduped};
+pub use deduped::{BuildFileBase, DedupPlan, drain_deduped, export_deduped, plan_deduped};
 
 const MAX_RUN_BYTES: u64 = 4 << 20;
 

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::chunker::Chunker;
 use super::page_data::PageData;
+use crate::memory::snapshot::inflight::InflightMemfd;
 use crate::storage::backend::Storage;
 use crate::storage::header::Header;
 use crate::storage::paths::BuildPaths;
@@ -71,6 +72,12 @@ struct Pending {
     ready: Ready,
 }
 
+#[derive(Clone)]
+pub enum Inflight {
+    Identity(Arc<InflightMemfd>),
+    Packed(Arc<InflightMemfd>),
+}
+
 struct Entry {
     cell: ChunkerCell,
     expires: Instant,
@@ -78,6 +85,7 @@ struct Entry {
     doomed: Option<Instant>,
     doomed_bytes: u64,
     pending: Option<Pending>,
+    inflight: Option<Inflight>,
 }
 
 impl Entry {
@@ -89,6 +97,7 @@ impl Entry {
             doomed: None,
             doomed_bytes: 0,
             pending: None,
+            inflight: None,
         }
     }
 
@@ -149,6 +158,37 @@ impl DiffStore {
             ready,
         });
         self.entries.lock().insert(DiffKey { build_id, artifact }, entry);
+    }
+
+    pub fn add_local_serving(
+        &self,
+        build_id: Uuid,
+        artifact: Artifact,
+        path: &Path,
+        ready: Ready,
+        memfd: Arc<InflightMemfd>,
+    ) {
+        self.add_local_when(build_id, artifact, path, ready);
+        self.set_inflight(build_id, artifact, Inflight::Packed(memfd));
+    }
+
+    pub fn add_provisional(&self, build_id: Uuid, artifact: Artifact, memfd: Arc<InflightMemfd>) {
+        let mut entry = Entry::new(Arc::default(), true);
+        entry.inflight = Some(Inflight::Identity(memfd));
+        self.entries.lock().insert(DiffKey { build_id, artifact }, entry);
+    }
+
+    fn set_inflight(&self, build_id: Uuid, artifact: Artifact, inflight: Inflight) {
+        if let Some(entry) = self.entries.lock().get_mut(&DiffKey { build_id, artifact }) {
+            entry.inflight = Some(inflight);
+        }
+    }
+
+    pub fn inflight(&self, build_id: Uuid, artifact: Artifact) -> Option<Inflight> {
+        self.entries
+            .lock()
+            .get(&DiffKey { build_id, artifact })
+            .and_then(|entry| entry.inflight.clone())
     }
 
     pub fn add_local(&self, build_id: Uuid, artifact: Artifact, path: &Path) -> Result<(), String> {
@@ -283,16 +323,21 @@ impl BuildFile {
             self.read_at(offset, &mut bytes).await?;
             return Ok(PageData::Owned(bytes));
         }
-        match location.build_id.is_nil() {
-            true => Ok(PageData::zeroes(length)),
-            false => self
-                .store
-                .chunker(location.build_id, self.artifact)
-                .await?
-                .slice(location.storage_offset, length)
-                .await
-                .map(PageData::Mapped),
+        if location.build_id.is_nil() {
+            return Ok(PageData::zeroes(length));
         }
+        if let Some(inflight) = self.store.inflight(location.build_id, self.artifact) {
+            let mut bytes = vec![0; length];
+            if serve_inflight(&inflight, location.storage_offset, &mut bytes)? {
+                return Ok(PageData::Owned(bytes));
+            }
+        }
+        self.store
+            .chunker(location.build_id, self.artifact)
+            .await?
+            .slice(location.storage_offset, length)
+            .await
+            .map(PageData::Mapped)
     }
 
     pub async fn is_cached(&self, offset: u64, length: usize) -> bool {
@@ -318,15 +363,36 @@ impl BuildFile {
             if location.build_id.is_nil() {
                 target.fill(0);
             } else {
-                self.store
-                    .chunker(location.build_id, self.artifact)
-                    .await?
-                    .read_at(location.storage_offset, target)
+                self.read_stored(location.build_id, location.storage_offset, target)
                     .await?;
             }
             done += length;
         }
         Ok(())
+    }
+}
+
+impl BuildFile {
+    async fn read_stored(&self, build_id: Uuid, storage_offset: u64, target: &mut [u8]) -> Result<(), String> {
+        let served = match self.store.inflight(build_id, self.artifact) {
+            Some(inflight) => serve_inflight(&inflight, storage_offset, target)?,
+            None => false,
+        };
+        if served {
+            return Ok(());
+        }
+        self.store
+            .chunker(build_id, self.artifact)
+            .await?
+            .read_at(storage_offset, target)
+            .await
+    }
+}
+
+fn serve_inflight(inflight: &Inflight, storage_offset: u64, target: &mut [u8]) -> Result<bool, String> {
+    match inflight {
+        Inflight::Identity(memfd) => memfd.serve_identity(storage_offset, target).map(|()| true),
+        Inflight::Packed(memfd) => Ok(memfd.serve_packed(storage_offset, target).is_some()),
     }
 }
 

@@ -113,6 +113,18 @@ pub fn from_blocks(build_id: Uuid, blocks: &RoaringBitmap, block_size: u64) -> V
         .collect()
 }
 
+pub fn identity_from_blocks(build_id: Uuid, blocks: &RoaringBitmap, block_size: u64) -> Vec<BuildMapping> {
+    block_ranges(blocks)
+        .into_iter()
+        .map(|range| BuildMapping {
+            offset: u64::from(range.start) * block_size,
+            length: u64::from(range.end - range.start) * block_size,
+            build_id,
+            storage_offset: u64::from(range.start) * block_size,
+        })
+        .collect()
+}
+
 fn block_ranges(blocks: &RoaringBitmap) -> Vec<Range<u32>> {
     blocks.iter().fold(Vec::new(), |mut ranges: Vec<Range<u32>>, block| {
         match ranges.last_mut() {

@@ -134,16 +134,7 @@ impl Node {
         }
         self.events
             .publish(SandboxEvent::new(CHECKPOINTED, &event_sandbox(parent)));
-        let build = &local.snapshot.build;
-        Ok((
-            from_headers(
-                build.build_id,
-                Some(&build.memfile),
-                &build.rootfs,
-                local.snapshot.memfile_bytes,
-            ),
-            deferred,
-        ))
+        Ok((local.snapshot.scheduling_metadata(), deferred))
     }
 
     async fn take_memory_checkpoint(
@@ -211,6 +202,7 @@ impl Node {
             rootfs_bytes: checkpoint.rootfs_bytes,
             tracked_writes: false,
             vm_vcpus: checkpoint.vm_vcpus,
+            scheduling_memfile: None,
         };
         Ok((layer, snapshot))
     }
