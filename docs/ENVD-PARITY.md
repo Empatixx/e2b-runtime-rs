@@ -22,6 +22,7 @@ An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179
 | `cpuCount` on `/init`, `X-Envd-Cpus`, CPU hotplug worker, helper children handed over on upgrade (upstream `e7b859b`) | done | `cpus/`, `reaper.rs`, `reexec.rs`, `controllers/init.rs` |
 | Process starts kept out of the cgroup freeze window: spawn barrier, pre-spawn probe, `unavailable` refusal (upstream `21e78ef`) | done | `cgroups/spawn.rs`, `controllers/process/spawn.rs`, `port/forward.rs` |
 | `/init` thaw that is freeze-aware and skippable, clock correction, `X-Envd-Thaw`, `X-Envd-Init-Clock-Correction`, `X-Envd-Init-Unobserved` (upstream `b999fd6`) | done | `controllers/init.rs`, `controllers/init/`, `cgroups/freeze.rs` |
+| NFS mount commands bounded by a deadline, killed with their process group, retried within 10 s, logged (upstream `c491fcd`) | done | `host/nfs.rs`, `host/command.rs` |
 | Version | `0.9.0` as upstream | |
 
 Not ported on purpose:
@@ -330,6 +331,14 @@ R parses `cgroup_root` and `no_cgroups` but ignores them. G:
 - **Clock correction:** the timestamp is the host's time when it sent the body. envd adds the time from the end of the body read to the gate (lock, token check, audit) before the newest-wins check and the clock bands. `X-Envd-Init-Clock-Correction` holds whole milliseconds, truncated, on every 204 to a request with a timestamp. The log line `corrected the /init timestamp by the handler's delay` has `clock_correction` in milliseconds.
 - **`X-Envd-Init-Unobserved`:** the number of handlers whose thaw finished when their client was already gone, since the last 204 that carried the header or the last freeze. It is set, zero included, on a 204 whose client is still connected when the headers are decided. A skipping handler, one a freeze overtook and one refused at the lock are never counted. A freeze zeroes the count.
 - **Client gone:** a request that is already gone when it would take the `/init` lock answers 503. R sees the client leave when its handler is dropped; the thaw itself runs in its own task, so it finishes either way.
+
+## 5e. NFS mounts (upstream `c491fcd`, G `internal/api/init.go` `setupNFS`)
+
+- **One deadline:** all volumes of one `/init` share 10 s. `findmnt`, `umount`, `mkdir` and `mount` each run in their own process group. When the deadline passes the group gets SIGKILL and the error reads `signal: killed`. The lazy `umount` fallback gets a fresh 2 s.
+- **Wait delay:** after the command exits or is killed, envd waits at most 2 s for its output pipes. If a helper outside the group still holds them, the call returns anyway. A command that exited with success but left the pipes open fails with `exec: WaitDelay expired before I/O complete`.
+- **Mount options:** `...,lookupcache=none,retry=0`, one attempt per `mount` call.
+- **Retries:** `mount` is repeated every 500 ms until it works or the deadline passes. The error is the last attempt's. It starts with `after N attempts:`, then the quoted mount command, `failed: exit status 32` and the command output.
+- **Logs:** `Running NFS command` and `NFS command finished` (with `cmd` and the duration), `NFS mount attempt failed`, `Mounted NFS volume`, `Unmounted stale NFS mount` (with `mode` force or lazy) and `NFS volumes set up`.
 
 ## 6. `/files`
 

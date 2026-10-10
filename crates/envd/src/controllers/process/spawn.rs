@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -32,7 +31,7 @@ use crate::proto::process::process_event::{DataEvent, EndEvent};
 use crate::proto::process::{ProcessConfig, StartRequest};
 use crate::user::User;
 use crate::util::fs::reason;
-use crate::util::paths::expand_and_resolve;
+use crate::util::paths::{expand_and_resolve, look_path};
 
 const OOM_SCORE: i32 = 100;
 const IO_CLASS: u32 = 2;
@@ -466,15 +465,6 @@ fn nice_prefix() -> String {
     let ionice = look_path("ionice").map(|path| format!("{} -c {IO_CLASS} -n {IO_PRIORITY} ", path.display()));
     let nice = look_path("nice").map(|path| format!("{} -n {nice_delta} ", path.display()));
     ionice.into_iter().chain(nice).collect()
-}
-
-fn look_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|path| {
-            path.metadata()
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
-    })
 }
 
 fn unexpired(expired: bool) -> io::Result<()> {

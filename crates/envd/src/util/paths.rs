@@ -1,11 +1,20 @@
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Uid};
 
 use crate::user::User;
 use crate::util::fs::{clean, os_error};
+
+pub fn look_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|path| {
+            path.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
 
 pub fn expand_and_resolve(path: &str, user: &User, default_workdir: Option<&str>) -> Result<PathBuf, String> {
     let path = if path.is_empty() {
