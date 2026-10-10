@@ -34,6 +34,8 @@ Deferred review findings live in `docs/BACKLOG.md`, each with the milestone wher
 
 ## Writing docs and posts
 
+Update the documentation in the same change as the code: `docs/` (PARITY.md, BACKLOG.md and the topic pages), the website pages under `website/content/docs/` in English and Czech, and the README when the change is visible there. A change is not done while a page still describes the old behaviour.
+
 README, docs and the website use plain, short English (and a Czech translation on the website). Follow the `writing-blogs` skill. `scripts/check-prose.py` rejects AI-sounding words, arrows, dashes and emoji; the git pre-push hook (`git config core.hooksPath scripts/hooks`) and the Claude Code hook in `.claude/settings.json` run it before every push.
 
 ## Before a commit
