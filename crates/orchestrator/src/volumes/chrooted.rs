@@ -27,7 +27,7 @@ use names::{check_component, display_path, kernel_path, split_parent};
 use parent::Parent;
 use remove::remove_all_at;
 use resolve::resolve_path;
-use syscalls::{procfs_path, resolve_open, retry_interrupted, syscall_mode};
+use syscalls::{fchmodat2_empty_path, procfs_path, resolve_open, retry_interrupted, syscall_mode};
 
 pub use support::check_support;
 
@@ -128,8 +128,14 @@ impl Chrooted {
 
     pub fn chmod(&self, name: &str, mode: u32) -> Result<(), PathError> {
         let fd = self.open_at("chmod", name, OFlags::PATH, Mode::empty())?;
-        retry_interrupted(|| chmodat(CWD, procfs_path(&fd), syscall_mode(mode), AtFlags::empty()))
-            .map_err(failed("chmod", name))
+        let bits = syscall_mode(mode);
+        match retry_interrupted(|| fchmodat2_empty_path(fd.as_fd(), bits)) {
+            Err(Errno::OPNOTSUPP | Errno::NOSYS) => {
+                retry_interrupted(|| chmodat(CWD, procfs_path(&fd), bits, AtFlags::empty()))
+            }
+            result => result,
+        }
+        .map_err(failed("chmod", name))
     }
 
     pub fn chown(&self, name: &str, uid: Option<u32>, gid: Option<u32>) -> Result<(), PathError> {

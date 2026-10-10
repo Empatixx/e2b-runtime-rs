@@ -10,6 +10,7 @@ const MODE_SETUID: u32 = 1 << 23;
 const MODE_SETGID: u32 = 1 << 22;
 const MODE_STICKY: u32 = 1 << 20;
 const PERMISSION_BITS: u32 = 0o777;
+const SYS_FCHMODAT2: nix::libc::c_long = 452;
 
 pub fn retry_interrupted<T>(mut call: impl FnMut() -> Result<T, Errno>) -> Result<T, Errno> {
     loop {
@@ -60,6 +61,24 @@ pub fn syscall_mode(file_mode: u32) -> Mode {
         Mode::from_bits_truncate(file_mode & PERMISSION_BITS),
         |mode, (_, special)| mode | special,
     )
+}
+
+pub fn fchmodat2_empty_path(fd: BorrowedFd<'_>, mode: Mode) -> Result<(), Errno> {
+    let result = unsafe {
+        nix::libc::syscall(
+            SYS_FCHMODAT2,
+            fd.as_raw_fd(),
+            c"".as_ptr(),
+            mode.bits(),
+            nix::libc::AT_EMPTY_PATH,
+        )
+    };
+    match result {
+        0 => Ok(()),
+        _ => Err(Errno::from_raw_os_error(
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(nix::libc::EIO),
+        )),
+    }
 }
 
 pub fn procfs_path(fd: &OwnedFd) -> String {

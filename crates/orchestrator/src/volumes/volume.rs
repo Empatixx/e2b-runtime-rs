@@ -1,12 +1,10 @@
-use std::fs::DirBuilder;
 use std::io::ErrorKind;
-use std::os::unix::fs::DirBuilderExt;
 
 use tonic::Status;
 
 use super::failure::internal;
 use super::service::VolumeServer;
-use crate::go_os::path_error;
+use crate::go_os::{mkdir_all, path_error};
 use crate::proto::{CreateVolumeRequest, CreateVolumeResponse, DeleteVolumeRequest, DeleteVolumeResponse};
 
 const VOLUME_ROOT_MODE: u32 = 0o700;
@@ -17,11 +15,7 @@ impl VolumeServer {
         let path = self
             .volume_root_path(request.volume.as_ref())
             .map_err(|e| e.wrapped(BUILD_PATH_FAILURE))?;
-        DirBuilder::new()
-            .recursive(true)
-            .mode(VOLUME_ROOT_MODE)
-            .create(&path)
-            .map_err(|e| internal(format!("failed to create volume: {}", path_error("mkdir", &path, &e))))?;
+        mkdir_all(&path, VOLUME_ROOT_MODE).map_err(|e| internal(format!("failed to create volume: {e}")))?;
         Ok(CreateVolumeResponse {
             volume_type: request
                 .volume
