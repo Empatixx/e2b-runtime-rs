@@ -3,7 +3,7 @@ mod route;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
 use tokio::sync::oneshot;
@@ -16,7 +16,7 @@ use super::{Lifetime, Node, StartFailure, StartRequest, event_sandbox, routed_sa
 use crate::events::{CHECKPOINTED, SandboxEvent};
 use crate::featureflags::{
     DEFER_MEMORY_EXPORT, FILESYSTEM_ONLY_CHECKPOINT, IN_PLACE_CHECKPOINT, IN_PLACE_CHECKPOINT_REPORTING,
-    PEER_TO_PEER_ASYNC_CHECKPOINT,
+    PAUSE_ADMISSION_GRACE_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
 };
 use crate::firecracker::version::supports_in_place_checkpoint;
 use crate::memory::trace::Trace;
@@ -27,10 +27,12 @@ use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
 use crate::server::registry::{Lifecycle, StopReserved};
 use crate::server::retry::ATTEMPT_TIMEOUT;
 use crate::server::scheduling::from_headers;
+use crate::server::snapshot_admission::{PENDING_TEXT, Refusal, await_snapshot_admission};
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::report::{ReportStatus, report_critical_error};
 use crate::telemetry::server::sandbox::CheckpointOutcome;
+use crate::telemetry::server::sandbox::record_pause_admission;
 use crate::telemetry::server::spans;
 use crate::template::Template;
 use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
@@ -51,6 +53,8 @@ impl Node {
         request: CheckpointRequest,
     ) -> Result<SchedulingMetadata, Status> {
         let _work = self.status.track_work();
+        self.admit_snapshot(&handle, "checkpoint", !request.filesystem_only)
+            .await?;
         let _permit = self.admission.acquire().await?;
         let lifecycle = handle.lifecycle();
         let id = lifecycle.sandbox_id.clone();
@@ -80,6 +84,37 @@ impl Node {
         }
         .record(started.elapsed());
         checkpointed.map(|(scheduling, _)| scheduling)
+    }
+
+    pub(crate) async fn admit_snapshot(
+        &self,
+        handle: &SandboxHandle,
+        rpc: &str,
+        memory_snapshot: bool,
+    ) -> Result<Option<String>, Status> {
+        let (config, template) = {
+            let info = handle.info.lock();
+            (info.config.clone(), info.template.clone())
+        };
+        let grace = self
+            .feature_flags
+            .get(&PAUSE_ADMISSION_GRACE_MS, &flag_contexts(&config));
+        let Ok(grace) = u64::try_from(grace) else {
+            return Ok(None);
+        };
+        let admission = await_snapshot_admission(&template, Duration::from_millis(grace), memory_snapshot).await;
+        record_pause_admission(&config.team_id, rpc, admission.outcome.label(), admission.waited);
+        match admission.refusal {
+            None => Ok(None),
+            Some(Refusal::Pending) => {
+                tracing::warn!(sandbox = %config.sandbox_id, waited = ?admission.waited, "Refusing {rpc}: {PENDING_TEXT}");
+                Err(Status::resource_exhausted(format!(
+                    "node is busy persisting sandbox '{}', please retry",
+                    config.sandbox_id
+                )))
+            }
+            Some(Refusal::Latched(error)) => Ok(Some(error)),
+        }
     }
 
     fn early_route_of(&self, info: &SandboxInfo, id: &str, fs_only: bool) -> Result<EarlyRoute, Status> {

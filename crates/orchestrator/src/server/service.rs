@@ -28,6 +28,7 @@ use crate::telemetry::server::spans;
 use serde_json::json;
 
 const FS_RECOVERY_NONE: &str = "none";
+const KILL_REASON_SEAL_FAILED: &str = "seal_failed";
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 
 pub struct SandboxServer {
@@ -262,6 +263,13 @@ impl SandboxServer {
         let running = self.running(&id, "sandbox not found", &sandbox_attribute(&id))?;
         spans::record_running(&running.info.lock().config);
         let lifecycle = running.lifecycle();
+        let latched = self
+            .node
+            .admit_snapshot(&running, "pause", !request.filesystem_only)
+            .await?;
+        if let Some(cause) = latched {
+            return self.kill_unpersistable(&running, &id, &cause).await;
+        }
         let disk = self.admit_pause_disk(&running, &lifecycle, request.filesystem_only)?;
         let handle = self
             .node
@@ -327,6 +335,31 @@ impl SandboxServer {
         let info = running.info.lock();
         self.node
             .admit_pause_disk(&info.config, &self.node.rootfs_cache_of(lifecycle), filesystem_only)
+    }
+
+    async fn kill_unpersistable(
+        &self,
+        running: &SandboxHandle,
+        id: &str,
+        cause: &str,
+    ) -> Result<Response<SandboxPauseResponse>, Status> {
+        let lifecycle = running.lifecycle();
+        self.node.mark_stopping(&lifecycle).await;
+        let _ = running.commands.send(Command::Delete).await;
+        let info = running.info.lock().clone();
+        record_kill(&info.config.team_id, KILL_REASON_SEAL_FAILED);
+        self.node.events.publish(
+            SandboxEvent::new(KILLED, &event_sandbox(&info))
+                .with_execution(&execution(&info))
+                .with("kill_reason", json!(KILL_REASON_SEAL_FAILED)),
+        );
+        let message = format!("sandbox '{id}' cannot be persisted, killing it: {cause}");
+        report_critical_error(
+            "sandbox cannot be persisted, killing it",
+            Some(cause),
+            &sandbox_attribute(id),
+        );
+        Err(Status::internal(message))
     }
 
     fn team_of(&self, sandbox_id: &str) -> String {

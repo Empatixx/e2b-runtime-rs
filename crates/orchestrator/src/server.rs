@@ -22,6 +22,7 @@ pub mod scheduling;
 pub mod service;
 pub mod services;
 pub mod shutdown;
+pub mod snapshot_admission;
 pub mod status;
 pub mod upload;
 pub mod uploads;
