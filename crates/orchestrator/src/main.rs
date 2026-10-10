@@ -14,6 +14,9 @@ mod serve {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    use axum::serve::ListenerExt;
+    use tokio::net::TcpStream;
+
     use orchestrator::clickhouse::sinks::Clickhouse;
     use orchestrator::events::EventSink;
     use orchestrator::featureflags::SANDBOX_MAX_INCOMING_CONNECTIONS;
@@ -109,7 +112,8 @@ mod serve {
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
         let listener = tokio::net::TcpListener::bind(address)
             .await
-            .map_err(|e| format!("listen on {address}: {e}"))?;
+            .map_err(|e| format!("listen on {address}: {e}"))?
+            .tap_io(no_delay);
         tracing::info!(%address, node = %config.node_id, "orchestrator listening");
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(
@@ -126,7 +130,8 @@ mod serve {
         let hyperloop_address = SocketAddr::from(([0, 0, 0, 0], config.hyperloop_port));
         let hyperloop_listener = tokio::net::TcpListener::bind(hyperloop_address)
             .await
-            .map_err(|e| format!("listen on {hyperloop_address}: {e}"))?;
+            .map_err(|e| format!("listen on {hyperloop_address}: {e}"))?
+            .tap_io(no_delay);
         tokio::spawn(
             axum::serve(
                 hyperloop_listener,
@@ -190,6 +195,12 @@ mod serve {
             tokio::join!(events.stop(), host_stats.stop());
         }
         served
+    }
+
+    fn no_delay(tcp: &mut TcpStream) {
+        if let Err(e) = tcp.set_nodelay(true) {
+            tracing::warn!(error = %e, "failed to set TCP_NODELAY on an incoming connection");
+        }
     }
 
     struct Signals {
