@@ -33,3 +33,7 @@ The Microvm Metadata Service answers inside the guest at `169.254.169.254`. The 
 ## Console
 
 Firecracker's serial console goes to the orchestrator's log. The last 2000 bytes are kept and attached to errors, so a failed boot or resume says what the guest printed last.
+
+## Metrics
+
+Each VM writes its metrics to a FIFO (a named pipe) in the sandbox work directory, like upstream. The node asks Firecracker to flush them every 5 seconds and reads one JSON line per flush. Network and block device counters go to OpenTelemetry. The balloon counters are added up per sandbox, so a free-page hinting run can record how many bytes it freed (`orchestrator.sandbox.fph.freed_bytes`).

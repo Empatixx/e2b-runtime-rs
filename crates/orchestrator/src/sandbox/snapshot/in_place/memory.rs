@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use parking_lot::Mutex;
 use uuid::Uuid;
 
 use super::deferred_memory::{Begin, Deferred, End, MemfdSource, Pending, Setup, setup};
@@ -14,6 +13,7 @@ use crate::block::build_file::{Ready, ready_now};
 use crate::memory::dedup::config::DedupConfig;
 use crate::memory::snapshot::diff_metadata;
 use crate::sandbox::Sandbox;
+use crate::sandbox::seal::SealSlot;
 use crate::sandbox::snapshot::{DiskExport, Exported, LocalSnapshot, MemoryPages, Snapshot, SnapshotFiles, exported};
 use crate::storage::build::Build;
 use crate::telemetry::server::in_place::ProcessMemoryOutcome;
@@ -22,7 +22,7 @@ use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_dif
 #[derive(Default)]
 pub struct MemoryExport {
     pub baseline: ExportBaseline,
-    seal: Mutex<Option<Ready>>,
+    pub seal: SealSlot,
     fpr_generation: Arc<AtomicU64>,
 }
 
@@ -95,11 +95,7 @@ impl Sandbox {
     }
 
     pub async fn wait_for_memory_seal(&self) -> Result<(), String> {
-        let seal = self.memory_export.seal.lock().clone();
-        match seal {
-            Some(seal) => seal.await,
-            None => Ok(()),
-        }
+        self.memory_export.seal.wait().await
     }
 
     async fn hold_reporting(&self, defer_export: bool) -> ReportingHold {
@@ -197,7 +193,7 @@ impl Sandbox {
                 pending,
                 occupancy,
             })) => {
-                *self.memory_export.seal.lock() = Some(occupancy);
+                self.memory_export.seal.set(occupancy);
                 let diff =
                     diff_metadata(&pages.regions, &pages.dirty, &pages.empty).map_err(|e| failed(e.to_string()))?;
                 record_snapshot_diff(&request.team_id, "memfile", &diff, &parent);

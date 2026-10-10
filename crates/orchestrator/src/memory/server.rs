@@ -154,6 +154,11 @@ impl MemoryServer {
         self.state.stats()
     }
 
+    pub fn serve_reader(&self) -> impl Fn() -> ServeStats + Send + Sync + 'static {
+        let state = self.state.clone();
+        move || state.stats()
+    }
+
     pub fn wp_faults_resolved(&self) -> i64 {
         self.state.stats().wp_faults
     }

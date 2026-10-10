@@ -126,10 +126,27 @@ impl FirecrackerMetrics {
     }
 
     pub fn balloon(&self) -> BalloonTotals {
+        self.reader().balloon()
+    }
+
+    pub fn reader(&self) -> BalloonReader {
+        BalloonReader {
+            observed: self.observed.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct BalloonReader {
+    observed: Arc<Observed>,
+}
+
+impl BalloonReader {
+    pub fn balloon(&self) -> BalloonTotals {
         *self.observed.balloon.lock()
     }
 
-    pub async fn flush_and_read_balloon(&self, client: &FirecrackerClient) -> Result<BalloonTotals, String> {
+    pub async fn flush_and_read(&self, client: &FirecrackerClient) -> Result<BalloonTotals, String> {
         let since = now_ms();
         client.flush_metrics().await?;
         let deadline = tokio::time::Instant::now() + FRESH_LINE_TIMEOUT;

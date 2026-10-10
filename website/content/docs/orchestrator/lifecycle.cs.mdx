@@ -63,6 +63,8 @@ Pause vytvoří **nový build**. Uloží se jen stránky paměti zapsané od pro
 
 Před pozastavením VM node připraví hosta stejně jako Go. Každý krok má vlastní feature flag a ve výchozím stavu je vypnutý. `freeze-user-cgroup` zmrazí cgroupy úlohy přes `/freeze` v envd. `collapse-envd-heap` zabalí heap envd do huge pages. `guest-pause-reclaim` pustí `fstrim`, `sync`, `drop_caches` a `compact_memory`, každý s časovým limitem. `free-page-hinting-config` vyprázdní hinting volných stránek, takže snapshot neobsahuje stránky, které host už uvolnil. Checkpoint, po kterém sandbox běží dál, ho potom zase rozmrazí.
 
+Zatímco sandbox běží, blok `periodic` ve `free-page-hinting-config` spouští hinting podle časovače, stejně jako Go. Interval má spodní hranici 1 sekundu a první běh počká navíc náhodnou dobu až do poloviny intervalu. Běh se přeskočí během checkpointu na místě, dokud ještě běží zápis paměti nebo rootfs na pozadí, a 10 sekund po startu nebo po checkpointu. Host, který 3 běhy po sobě neodpoví, se zkouší znovu jen každých 5 minut. Limit na nodu (`host_slots`, výchozí 16) omezuje počet běhů najednou. Smyčka se před každou pauzou a checkpointem zastaví a počká, až se její běh zastaví, takže žádný cyklus hintingu neskončí ve snapshotu.
+
 Se zapnutým `defer-rootfs-export` pause jen zaznamená, které bloky overlaye se změnily, a sestaví hlavičku. Bloky se do rozdílu rootfs zapíšou na pozadí, takže odpověď na tu kopii nečeká. Upload a probuzení na stejném nodu počkají, až je rozdíl hotový. Metrika `orchestrator.sandbox.snapshot.rootfs_seal.duration` měří, jak dlouho zápis na pozadí trvá.
 
 ## Checkpoint

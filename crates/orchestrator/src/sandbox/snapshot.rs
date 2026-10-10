@@ -246,13 +246,10 @@ impl Sandbox {
     }
 
     pub async fn wait_for_rootfs_seal(&self) -> Result<(), String> {
-        let seal = self.rootfs_seal.lock().clone();
-        match seal {
-            Some(seal) => seal
-                .await
-                .map_err(|e| format!("previous rootfs seal did not complete: {e}")),
-            None => Ok(()),
-        }
+        self.rootfs_seal
+            .wait()
+            .await
+            .map_err(|e| format!("previous rootfs seal did not complete: {e}"))
     }
 
     pub async fn export_disk_in_place(&self, path: &Path, build_id: Uuid, defer: bool) -> Result<DiskExport, String> {
@@ -285,7 +282,7 @@ impl Sandbox {
             team_id: self.config.team_id.clone(),
         };
         let (sealed, folded) = seal.start();
-        *self.rootfs_seal.lock() = Some(folded);
+        self.rootfs_seal.set(folded);
         Ok(DiskExport {
             exported,
             sealed,

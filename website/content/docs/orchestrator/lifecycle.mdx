@@ -63,6 +63,8 @@ The pause produces a **new build**. Only the memory pages written since resume a
 
 Before the VM pauses, the node prepares the guest like upstream. Each step has its own feature flag and is off by default. `freeze-user-cgroup` freezes the workload's cgroups through envd's `/freeze`. `collapse-envd-heap` packs envd's heap into huge pages. `guest-pause-reclaim` runs `fstrim`, `sync`, `drop_caches` and `compact_memory` with a time cap per step. `free-page-hinting-config` drains free-page hinting, so the snapshot does not keep pages the guest already freed. A checkpoint that keeps the sandbox running unfreezes it afterwards.
 
+While a sandbox runs, the `periodic` block of `free-page-hinting-config` starts a hinting run on a timer, like upstream. The interval has a floor of 1 second, and the first run waits a random extra of up to half an interval. A run is skipped during an in-place checkpoint, while a memory or rootfs seal is still running, and for 10 seconds after the start or a checkpoint. A guest that does not answer 3 runs in a row is tried again only every 5 minutes. A host limit (`host_slots`, 16 by default) caps the runs in flight on one node. The loop stops before every pause and checkpoint and waits for its run to stop, so no hinting cycle ends up in a snapshot.
+
 With `defer-rootfs-export` on, a pause only records which overlay blocks changed and builds the header. The blocks are written to the rootfs diff in the background, so the reply does not wait for that copy. The upload and a resume on the same node wait until the diff is complete. The `orchestrator.sandbox.snapshot.rootfs_seal.duration` metric records how long that background write takes.
 
 ## Checkpoint

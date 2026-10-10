@@ -55,6 +55,26 @@ static STOP_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static LATCHES: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("orchestrator.sandbox.fph.latch")
+        .with_description(
+            "Guests the periodic hinter latched as unable to hint after consecutive sat-out runs, released by a completed run, or dropped with the loop that held the latch (state: latched, released, dropped)",
+        )
+        .with_unit("{transition}")
+        .build()
+});
+
+static RUN_FAULTS: LazyLock<Histogram<u64>> = LazyLock::new(|| {
+    METER
+        .u64_histogram("orchestrator.sandbox.fph.run.faults")
+        .with_description(
+            "Demand faults the serve loop resolved for one sandbox across a periodic hinting attempt (window=run) and over the interval that followed a tick (window=interval), labeled by kind (served pages, deferred installs, wp faults, deferred wp resolves) and outcome: the attempt's run outcome, or for a tick that attempted nothing the skip reason or observe-only, which is the baseline an attempt is read against",
+        )
+        .with_unit("{fault}")
+        .build()
+});
+
 pub fn record_hint_run(phase: &'static str, outcome: &'static str, took: Duration) {
     RUNS.add(1, &[KeyValue::new("phase", phase), KeyValue::new("outcome", outcome)]);
     if outcome == "ok" {
@@ -73,4 +93,19 @@ pub fn record_hint_stop(outcome: &'static str, took: Duration) {
     if matches!(outcome, "ok" | "unacked") {
         STOP_DURATION.record(took.as_millis() as u64, &[]);
     }
+}
+
+pub fn record_hint_latch(state: &'static str) {
+    LATCHES.add(1, &[KeyValue::new("state", state)]);
+}
+
+pub fn record_hint_faults(window: &'static str, outcome: &'static str, kind: &'static str, count: i64) {
+    RUN_FAULTS.record(
+        count.max(0) as u64,
+        &[
+            KeyValue::new("kind", kind),
+            KeyValue::new("window", window),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
 }

@@ -33,3 +33,7 @@ Microvm Metadata Service odpovídá uvnitř hosta na `169.254.169.254`. Orchestr
 ## Konzole
 
 Sériová konzole Firecrackeru jde do logu orchestratoru. Posledních 2000 bajtů se drží a přikládá k chybám, takže neúspěšný boot nebo resume ukáže, co host naposledy vypsal.
+
+## Metriky
+
+Každé VM zapisuje metriky do FIFO (pojmenované roury) v pracovním adresáři sandboxu, stejně jako Go. Node každých 5 sekund požádá Firecracker o flush a přečte jeden řádek JSON na každý flush. Čítače sítě a blokových zařízení jdou do OpenTelemetry. Čítače balloonu se sčítají pro každý sandbox, takže běh hintingu volných stránek může zaznamenat, kolik bajtů uvolnil (`orchestrator.sandbox.fph.freed_bytes`).

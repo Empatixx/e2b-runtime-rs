@@ -1,6 +1,10 @@
+mod hinting;
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use self::hinting::HintLoop;
 use std::time::{Duration, SystemTime};
 
 use futures::FutureExt;
@@ -27,6 +31,7 @@ use crate::network::pool::Release;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
 use crate::sandbox::hinting::USE_CASE_PAUSE;
+use crate::sandbox::hinting::periodic::CheckpointMarks;
 use crate::sandbox::snapshot::in_place::QuiesceFlags;
 use crate::sandbox::snapshot::in_place::memory::{MemoryCheckpoint, MemoryCheckpointRequest};
 use crate::sandbox::snapshot::in_place::{FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure};
@@ -94,27 +99,24 @@ pub struct SandboxHandle {
     pub commands: mpsc::Sender<Command>,
     pub updates: Arc<tokio::sync::Mutex<()>>,
     cleanup: Arc<AtomicBool>,
-    checkpointing: Arc<AtomicBool>,
+    checkpoints: Arc<CheckpointMarks>,
 }
 
 pub struct InPlaceCheckpointGuard {
-    checkpointing: Arc<AtomicBool>,
+    checkpoints: Arc<CheckpointMarks>,
 }
 
 impl Drop for InPlaceCheckpointGuard {
     fn drop(&mut self) {
-        self.checkpointing.store(false, Ordering::SeqCst);
+        self.checkpoints.end();
     }
 }
 
 impl SandboxHandle {
     pub fn begin_in_place_checkpoint(&self) -> Option<InPlaceCheckpointGuard> {
-        self.checkpointing
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-            .then(|| InPlaceCheckpointGuard {
-                checkpointing: self.checkpointing.clone(),
-            })
+        self.checkpoints.begin().then(|| InPlaceCheckpointGuard {
+            checkpoints: self.checkpoints.clone(),
+        })
     }
 
     pub fn lifecycle(&self) -> Lifecycle {
@@ -194,6 +196,8 @@ struct Running {
     host_stats: Option<HostStatsCollector>,
     _oom: Option<OomMonitor>,
     throwaway: bool,
+    hint_loop: Option<HintLoop>,
+    checkpoints: Arc<CheckpointMarks>,
     _work: Work,
     _execution: Span,
 }
@@ -206,7 +210,7 @@ pub fn detached_handle(info: SandboxInfo) -> (SandboxHandle, mpsc::Receiver<Comm
         commands,
         updates: Arc::default(),
         cleanup: Arc::default(),
-        checkpointing: Arc::default(),
+        checkpoints: Arc::default(),
     };
     (handle, receiver)
 }
@@ -218,7 +222,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         commands,
         updates: Arc::default(),
         cleanup: Arc::default(),
-        checkpointing: Arc::default(),
+        checkpoints: Arc::default(),
     };
     let host_stats = node
         .host_stats
@@ -246,7 +250,12 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
             .map_or("none", TemplateMetadata::prefetch_init_origin);
         spans::execution(&info.config, sandbox.prefetch_summary().as_ref(), init_origin)
     };
+    let hint_loop = (!throwaway)
+        .then(|| HintLoop::start(&sandbox, &node, &handle.info.lock(), handle.checkpoints.clone()))
+        .flatten();
     let running = Running {
+        hint_loop,
+        checkpoints: handle.checkpoints.clone(),
         _execution: execution,
         host_stats,
         _oom: oom,
@@ -286,6 +295,10 @@ impl Running {
 
     async fn tear_down(mut self, ending: Ending, lifecycle: Lifecycle) {
         let id = self.sandbox.id().to_owned();
+        if matches!(ending, Ending::Stop { .. } | Ending::Crashed { .. }) {
+            self.sandbox.hinting().stopping.store(true, Ordering::SeqCst);
+        }
+        self.stop_hinting().await;
         self.cleanup.store(true, Ordering::SeqCst);
         self.node.mark_stopping(&lifecycle).await;
         match ending {
@@ -439,11 +452,13 @@ impl Running {
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
                     Some(Command::CheckpointInPlace { request, reply }) => {
                         let parent = self.info.lock().clone();
+                        self.stop_hinting().await;
                         self.reclaim(&parent, true).await;
                         let checkpointed = self.sandbox.checkpoint_filesystem_in_place(&request).await;
                         let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
                         if !lost {
                             self.sandbox.guest_reclaim().unfreeze().await;
+                            self.restart_hinting();
                         }
                         drop(reply.send(checkpointed));
                         if lost {
@@ -453,11 +468,13 @@ impl Running {
                     Some(Command::ResolveBalloonMode { reply }) => drop(reply.send(self.sandbox.resolve_balloon_mode().await)),
                     Some(Command::CheckpointMemoryInPlace { request, reply }) => {
                         let parent = self.info.lock().clone();
+                        self.stop_hinting().await;
                         self.reclaim(&parent, false).await;
                         let checkpointed = self.sandbox.checkpoint_memory_in_place(&request).await;
                         let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
                         if !lost {
                             self.sandbox.guest_reclaim().unfreeze().await;
+                            self.restart_hinting();
                         }
                         drop(reply.send(checkpointed));
                         if lost {
@@ -472,6 +489,16 @@ impl Running {
                 death = self.sandbox.died() => return Ending::Crashed { death },
             }
         }
+    }
+
+    async fn stop_hinting(&mut self) {
+        if let Some(hint_loop) = self.hint_loop.take() {
+            hint_loop.stop().await;
+        }
+    }
+
+    fn restart_hinting(&mut self) {
+        self.hint_loop = HintLoop::start(&self.sandbox, &self.node, &self.info.lock(), self.checkpoints.clone());
     }
 
     fn ran_for(&self) -> Duration {

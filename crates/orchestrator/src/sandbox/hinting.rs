@@ -1,4 +1,7 @@
+pub mod periodic;
+
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
@@ -8,8 +11,11 @@ use tokio::time::Instant;
 use crate::firecracker::client::{
     BalloonCaps, FirecrackerClient, HintingCallError, HintingStart, HintingStatus, HintingStop,
 };
-use crate::firecracker::metrics::FirecrackerMetrics;
-use crate::telemetry::hinting::{record_hint_freed, record_hint_run, record_hint_stop};
+use crate::firecracker::metrics::BalloonReader;
+use crate::memory::server::ServeStats;
+use crate::telemetry::hinting::{
+    record_hint_faults, record_hint_freed, record_hint_latch, record_hint_run, record_hint_stop,
+};
 
 const HINT_STOP: i64 = 0;
 const HINT_DONE: i64 = 1;
@@ -31,16 +37,14 @@ pub trait HintingApi: Sync {
     fn start(&self) -> impl Future<Output = Result<HintingStart, HintingCallError>> + Send;
     fn stop(&self) -> impl Future<Output = Result<HintingStop, HintingCallError>> + Send;
     fn status(&self) -> impl Future<Output = Result<HintingStatus, HintingCallError>> + Send;
-    fn hint_freed(&self) -> u64;
-    fn flush_hint_freed(&self) -> impl Future<Output = Result<u64, String>> + Send;
 }
 
-pub struct VmHinting<'a> {
+pub struct VmHinting {
     pub client: FirecrackerClient,
-    pub metrics: Option<&'a FirecrackerMetrics>,
+    pub balloon: Option<BalloonReader>,
 }
 
-impl HintingApi for VmHinting<'_> {
+impl HintingApi for VmHinting {
     async fn caps(&self) -> Result<BalloonCaps, String> {
         self.client.balloon_caps().await
     }
@@ -56,19 +60,134 @@ impl HintingApi for VmHinting<'_> {
     async fn status(&self) -> Result<HintingStatus, HintingCallError> {
         self.client.balloon_hinting_status().await
     }
+}
+
+pub trait HintRunner: Sync {
+    fn caps(&self) -> impl Future<Output = Result<BalloonCaps, String>> + Send;
+    fn drain(&self, deadline: Instant) -> impl Future<Output = Result<(), DrainFailure>> + Send;
+    fn stop(&self, grace: Duration, deadline: Instant) -> impl Future<Output = Result<(), StopFailure>> + Send;
+    fn exited(&self) -> bool;
+    fn hint_freed(&self) -> u64;
+    fn flush_hint_freed(&self) -> impl Future<Output = Result<u64, String>> + Send;
+}
+
+pub struct VmRunner {
+    pub api: VmHinting,
+    pub hinting: Arc<SandboxHinting>,
+    pub firecracker_supported: bool,
+    pub pid: Option<u32>,
+}
+
+impl HintRunner for VmRunner {
+    async fn caps(&self) -> Result<BalloonCaps, String> {
+        self.api.caps().await
+    }
+
+    async fn drain(&self, deadline: Instant) -> Result<(), DrainFailure> {
+        drain(&self.api, &self.hinting.state, self.firecracker_supported, deadline).await
+    }
+
+    async fn stop(&self, grace: Duration, deadline: Instant) -> Result<(), StopFailure> {
+        stop(
+            &self.api,
+            &self.hinting.state,
+            self.firecracker_supported,
+            grace,
+            deadline,
+        )
+        .await
+    }
+
+    fn exited(&self) -> bool {
+        self.pid
+            .is_none_or(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+    }
 
     fn hint_freed(&self) -> u64 {
-        self.metrics.map_or(0, |metrics| metrics.balloon().hint_freed)
+        self.api
+            .balloon
+            .as_ref()
+            .map_or(0, |balloon| balloon.balloon().hint_freed)
     }
 
     async fn flush_hint_freed(&self) -> Result<u64, String> {
-        match self.metrics {
-            Some(metrics) => metrics
-                .flush_and_read_balloon(&self.client)
+        match &self.api.balloon {
+            Some(balloon) => balloon
+                .flush_and_read(&self.api.client)
                 .await
-                .map(|balloon| balloon.hint_freed),
+                .map(|totals| totals.hint_freed),
             None => Err("firecracker metrics are not being read".to_owned()),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SandboxHinting {
+    pub state: HintingState,
+    pub runs: tokio::sync::Mutex<()>,
+    pub stopping: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FaultDelta {
+    pub served: i64,
+    pub deferred: i64,
+    pub wp: i64,
+    pub wp_deferred: i64,
+}
+
+impl FaultDelta {
+    pub fn between(before: &ServeStats, after: &ServeStats) -> Self {
+        Self {
+            served: after.pages - before.pages,
+            deferred: after.deferred - before.deferred,
+            wp: after.wp_faults - before.wp_faults,
+            wp_deferred: after.wp_deferred - before.wp_deferred,
+        }
+    }
+
+    pub fn kinds(&self) -> [(&'static str, i64); 4] {
+        [
+            ("served", self.served),
+            ("deferred", self.deferred),
+            ("wp", self.wp),
+            ("wp_deferred", self.wp_deferred),
+        ]
+    }
+}
+
+pub trait HintRecord: Send + Sync {
+    fn run(&self, phase: &'static str, outcome: &'static str, took: Duration);
+    fn stop(&self, outcome: &'static str, took: Duration);
+    fn freed(&self, phase: &'static str, bytes: u64);
+    fn latch(&self, state: &'static str);
+    fn faults(&self, window: &'static str, outcome: &'static str, faults: FaultDelta);
+}
+
+pub struct HintTelemetry;
+
+impl HintRecord for HintTelemetry {
+    fn run(&self, phase: &'static str, outcome: &'static str, took: Duration) {
+        record_hint_run(phase, outcome, took);
+    }
+
+    fn stop(&self, outcome: &'static str, took: Duration) {
+        record_hint_stop(outcome, took);
+    }
+
+    fn freed(&self, phase: &'static str, bytes: u64) {
+        record_hint_freed(phase, bytes);
+    }
+
+    fn latch(&self, state: &'static str) {
+        record_hint_latch(state);
+    }
+
+    fn faults(&self, window: &'static str, outcome: &'static str, faults: FaultDelta) {
+        faults
+            .kinds()
+            .into_iter()
+            .for_each(|(kind, count)| record_hint_faults(window, outcome, kind, count));
     }
 }
 
@@ -85,20 +204,27 @@ pub struct PrePauseHint {
     pub firecracker_supported: bool,
 }
 
+fn flag_millis(config: &Value, key: &str, default: Duration) -> Duration {
+    config
+        .get(key)
+        .and_then(Value::as_f64)
+        .map_or(default, |value| Duration::from_millis(value.max(0.0) as u64))
+}
+
+impl HintStop {
+    pub fn from_flag(config: &Value) -> Self {
+        Self {
+            timeout: flag_millis(config, "stop", DEFAULT_STOP_TIMEOUT),
+            grace: flag_millis(config, "stop_grace", DEFAULT_STOP_GRACE),
+        }
+    }
+}
+
 impl PrePauseHint {
     pub fn from_flag(config: &Value, use_case: &str, firecracker_supported: bool) -> Self {
-        let millis = |key: &str, default: Duration| {
-            config
-                .get(key)
-                .and_then(Value::as_f64)
-                .map_or(default, |value| Duration::from_millis(value.max(0.0) as u64))
-        };
         Self {
-            timeout: millis(use_case, Duration::ZERO),
-            stop: HintStop {
-                timeout: millis("stop", DEFAULT_STOP_TIMEOUT),
-                grace: millis("stop_grace", DEFAULT_STOP_GRACE),
-            },
+            timeout: flag_millis(config, use_case, Duration::ZERO),
+            stop: HintStop::from_flag(config),
             firecracker_supported,
         }
     }
@@ -114,7 +240,7 @@ pub struct HintingState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrainFailure {
     NotConfigured,
-    StartRefused(String),
+    StartRefused { message: String, config_unknown: bool },
     InFlight { outcome: &'static str, message: String },
     Failed(String),
 }
@@ -172,13 +298,20 @@ async fn start(api: &impl HintingApi, deadline: Instant) -> Result<(), DrainFail
 async fn refusal(api: &impl HintingApi, refused: String) -> DrainFailure {
     match tokio::time::timeout(CONFIG_READ_TIMEOUT, api.caps()).await {
         Ok(Ok(caps)) if !caps.hinting => DrainFailure::NotConfigured,
-        Ok(Ok(_)) => DrainFailure::StartRefused(format!("balloon hinting start refused: {refused}")),
-        Ok(Err(e)) => DrainFailure::StartRefused(format!(
-            "balloon hinting start refused: balloon config unreadable: {refused}\n{e}"
-        )),
-        Err(_) => DrainFailure::StartRefused(format!(
-            "balloon hinting start refused: balloon config unreadable: {refused}\ncontext deadline exceeded"
-        )),
+        Ok(Ok(_)) => DrainFailure::StartRefused {
+            message: format!("balloon hinting start refused: {refused}"),
+            config_unknown: false,
+        },
+        Ok(Err(e)) => DrainFailure::StartRefused {
+            message: format!("balloon hinting start refused: balloon config unreadable: {refused}\n{e}"),
+            config_unknown: true,
+        },
+        Err(_) => DrainFailure::StartRefused {
+            message: format!(
+                "balloon hinting start refused: balloon config unreadable: {refused}\ncontext deadline exceeded"
+            ),
+            config_unknown: true,
+        },
     }
 }
 
@@ -291,63 +424,39 @@ async fn poll(
     }
 }
 
-pub struct PrePauseDrain<'a, A: HintingApi> {
-    pub api: &'a A,
-    pub state: &'a HintingState,
-    pub hint: PrePauseHint,
+pub struct Cycle<'a, R: HintRunner> {
+    pub runner: &'a R,
+    pub record: &'a dyn HintRecord,
+    pub stopping: &'a AtomicBool,
     pub sandbox_id: &'a str,
-    pub exited: &'a (dyn Fn() -> bool + Sync),
 }
 
-impl<A: HintingApi> PrePauseDrain<'_, A> {
-    pub async fn run(&self) {
-        let started = Instant::now();
-        let freed_before = self.api.hint_freed();
-        let drained = drain(
-            self.api,
-            self.state,
-            self.hint.firecracker_supported,
-            started + self.hint.timeout,
-        )
-        .await;
-        let took = started.elapsed();
-        match drained {
-            Ok(()) => {
-                record_hint_run(PHASE_PRE_PAUSE, "ok", took);
-                let freed_after = self.freed_after().await;
-                record_hint_freed(PHASE_PRE_PAUSE, freed_after.saturating_sub(freed_before));
-            }
-            Err(DrainFailure::NotConfigured) => record_hint_run(PHASE_PRE_PAUSE, "not-configured", Duration::ZERO),
-            Err(DrainFailure::InFlight { outcome, message }) => {
-                self.stop_abandoned().await;
-                record_hint_run(PHASE_PRE_PAUSE, outcome, took);
-                tracing::error!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting drain did not finish before pause; cycle stopped");
-            }
-            Err(DrainFailure::StartRefused(message)) => {
-                record_hint_run(PHASE_PRE_PAUSE, "refused", took);
-                tracing::warn!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting drain refused by FC (continuing pause)");
-            }
-            Err(DrainFailure::Failed(message)) => {
-                record_hint_run(PHASE_PRE_PAUSE, "failed", took);
-                tracing::error!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting drain failed (continuing pause)");
-            }
+impl<R: HintRunner> Cycle<'_, R> {
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    pub async fn record_freed(&self, phase: &'static str, before: u64) {
+        let after = self.freed_after().await;
+        if after > before {
+            self.record.freed(phase, after - before);
         }
     }
 
     async fn freed_after(&self) -> u64 {
-        match tokio::time::timeout(FREED_READ_TIMEOUT, self.api.flush_hint_freed()).await {
+        match tokio::time::timeout(FREED_READ_TIMEOUT, self.runner.flush_hint_freed()).await {
             Ok(Ok(freed)) => freed,
-            _ => self.api.hint_freed(),
+            _ => self.runner.hint_freed(),
         }
     }
 
-    async fn stop_abandoned(&self) {
-        if (self.exited)() {
-            record_hint_stop("skipped-exited", Duration::ZERO);
+    pub async fn stop_abandoned(&self, stop: HintStop) {
+        if let Some(skipped) = self.stop_skipped() {
+            self.record.stop(skipped, Duration::ZERO);
             return;
         }
-        if self.hint.stop.timeout.is_zero() {
-            record_hint_stop("skipped-disabled", Duration::ZERO);
+        if stop.timeout.is_zero() {
+            self.record.stop("skipped-disabled", Duration::ZERO);
             tracing::warn!(
                 sandbox.id = self.sandbox_id,
                 "balloon hinting: cycle left running, stop disabled by flag"
@@ -355,35 +464,36 @@ impl<A: HintingApi> PrePauseDrain<'_, A> {
             return;
         }
         let started = Instant::now();
-        let stopped = stop(
-            self.api,
-            self.state,
-            self.hint.firecracker_supported,
-            self.hint.stop.grace,
-            started + self.hint.stop.timeout,
-        )
-        .await;
+        let stopped = self.runner.stop(stop.grace, started + stop.timeout).await;
         let took = started.elapsed();
         if stopped.is_err() {
             self.wait_for_exit().await;
         }
-        match stopped {
-            Ok(()) => record_hint_stop("ok", took),
-            Err(_) if (self.exited)() => record_hint_stop("skipped-exited", took),
-            Err(StopFailure::Unacked(message)) => {
-                record_hint_stop("unacked", took);
+        match (stopped, self.stop_skipped()) {
+            (Ok(()), _) => self.record.stop("ok", took),
+            (Err(_), Some(skipped)) => self.record.stop(skipped, took),
+            (Err(StopFailure::Unacked(message)), None) => {
+                self.record.stop("unacked", took);
                 tracing::warn!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting: guest did not acknowledge the stop in time");
             }
-            Err(StopFailure::Failed(message)) => {
-                record_hint_stop("failed", took);
+            (Err(StopFailure::Failed(message)), None) => {
+                self.record.stop("failed", took);
                 tracing::error!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting: stopping an abandoned cycle failed");
             }
         }
     }
 
+    fn stop_skipped(&self) -> Option<&'static str> {
+        match (self.stopping(), self.runner.exited()) {
+            (true, _) => Some("skipped-stopping"),
+            (false, true) => Some("skipped-exited"),
+            (false, false) => None,
+        }
+    }
+
     async fn wait_for_exit(&self) {
         for _ in 0..EXIT_CHECKS {
-            if (self.exited)() {
+            if self.runner.exited() {
                 return;
             }
             tokio::time::sleep(EXIT_CHECK_INTERVAL).await;
@@ -391,23 +501,92 @@ impl<A: HintingApi> PrePauseDrain<'_, A> {
     }
 }
 
+pub struct PrePauseDrain<'a, R: HintRunner> {
+    pub cycle: Cycle<'a, R>,
+    pub hint: PrePauseHint,
+}
+
+impl<R: HintRunner> PrePauseDrain<'_, R> {
+    pub async fn run(&self) {
+        let cycle = &self.cycle;
+        let started = Instant::now();
+        let freed_before = cycle.runner.hint_freed();
+        let drained = cycle.runner.drain(started + self.hint.timeout).await;
+        let took = started.elapsed();
+        match drained {
+            Ok(()) => {
+                cycle.record.run(PHASE_PRE_PAUSE, "ok", took);
+                cycle.record_freed(PHASE_PRE_PAUSE, freed_before).await;
+            }
+            Err(DrainFailure::NotConfigured) => cycle.record.run(PHASE_PRE_PAUSE, "not-configured", Duration::ZERO),
+            Err(DrainFailure::InFlight { outcome, message }) => {
+                cycle.stop_abandoned(self.hint.stop).await;
+                cycle.record.run(PHASE_PRE_PAUSE, outcome, took);
+                tracing::error!(sandbox.id = cycle.sandbox_id, error = %message, "balloon hinting drain did not finish before pause; cycle stopped");
+            }
+            Err(DrainFailure::StartRefused { message, .. }) => {
+                cycle.record.run(PHASE_PRE_PAUSE, "refused", took);
+                tracing::warn!(sandbox.id = cycle.sandbox_id, error = %message, "balloon hinting drain refused by FC (continuing pause)");
+            }
+            Err(DrainFailure::Failed(message)) => {
+                cycle.record.run(PHASE_PRE_PAUSE, "failed", took);
+                tracing::error!(sandbox.id = cycle.sandbox_id, error = %message, "balloon hinting drain failed (continuing pause)");
+            }
+        }
+    }
+}
+
 impl super::Sandbox {
+    pub fn hint_runner(&self, firecracker_supported: bool) -> Option<VmRunner> {
+        self.resources.vm.as_ref().map(|vm| VmRunner {
+            api: VmHinting {
+                client: vm.client(),
+                balloon: vm.metrics().map(|metrics| metrics.reader()),
+            },
+            hinting: self.hinting.clone(),
+            firecracker_supported,
+            pid: vm.pid(),
+        })
+    }
+
+    pub fn hint_signals(
+        &self,
+        started_at: Instant,
+        checkpoints: Arc<periodic::CheckpointMarks>,
+    ) -> periodic::SandboxSignals {
+        let serve: periodic::ServeSource = match self.resources.memory.as_ref() {
+            Some(memory) => Arc::new(memory.serve_reader()),
+            None => Arc::new(ServeStats::default),
+        };
+        periodic::SandboxSignals {
+            started_at,
+            checkpoints,
+            memory_seal: self.memory_export.seal.clone(),
+            rootfs_seal: self.rootfs_seal.clone(),
+            serve,
+        }
+    }
+
+    pub fn hinting(&self) -> &Arc<SandboxHinting> {
+        &self.hinting
+    }
+
     pub async fn pre_pause_hint_drain(&self, hint: PrePauseHint) {
-        let Some(vm) = self.resources.vm.as_ref().filter(|_| !hint.timeout.is_zero()) else {
+        let Some(runner) = self
+            .hint_runner(hint.firecracker_supported)
+            .filter(|_| !hint.timeout.is_zero())
+        else {
             return;
         };
-        let api = VmHinting {
-            client: vm.client(),
-            metrics: vm.metrics(),
-        };
-        let pid = vm.pid();
-        let exited = move || pid.is_none_or(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _run = self.hinting.runs.lock().await;
         PrePauseDrain {
-            api: &api,
-            state: &self.hinting,
+            cycle: Cycle {
+                runner: &runner,
+                record: &HintTelemetry,
+                stopping: &self.hinting.stopping,
+                sandbox_id: &self.config.id,
+            },
             hint,
-            sandbox_id: &self.config.id,
-            exited: &exited,
         }
         .run()
         .await;
@@ -465,14 +644,6 @@ mod tests {
             self.stop.clone()
         }
 
-        fn hint_freed(&self) -> u64 {
-            0
-        }
-
-        async fn flush_hint_freed(&self) -> Result<u64, String> {
-            Ok(0)
-        }
-
         async fn status(&self) -> Result<HintingStatus, HintingCallError> {
             let next = self.statuses.lock().pop_front();
             let status = next.unwrap_or(*self.last.lock());
@@ -514,7 +685,16 @@ mod tests {
 
         let failure = drain(&refused, &HintingState::default(), true, soon()).await;
 
-        assert!(matches!(failure, Err(DrainFailure::StartRefused(_))), "{failure:?}");
+        assert!(
+            matches!(
+                failure,
+                Err(DrainFailure::StartRefused {
+                    config_unknown: false,
+                    ..
+                })
+            ),
+            "{failure:?}"
+        );
     }
 
     #[tokio::test]
