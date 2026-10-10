@@ -15,8 +15,8 @@ pub use flags::{
     FREE_PAGE_REPORTING, MAX_SANDBOXES_PER_NODE, MAX_STARTING_INSTANCES_PER_NODE, MEMORY_PREFETCH_COALESCE_MAX_MB,
     MEMORY_PREFETCH_MAX_COPY_WORKERS, MEMORY_PREFETCH_MAX_FETCH_WORKERS, PAUSE_RESUME_PREFETCH_CONSUME,
     PAUSE_RESUME_PREFETCH_HARVEST, PAUSE_RESUME_PREFETCH_HARVEST_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
-    PEER_TO_PEER_CHUNK_TRANSFER, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, USE_MEMFD, build_envd_version,
-    build_firecracker_version, build_io_engine, build_kernel_cmdline_args, build_kernel_version,
+    PEER_TO_PEER_CHUNK_TRANSFER, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, SANDBOX_MAX_INCOMING_CONNECTIONS, USE_MEMFD,
+    build_envd_version, build_firecracker_version, build_io_engine, build_kernel_cmdline_args, build_kernel_version,
     envd_binary_cache, envd_offline_upgrade_target, envd_timeout_milliseconds, envd_upgrade_target,
     pause_admission_disk_headroom_mib, resume_prefetch_source,
 };

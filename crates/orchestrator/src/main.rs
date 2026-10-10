@@ -16,7 +16,7 @@ mod serve {
 
     use orchestrator::clickhouse::sinks::Clickhouse;
     use orchestrator::events::EventSink;
-    use orchestrator::featureflags::flags::SANDBOX_MAX_INCOMING_CONNECTIONS;
+    use orchestrator::featureflags::SANDBOX_MAX_INCOMING_CONNECTIONS;
     use orchestrator::proxy::sandbox::SandboxProxy;
     use orchestrator::routing::redis::Redis;
     use orchestrator::server::app::{App, TemplateManagerSetup};

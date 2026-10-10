@@ -187,6 +187,7 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         services: Services::parse(Some("orchestrator,template-manager")),
         orchestrator_ip: "192.0.2.1".to_owned(),
         hyperloop_port: 0,
+        proxy_port: 0,
         logs_collector: String::new(),
         node_ip: "localhost".to_owned(),
         redis: None,

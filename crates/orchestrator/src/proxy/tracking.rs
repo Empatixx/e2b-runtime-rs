@@ -35,6 +35,7 @@ impl Connections {
             io,
             aborted: Box::pin(token.cancelled_owned()),
             reset_on_abort,
+            was_aborted: false,
             _membership: Membership {
                 id,
                 connections: self.clone(),
@@ -80,15 +81,17 @@ pub struct Tracked<Io> {
     io: Io,
     aborted: Pin<Box<WaitForCancellationFutureOwned>>,
     reset_on_abort: bool,
+    was_aborted: bool,
     _membership: Membership,
 }
 
 impl<Io: Abortable> Tracked<Io> {
     fn poll_aborted(&mut self, cx: &mut Context<'_>) -> Poll<io::Error> {
         self.aborted.as_mut().poll(cx).map(|()| {
-            if self.reset_on_abort {
+            if self.reset_on_abort && !self.was_aborted {
                 self.io.reset_on_close();
             }
+            self.was_aborted = true;
             io::Error::new(io::ErrorKind::ConnectionAborted, "connection closed by the proxy")
         })
     }
@@ -116,7 +119,10 @@ impl<Io: AsyncWrite + Abortable + Unpin> AsyncWrite for Tracked<Io> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.io).poll_shutdown(cx)
+        match self.was_aborted || self.poll_aborted(cx).is_ready() {
+            true => Poll::Ready(Ok(())),
+            false => Pin::new(&mut self.io).poll_shutdown(cx),
+        }
     }
 }
 

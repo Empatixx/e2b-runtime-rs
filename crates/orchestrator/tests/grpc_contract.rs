@@ -190,6 +190,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         services: Services::parse(Some("orchestrator,template-manager")),
         orchestrator_ip: "192.0.2.1".to_owned(),
         hyperloop_port: 0,
+        proxy_port: 0,
         logs_collector: String::new(),
         node_ip: "localhost".to_owned(),
         redis: None,
