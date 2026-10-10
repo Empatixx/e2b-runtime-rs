@@ -68,18 +68,21 @@ Sloupec je čas od začátku probuzení do chvíle, kdy envd uvnitř sandboxu od
 
 P99 vychází ze 40 až 48 běhů, takže je blízko maxima.
 
-## Podrobně, šablona 1 GiB
+## Chvost, šablona 1 GiB
 
-| Souběžně | | min | p50 | p90 | p99 | max |
-|---|---|---|---|---|---|---|
-| 1 | Rust | 33 | 51 | 58 | 63 | 63 |
-| 1 | Go | 40 | 321 | 336 | 347 | 347 |
-| 4 | Rust | 58 | 121 | 223 | 661 | 661 |
-| 4 | Go | 108 | 430 | 606 | 746 | 746 |
-| 8 | Rust | 58 | 277 | 713 | 878 | 878 |
-| 8 | Go | 338 | 747 | 1362 | 1956 | 1956 |
+<CompareChart
+  title="Probuzení p99, šablona 1 GiB"
+  unit="ms"
+  note="kratší je lepší"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 63, go: 347 },
+    { label: '4 souběžně', rust: 661, go: 746 },
+    { label: '8 souběžně', rust: 878, go: 1956 },
+  ]}
+/>
 
-Všechny časy jsou v milisekundách. Jedno probuzení v Rustu se rozpadá takto: spuštění Firecrackeru a NBD souběžně 13 až 23 ms, načtení snapshotu 6 až 16 ms, spuštění vCPU a MMDS 1 až 8 ms, envd `/init` 6 až 28 ms.
+Jedno probuzení v Rustu se rozpadá takto: spuštění Firecrackeru a NBD souběžně 13 až 23 ms, načtení snapshotu 6 až 16 ms, spuštění vCPU a MMDS 1 až 8 ms, envd `/init` 6 až 28 ms.
 
 ## Co pomohlo
 
@@ -99,7 +102,7 @@ Převedli jsme z Go i **NBD přes generic netlink** a změřili ho. Připojení 
 ## Známé mezery
 
 - Stroj je vnořená VM se 4 vCPU. Na bare metalu čekáme nižší čísla pro obě implementace, ale zatím jsme je neměřili.
-- Při 8 souběžných probuzeních na 4 vCPU se u Rustu prodlužuje chvost. Příčinu jsme zatím nenašli.
+- Při 8 souběžných probuzeních je většina chvostu v Rustu čekání, ne probouzení. Node startuje nejvýš tři sandboxy naráz (`max-starting-instances-per-node`, 3 jako upstream) a ostatní čekají ve frontě. Go `resume-build` volá továrnu přímo a tuhle frontu obchází. Samotné probuzení v Rustu trvá i při 8 souběžných p50 111 ms a p90 194 ms. Zrušení limitu na 4 vCPU nepomůže, protože se pak o procesory přetahuje 8 microVM najednou.
 - Go běží bez své gRPC vrstvy a Rust s ní, takže srovnání mírně nahrává Go.
 - Go při probuzení mapuje celou paměť hosta z huge pages. Se 4 GiB, které rezervuje návod upstreamu, selhalo 8 souběžných sandboxů s 1 GiB v 15 ze 48 běhů Go. Rust neselhal.
 

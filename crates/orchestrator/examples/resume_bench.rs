@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::serve::ListenerExt;
+use orchestrator::featureflags::FeatureFlags;
 use orchestrator::proto::sandbox_service_client::SandboxServiceClient;
 use orchestrator::proto::{SandboxConfig, SandboxCreateRequest, SandboxDeleteRequest};
 use orchestrator::server::app::App;
 use orchestrator::server::config::NodeConfig;
+use orchestrator::server::config::runtime::RuntimeFlags;
 use orchestrator::server::node::Node;
 use tonic::transport::Channel;
 
@@ -41,6 +43,10 @@ async fn main() -> Result<(), String> {
     };
     let work = tempfile::tempdir().map_err(|e| e.to_string())?;
     let config = NodeConfig::from_vars(&node_vars(&storage, work.path()))?;
+    let config = match std::env::var("BENCH_MAX_STARTING") {
+        Ok(limit) => with_starting_limit(config, limit.parse().map_err(|_| "BENCH_MAX_STARTING is not a number")?),
+        Err(_) => config,
+    };
     let node = Arc::new(Node::new(&config)?);
     let app = App::new(node.clone(), None)?;
     app.start_background();
@@ -139,6 +145,16 @@ fn node_vars(storage: &Path, work: &Path) -> HashMap<String, String> {
             ("E2B_CACHE_DIR".to_owned(), path(work.join("cache"))),
         ])
         .collect()
+}
+
+fn with_starting_limit(mut config: NodeConfig, limit: i64) -> NodeConfig {
+    let flags = FeatureFlags::builder()
+        .override_flag("max-starting-instances-per-node", limit)
+        .offline();
+    config.runtime_flags = RuntimeFlags::new(flags.clone(), config.services.clone());
+    config.builder.feature_flags = flags.clone();
+    config.feature_flags = flags;
+    config
 }
 
 async fn wait_until_torn_down(stale_devices: &[String]) {

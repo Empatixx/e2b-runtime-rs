@@ -68,18 +68,21 @@ A bar is the time from the start of the resume until envd inside the sandbox ans
 
 P99 comes from 40 to 48 runs, so it is close to the maximum.
 
-## Details, 1 GiB template
+## Tail latency, 1 GiB template
 
-| Parallel | | min | p50 | p90 | p99 | max |
-|---|---|---|---|---|---|---|
-| 1 | Rust | 33 | 51 | 58 | 63 | 63 |
-| 1 | Go | 40 | 321 | 336 | 347 | 347 |
-| 4 | Rust | 58 | 121 | 223 | 661 | 661 |
-| 4 | Go | 108 | 430 | 606 | 746 | 746 |
-| 8 | Rust | 58 | 277 | 713 | 878 | 878 |
-| 8 | Go | 338 | 747 | 1362 | 1956 | 1956 |
+<CompareChart
+  title="Resume p99, 1 GiB template"
+  unit="ms"
+  note="shorter is better"
+  lowerIsBetter
+  rows={[
+    { label: '1 sandbox', rust: 63, go: 347 },
+    { label: '4 in parallel', rust: 661, go: 746 },
+    { label: '8 in parallel', rust: 878, go: 1956 },
+  ]}
+/>
 
-All times in milliseconds. One Rust resume splits like this: Firecracker spawn and NBD in parallel 13 to 23 ms, snapshot load 6 to 16 ms, vCPU resume and MMDS 1 to 8 ms, envd `/init` 6 to 28 ms.
+One Rust resume splits like this: Firecracker spawn and NBD in parallel 13 to 23 ms, snapshot load 6 to 16 ms, vCPU resume and MMDS 1 to 8 ms, envd `/init` 6 to 28 ms.
 
 ## What made the difference
 
@@ -99,7 +102,7 @@ We ported Go's **NBD over generic netlink** and measured it. A connect right aft
 ## Known gaps
 
 - The node is a nested VM with 4 vCPUs. We expect lower numbers for both on bare metal and have not measured that yet.
-- At 8 parallel resumes on 4 vCPUs, the Rust tail grows. We have not found the cause yet.
+- At 8 parallel resumes, most of the Rust tail is waiting, not resuming. The node starts at most three sandboxes at once (`max-starting-instances-per-node`, 3 as upstream), so the others queue. Go's `resume-build` calls the factory directly and skips that queue. Inside the resume itself, Rust takes p50 111 ms and p90 194 ms at 8 in parallel. Lifting the limit does not help on 4 vCPUs, because 8 microVMs then compete for the CPUs.
 - Go runs without its gRPC layer and Rust with it, so the comparison slightly favours Go.
 - Go maps the whole guest memory from hugepages at resume. With the 4 GiB that upstream's guide reserves, 8 parallel 1 GiB sandboxes failed in 15 of 48 Go runs. Rust did not fail.
 

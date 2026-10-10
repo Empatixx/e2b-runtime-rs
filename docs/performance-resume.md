@@ -65,6 +65,6 @@ Most Go runs spend about 300 ms in `nbdnl.Connect` before the snapshot load star
 ## Known gaps
 
 - The node is a nested KVM guest with 4 vCPUs. Bare metal should be faster for both.
-- With 8 parallel resumes on 4 vCPUs the Rust tail grows (p90 above 450 ms).
+- With 8 parallel resumes most of the Rust tail is the admission queue: the node starts at most `max-starting-instances-per-node` (3, as upstream) sandboxes at once, and Go's `resume-build` skips that queue. The resume itself takes p50 111 ms and p90 194 ms at 8 in parallel. `BENCH_MAX_STARTING` lifts the limit in the benchmark; on 4 vCPUs that does not help, because 8 microVMs then compete for the CPUs.
 - Go is measured without its gRPC layer, Rust with it, so Rust carries a small extra cost.
 - Go's resume maps the whole guest memory from hugepages up front. With 4 GiB of hugepages, 8 parallel 1 GiB sandboxes failed in 15 of 48 Go runs; Rust did not fail.
