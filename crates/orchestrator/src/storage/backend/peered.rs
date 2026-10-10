@@ -15,8 +15,7 @@ use crate::peer::seekable::{PeerSeekable, SeekableError};
 use crate::peer::switch::PeerSwitch;
 use crate::storage::object_path::validate_object_path;
 
-const BLOB_FILES: [&str; 4] = ["snapfile", "metadata.json", "memfile.header", "rootfs.ext4.header"];
-const SEEKABLE_FILES: [&str; 2] = ["memfile", "rootfs.ext4"];
+const COMPRESSION_SUFFIXES: [&str; 2] = [".zstd", ".lz4"];
 
 impl Storage {
     pub fn with_peers(self, peers: Arc<PeerSwitch>) -> Self {
@@ -123,7 +122,7 @@ impl Storage {
     }
 
     async fn peer_blob(&self, path: &str) -> Option<PeerBlob> {
-        let target = self.peer_target(path, &BLOB_FILES).await?;
+        let target = self.peer_target(path, false).await?;
         Some(PeerBlob {
             handle: target.into_handle(),
             base: self.clone(),
@@ -131,16 +130,17 @@ impl Storage {
     }
 
     async fn peer_seekable(&self, path: &str) -> Option<PeerSeekable> {
-        let target = self.peer_target(path, &SEEKABLE_FILES).await?;
+        let target = self.peer_target(path, true).await?;
         Some(PeerSeekable {
             handle: target.into_handle(),
             base: self.clone(),
         })
     }
 
-    async fn peer_target<'a>(&self, path: &'a str, files: &[&str]) -> Option<PeerTarget<'a>> {
+    async fn peer_target<'a>(&self, path: &'a str, seekable: bool) -> Option<PeerTarget<'a>> {
         let peers = self.peers.as_ref().filter(|_| self.peer_routed)?;
-        let (build_id, name) = path.split_once('/').filter(|(_, name)| files.contains(name))?;
+        let (build_id, name) = path.split_once('/').unwrap_or((path, ""));
+        let name = if seekable { strip_compression(name) } else { name };
         let span = tracing::info_span!("resolve peer-provider", build_id, peer_resolve = tracing::field::Empty);
         let resolution = peers.resolve(build_id).instrument(span.clone()).await;
         match resolution {
@@ -158,6 +158,13 @@ impl Storage {
             }
         }
     }
+}
+
+fn strip_compression(name: &str) -> &str {
+    COMPRESSION_SUFFIXES
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name)
 }
 
 struct PeerTarget<'a> {
@@ -287,16 +294,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn files_the_peer_does_not_serve_never_ask_the_peer() {
+    async fn a_file_the_peer_rejects_is_read_from_the_base() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counted = asked.clone();
         let chunks = FakeChunks {
-            blob: Arc::new(|_| panic!("the peer must not be asked")),
+            blob: Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Err(tonic::Status::invalid_argument("unknown file: \"layer.index\""))
+            }),
             ..FakeChunks::default()
         };
         let (_dir, storage) = routed(chunks, true).await;
         put(&storage, "build-1/layer.index", b"index").await;
 
         assert_eq!(storage.get("build-1/layer.index").await.unwrap(), "index");
-        assert!(storage.get("no-slash").await.unwrap_err().contains("no-slash"));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_compression_suffix_is_stripped_from_a_seekable_name() {
+        assert_eq!(strip_compression("memfile.zstd"), "memfile");
+        assert_eq!(strip_compression("rootfs.ext4.lz4"), "rootfs.ext4");
+        assert_eq!(strip_compression("memfile"), "memfile");
     }
 
     #[tokio::test]

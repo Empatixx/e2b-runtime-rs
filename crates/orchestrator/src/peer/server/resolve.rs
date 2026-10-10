@@ -24,7 +24,7 @@ pub struct PeerCache {
 
 impl PeerCache {
     pub async fn resolve_seekable(&self, build_id: &str, file_name: &str) -> Result<SeekableSource, SourceError> {
-        let artifact = match file_name {
+        let artifact = match strip_compression(file_name) {
             MEMFILE => Artifact::Memfile,
             ROOTFS => Artifact::Rootfs,
             unknown => return Err(SourceError::UnknownFile(unknown.to_owned())),
@@ -67,6 +67,13 @@ impl PeerCache {
     }
 }
 
+fn strip_compression(name: &str) -> &str {
+    [".zstd", ".lz4"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name)
+}
+
 fn header(template: Arc<crate::template::Template>, file: HeaderFile) -> BlobSource {
     BlobSource::Header { template, file }
 }
@@ -89,6 +96,20 @@ mod tests {
                 .await;
             assert_eq!(error.err(), Some(SourceError::NotAvailable), "{file_name}");
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_seekable_ignores_a_compression_suffix() {
+        let fixture = cache_fixture();
+        let build_id = Uuid::new_v4();
+        fixture.add_diff(build_id, Artifact::Memfile, &[1; 4096]);
+
+        let source = fixture
+            .cache
+            .resolve_seekable(&build_id.to_string(), "memfile.zstd")
+            .await;
+
+        assert!(source.is_ok());
     }
 
     #[tokio::test]
