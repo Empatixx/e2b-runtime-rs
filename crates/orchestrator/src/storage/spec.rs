@@ -51,7 +51,12 @@ pub struct StorageSpec {
     pub endpoint: String,
     pub use_path_style: bool,
     pub region: String,
+    pub server_side_encryption: String,
+    pub sse_kms_key_id: String,
 }
+
+pub const SSE_AES256: &str = "AES256";
+pub const SSE_AWS_KMS: &str = "aws:kms";
 
 impl StorageSpec {
     pub fn local(base_path: &str) -> Self {
@@ -69,6 +74,8 @@ impl StorageSpec {
             endpoint: String::new(),
             use_path_style: false,
             region: String::new(),
+            server_side_encryption: String::new(),
+            sse_kms_key_id: String::new(),
         }
     }
 
@@ -87,13 +94,13 @@ impl StorageSpec {
         }
     }
 
-    pub fn bucket_url(provider: Provider, bucket: &str, path_style: bool) -> String {
+    pub fn bucket_url(provider: Provider, bucket: &str, s3_query: &Query) -> String {
         GoUrl {
             scheme: provider.bucket_scheme().to_owned(),
             host: bucket.to_owned(),
-            raw_query: match provider == Provider::Aws && path_style {
-                true => Query::single("s3ForcePathStyle", "true").encode(),
-                false => String::new(),
+            raw_query: match provider {
+                Provider::Aws => s3_query.encode(),
+                _ => String::new(),
             },
             ..GoUrl::default()
         }
@@ -157,13 +164,27 @@ fn parse_bucket_url(url: &GoUrl, provider: Provider) -> Result<StorageSpec, Stri
             url.scheme
         ));
     }
-    query.values.iter().try_fold(
-        StorageSpec {
-            bucket: url.host.clone(),
-            ..StorageSpec::empty(provider)
-        },
-        |spec, (key, values)| apply_parameter(url, spec, key, values.last().map_or("", String::as_str)),
-    )
+    query
+        .values
+        .iter()
+        .try_fold(
+            StorageSpec {
+                bucket: url.host.clone(),
+                ..StorageSpec::empty(provider)
+            },
+            |spec, (key, values)| apply_parameter(url, spec, key, values.last().map_or("", String::as_str)),
+        )
+        .and_then(|spec| checked_kms_key(url, spec))
+}
+
+fn checked_kms_key(url: &GoUrl, spec: StorageSpec) -> Result<StorageSpec, String> {
+    match spec.sse_kms_key_id.is_empty() || spec.server_side_encryption == SSE_AWS_KMS {
+        true => Ok(spec),
+        false => Err(format!(
+            "storage URL {}: kmskeyid requires ssetype={SSE_AWS_KMS}",
+            redacted(url)
+        )),
+    }
 }
 
 fn apply_parameter(url: &GoUrl, spec: StorageSpec, key: &str, value: &str) -> Result<StorageSpec, String> {
@@ -186,8 +207,23 @@ fn apply_parameter(url: &GoUrl, spec: StorageSpec, key: &str, value: &str) -> Re
             region: value.to_owned(),
             ..spec
         }),
+        "ssetype" => match value {
+            SSE_AES256 | SSE_AWS_KMS => Ok(StorageSpec {
+                server_side_encryption: value.to_owned(),
+                ..spec
+            }),
+            _ => Err(format!(
+                "storage URL {}: invalid ssetype {} (want {SSE_AES256} or {SSE_AWS_KMS})",
+                redacted(url),
+                quote(value)
+            )),
+        },
+        "kmskeyid" => Ok(StorageSpec {
+            sse_kms_key_id: value.to_owned(),
+            ..spec
+        }),
         key => Err(format!(
-            "storage URL {}: unsupported query parameter {} (want endpoint, s3ForcePathStyle, or region)",
+            "storage URL {}: unsupported query parameter {} (want endpoint, s3ForcePathStyle, region, ssetype, or kmskeyid)",
             redacted(url),
             quote(key)
         )),
@@ -294,6 +330,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_server_side_encryption() {
+        let sse = |raw: &str| StorageSpec::parse_url(raw);
+        assert_eq!(
+            sse("s3://my-bucket?ssetype=AES256"),
+            Ok(StorageSpec {
+                server_side_encryption: SSE_AES256.to_owned(),
+                ..bucket(Provider::Aws, "my-bucket")
+            })
+        );
+        assert_eq!(
+            sse("s3://my-bucket?ssetype=aws:kms&kmskeyid=arn:aws:kms:us-east-1:111111111111:key/test"),
+            Ok(StorageSpec {
+                server_side_encryption: SSE_AWS_KMS.to_owned(),
+                sse_kms_key_id: "arn:aws:kms:us-east-1:111111111111:key/test".to_owned(),
+                ..bucket(Provider::Aws, "my-bucket")
+            })
+        );
+        assert_eq!(
+            sse("s3://my-bucket?ssetype=aws:kms"),
+            Ok(StorageSpec {
+                server_side_encryption: SSE_AWS_KMS.to_owned(),
+                ..bucket(Provider::Aws, "my-bucket")
+            })
+        );
+        assert!(
+            sse("s3://my-bucket?ssetype=aes256")
+                .unwrap_err()
+                .contains("invalid ssetype \"aes256\"")
+        );
+        assert!(
+            sse("s3://my-bucket?ssetype=AES256&kmskeyid=arn:aws:kms:us-east-1:111111111111:key/test")
+                .unwrap_err()
+                .contains("kmskeyid requires ssetype=aws:kms")
+        );
+        assert!(
+            sse("gs://my-bucket?ssetype=AES256")
+                .unwrap_err()
+                .contains("does not accept query parameters")
+        );
+    }
+
+    #[test]
     fn rejects_like_upstream() {
         let error = |raw: &str| StorageSpec::parse_url(raw).unwrap_err();
         assert_eq!(error("::"), "invalid storage URL: missing protocol scheme");
@@ -344,11 +422,15 @@ mod tests {
     #[test]
     fn builds_legacy_urls() {
         assert_eq!(
-            StorageSpec::bucket_url(Provider::Aws, "b", true),
+            StorageSpec::bucket_url(Provider::Aws, "b", &Query::single("s3ForcePathStyle", "true")),
             "s3://b?s3ForcePathStyle=true"
         );
-        assert_eq!(StorageSpec::bucket_url(Provider::Gcp, "b", true), "gs://b");
-        assert_eq!(StorageSpec::bucket_url(Provider::Azure, "c", false), "azblob://c");
+        let path_style = Query::single("s3ForcePathStyle", "true");
+        assert_eq!(StorageSpec::bucket_url(Provider::Gcp, "b", &path_style), "gs://b");
+        assert_eq!(
+            StorageSpec::bucket_url(Provider::Azure, "c", &Query::default()),
+            "azblob://c"
+        );
         assert_eq!(StorageSpec::file_url("/tmp/templates"), "file:///tmp/templates");
         assert_eq!(StorageSpec::file_url("rel"), "file:rel");
     }

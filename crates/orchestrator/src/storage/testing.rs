@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::stream::BoxStream;
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
@@ -16,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::backend::Storage;
+use super::spec::{Provider, StorageSpec};
 
 const TOO_MANY_REQUESTS: &[u8] = b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
@@ -188,5 +190,102 @@ impl ObjectStore for FailingParts {
         Self: 'd,
     {
         Box::pin(self.inner.copy_opts(from, to, options))
+    }
+}
+
+pub type RecordedRequests = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
+
+pub async fn recording_s3(spec: StorageSpec) -> (Storage, RecordedRequests) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let recorded = RecordedRequests::default();
+    let seen = recorded.clone();
+    tokio::spawn(async move {
+        loop {
+            let (connection, _) = listener.accept().await.unwrap();
+            tokio::spawn(answer_s3(connection, seen.clone()));
+        }
+    });
+    let spec = StorageSpec {
+        provider: Provider::Aws,
+        bucket: "test-bucket".to_owned(),
+        endpoint: format!("http://{address}"),
+        use_path_style: true,
+        region: "us-east-1".to_owned(),
+        ..spec
+    };
+    let credentials = object_store::aws::AmazonS3Builder::new()
+        .with_access_key_id("test-access-key")
+        .with_secret_access_key("test-secret-key");
+    (Storage::s3(&spec, credentials).unwrap(), recorded)
+}
+
+async fn answer_s3(mut connection: TcpStream, recorded: RecordedRequests) {
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 65536];
+    let (head_end, content_length) = loop {
+        let read = connection.read(&mut chunk).await.unwrap_or(0);
+        if read == 0 {
+            return;
+        }
+        received.extend_from_slice(&chunk[..read]);
+        if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&received[..position]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            break (position + 4, length);
+        }
+    };
+    while received.len() < head_end + content_length {
+        let read = connection.read(&mut chunk).await.unwrap_or(0);
+        if read == 0 {
+            return;
+        }
+        received.extend_from_slice(&chunk[..read]);
+    }
+    let head = String::from_utf8_lossy(&received[..head_end]).into_owned();
+    let mut lines = head.lines();
+    let request_line = lines.next().unwrap_or_default().to_owned();
+    let headers = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_owned()))
+        .collect::<HashMap<_, _>>();
+    let operation = s3_operation(&request_line);
+    recorded.lock().unwrap().insert(operation.to_owned(), headers);
+    let (extra_headers, body) = s3_response(operation);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    connection.write_all(response.as_bytes()).await.ok();
+    connection.shutdown().await.ok();
+}
+
+fn s3_operation(request_line: &str) -> &'static str {
+    let mut parts = request_line.split(' ');
+    let (method, target) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    match method {
+        "POST" if target.contains("uploads") => "CreateMultipartUpload",
+        "POST" if target.contains("uploadId=") => "CompleteMultipartUpload",
+        "PUT" if target.contains("partNumber=") => "UploadPart",
+        "PUT" => "PutObject",
+        _ => "Other",
+    }
+}
+
+fn s3_response(operation: &str) -> (&'static str, &'static str) {
+    match operation {
+        "CreateMultipartUpload" => (
+            "",
+            "<InitiateMultipartUploadResult><UploadId>sse-upload-id</UploadId></InitiateMultipartUploadResult>",
+        ),
+        "CompleteMultipartUpload" => (
+            "",
+            "<CompleteMultipartUploadResult><Bucket>test-bucket</Bucket><Key>test-object</Key><ETag>\"complete-etag\"</ETag></CompleteMultipartUploadResult>",
+        ),
+        _ => ("etag: \"etag\"\r\n", ""),
     }
 }

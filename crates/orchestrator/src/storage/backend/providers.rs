@@ -37,7 +37,19 @@ pub fn s3(spec: &StorageSpec, builder: AmazonS3Builder) -> Result<AmazonS3, Stri
             .with_endpoint(endpoint_for(spec, endpoint))
             .with_allow_http(endpoint.starts_with("http://")),
     };
-    builder.build().map_err(|e| e.to_string())
+    with_encryption(spec, builder).build().map_err(|e| e.to_string())
+}
+
+fn with_encryption(spec: &StorageSpec, builder: AmazonS3Builder) -> AmazonS3Builder {
+    [
+        ("aws_server_side_encryption", &spec.server_side_encryption),
+        ("aws_sse_kms_key_id", &spec.sse_kms_key_id),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .fold(builder, |builder, (key, value)| {
+        builder.with_config(key.parse().expect("known S3 config key"), value)
+    })
 }
 
 fn endpoint_for(spec: &StorageSpec, endpoint: &str) -> String {

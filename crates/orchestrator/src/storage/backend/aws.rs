@@ -1,3 +1,5 @@
+pub mod sse;
+
 use std::sync::Arc;
 use std::time::SystemTime;
 

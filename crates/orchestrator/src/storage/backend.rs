@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 use super::header::Header;
 use super::local_upload::UploadSigner;
 use super::spec::{Provider, StorageSpec};
+use aws::sse::ServerSideEncryption;
 use azure::{AzureBackend, AzureEnv, AzureSigner};
 use gcs::ServiceAccountSigner;
 
@@ -85,7 +86,10 @@ enum Signing {
         root: PathBuf,
         upload: Option<UploadSigner>,
     },
-    S3(Arc<AmazonS3>),
+    S3 {
+        store: Arc<AmazonS3>,
+        encryption: ServerSideEncryption,
+    },
     Gcs(ServiceAccountSigner),
     Azure(AzureSigner),
 }
@@ -125,7 +129,12 @@ impl Storage {
     }
 
     pub fn s3(spec: &StorageSpec, builder: AmazonS3Builder) -> Result<Self, String> {
-        providers::s3(spec, builder).map(|store| Self::remote(Arc::new(store), Signing::S3))
+        providers::s3(spec, builder).map(|store| {
+            Self::remote(Arc::new(store), |store| Signing::S3 {
+                store,
+                encryption: ServerSideEncryption::of(spec),
+            })
+        })
     }
 
     #[cfg(test)]
@@ -365,7 +374,7 @@ impl Storage {
 
     pub async fn delete_prefix(&self, prefix: &str) -> Result<(), String> {
         match (&self.signing, prefix.is_empty()) {
-            (Signing::S3(_) | Signing::Azure(_), true) => Err(EMPTY_PREFIX_REFUSED.to_owned()),
+            (Signing::S3 { .. } | Signing::Azure(_), true) => Err(EMPTY_PREFIX_REFUSED.to_owned()),
             (Signing::Gcs(_), true) => Ok(()),
             _ => self.delete_listed(prefix).await,
         }
@@ -407,7 +416,7 @@ impl Storage {
                 url: signer.signed_url(path, expires_in),
                 headers: HashMap::new(),
             }),
-            Signing::S3(store) => sign(store.as_ref(), path, expires_in)
+            Signing::S3 { store, encryption } => sign(store.as_ref(), encryption, path, expires_in)
                 .await
                 .map_err(|e| format!("failed to presign PUT URL: {e}")),
             Signing::Gcs(signer) => signer.upload_url(path, expires_in).map(|url| UploadUrl {
@@ -450,13 +459,23 @@ fn is_rate_limited(error: &object_store::Error) -> bool {
         .any(|cause| cause.to_string().starts_with(TOO_MANY_REQUESTS_STATUS))
 }
 
-async fn sign(signer: &dyn Signer, path: &str, expires_in: Duration) -> Result<UploadUrl, String> {
+async fn sign(
+    signer: &dyn Signer,
+    encryption: &ServerSideEncryption,
+    path: &str,
+    expires_in: Duration,
+) -> Result<UploadUrl, String> {
     signer
-        .signed_url(Method::PUT, &ObjectPath::from(path), expires_in)
+        .signed_url_opts(
+            Method::PUT,
+            &ObjectPath::from(path),
+            expires_in,
+            &encryption.signed_url_options()?,
+        )
         .await
         .map(|url| UploadUrl {
             url: url.to_string(),
-            headers: HashMap::new(),
+            headers: encryption.headers(),
         })
         .map_err(|e| e.to_string())
 }
