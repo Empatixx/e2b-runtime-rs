@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use std::thread::JoinHandle;
+
 use tokio::sync::mpsc;
 
 pub const DEFAULT_POOL_SIZE: usize = 64;
@@ -11,9 +13,12 @@ const RELEASE_RETRY: Duration = Duration::from_millis(500);
 
 pub type FreeCheck = Box<dyn Fn(u32) -> bool + Send + Sync>;
 
+const CLOSED: &str = "nbd device pool is closed";
+
 pub struct DevicePool {
     devices: Arc<Devices>,
     ready: tokio::sync::Mutex<mpsc::Receiver<u32>>,
+    populating: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct Devices {
@@ -26,6 +31,7 @@ struct Devices {
 struct Claims {
     taken: BTreeSet<u32>,
     next: u32,
+    closed: bool,
 }
 
 impl DevicePool {
@@ -37,20 +43,26 @@ impl DevicePool {
             claims: Mutex::default(),
         });
         let populating = devices.clone();
-        std::thread::spawn(move || populating.populate(&sender));
+        let populate = std::thread::spawn(move || populating.populate(&sender));
         Self {
             devices,
             ready: tokio::sync::Mutex::new(receiver),
+            populating: Mutex::new(Some(populate)),
         }
     }
 
     pub async fn get(&self) -> Result<u32, String> {
-        self.ready
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or_else(|| "nbd device pool is closed".to_owned())
+        let index = self.ready.lock().await.recv().await.ok_or_else(|| CLOSED.to_owned())?;
+        self.devices.claim_received(index)
+    }
+
+    pub async fn close(&self) -> Vec<u32> {
+        self.devices.claims.lock().closed = true;
+        self.ready.lock().await.close();
+        self.populating.lock().take().into_iter().for_each(|populate| {
+            drop(populate.join());
+        });
+        self.devices.claims.lock().taken.iter().copied().collect()
     }
 
     pub fn release(&self, index: u32) {
@@ -75,8 +87,22 @@ impl Devices {
         }
     }
 
+    fn claim_received(&self, index: u32) -> Result<u32, String> {
+        let mut claims = self.claims.lock();
+        match claims.closed {
+            true => {
+                claims.taken.remove(&index);
+                Err(CLOSED.to_owned())
+            }
+            false => Ok(index),
+        }
+    }
+
     fn claim_next(&self) -> Option<u32> {
         let mut claims = self.claims.lock();
+        if claims.closed {
+            return None;
+        }
         let start = claims.next;
         let index = (0..self.count)
             .map(|step| (start + step) % self.count)
@@ -122,6 +148,33 @@ mod tests {
         ];
 
         assert_eq!(handed, vec![0, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn a_device_received_after_close_is_refused_and_unclaimed() {
+        let (pool, _) = pool(4, &[]);
+        let ready = pool.ready.lock().await.recv().await.unwrap();
+        pool.devices.claims.lock().closed = true;
+
+        assert_eq!(pool.devices.claim_received(ready), Err(CLOSED.to_owned()));
+        assert!(!pool.devices.claims.lock().taken.contains(&ready));
+    }
+
+    #[tokio::test]
+    async fn close_joins_the_populate_thread_and_nothing_is_claimed_afterwards() {
+        let (pool, _) = pool(8, &[]);
+        let handed = pool.get().await.unwrap();
+
+        let still_taken = pool.close().await;
+
+        assert!(pool.populating.lock().is_none());
+        assert!(still_taken.contains(&handed));
+        assert_eq!(pool.devices.claim_next(), None);
+        assert_eq!(pool.get().await, Err(CLOSED.to_owned()));
+        assert_eq!(
+            pool.devices.claims.lock().taken.iter().copied().collect::<Vec<_>>(),
+            vec![handed]
+        );
     }
 
     #[tokio::test]
