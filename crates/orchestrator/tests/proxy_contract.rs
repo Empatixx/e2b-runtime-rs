@@ -1440,3 +1440,142 @@ async fn http_one_zero_requests_need_no_host() {
 
     assert!(reply.starts_with("HTTP/1.0 200 OK"), "{reply}");
 }
+
+fn proxy_env_with(pairs: Vec<(&'static str, String)>) -> Arc<orchestrator::proxy::pool::proxy_env::ProxyEnv> {
+    Arc::new(orchestrator::proxy::pool::proxy_env::ProxyEnv::from_vars(
+        &move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        },
+    ))
+}
+
+async fn environment_proxy(
+    reply: &'static [u8],
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (seen, request) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let head = read_head(&mut stream).await;
+        let _ = seen.send(head);
+        stream.write_all(reply).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_u8()).await;
+    });
+    (address, request, serving)
+}
+
+#[tokio::test]
+async fn dials_a_plain_http_upstream_through_http_proxy_from_the_environment() {
+    let (proxy_address, request, _serving) =
+        environment_proxy(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\nvia-http").await;
+    let upstream = destination("10.255.255.1:8080".parse().unwrap(), "through-http-proxy");
+    let settings = orchestrator::proxy::server::ProxySettings {
+        proxy_env: proxy_env_with(vec![("HTTP_PROXY", format!("http://{proxy_address}"))]),
+        ..proxy_settings()
+    };
+    let proxy = start_proxy_with(settings, fixed(upstream), None).await;
+
+    let response = client().get(proxy.url("/hello")).send().await.unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "via-http");
+    let head = request.await.unwrap();
+    assert!(
+        head.starts_with("GET http://10.255.255.1:8080/hello HTTP/1.1\r\n"),
+        "{head}"
+    );
+}
+
+#[tokio::test]
+async fn dials_an_https_upstream_through_a_connect_tunnel_from_the_environment() {
+    let backend = spawn_tls_backend("tunnelled").await;
+    let (proxy_address, request, _serving) = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen, request) = tokio::sync::oneshot::channel();
+        let target = backend.address;
+        let serving = tokio::spawn(async move {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            let head = read_head(&mut inbound).await;
+            let _ = seen.send(head);
+            let mut outbound = tokio::net::TcpStream::connect(target).await.unwrap();
+            inbound
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+        (address, request, serving)
+    };
+    let secure = orchestrator::proxy::destination::Destination::builder()
+        .scheme(axum::http::uri::Scheme::HTTPS)
+        .authority(axum::http::uri::Authority::try_from("10.255.255.2:443").unwrap())
+        .sandbox_id("test-sandbox")
+        .connection_key("through-connect")
+        .insecure_skip_tls_verify(true)
+        .build();
+    let settings = orchestrator::proxy::server::ProxySettings {
+        proxy_env: proxy_env_with(vec![("HTTPS_PROXY", format!("http://{proxy_address}"))]),
+        ..proxy_settings()
+    };
+    let proxy = start_proxy_with(settings, fixed(secure), None).await;
+
+    let response = client().get(proxy.url("/")).send().await.unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "tunnelled");
+    let head = request.await.unwrap();
+    assert!(head.starts_with("CONNECT 10.255.255.2:443 HTTP/1.1\r\n"), "{head}");
+}
+
+#[tokio::test]
+async fn loopback_upstreams_bypass_the_environment_proxy() {
+    let backend = spawn_backend("direct").await;
+    let dead = reserved_port().await.0;
+    let settings = orchestrator::proxy::server::ProxySettings {
+        proxy_env: proxy_env_with(vec![("HTTP_PROXY", format!("http://{dead}"))]),
+        ..proxy_settings()
+    };
+    let proxy = start_proxy_with(settings, fixed(destination(backend.address, &backend.id)), None).await;
+
+    let response = client().get(proxy.url("/")).send().await.unwrap();
+
+    assert_backend_output(&backend, response).await;
+}
+
+#[tokio::test]
+async fn no_proxy_entries_keep_matching_upstreams_off_the_environment_proxy() {
+    let (proxy_address, mut request, _serving) =
+        environment_proxy(b"HTTP/1.1 500 no\r\ncontent-length: 0\r\n\r\n").await;
+    let settings = orchestrator::proxy::server::ProxySettings {
+        proxy_env: proxy_env_with(vec![
+            ("HTTP_PROXY", format!("http://{proxy_address}")),
+            ("NO_PROXY", "10.255.255.0/24".to_owned()),
+        ]),
+        ..proxy_settings()
+    };
+    let proxy = start_proxy_with(
+        settings,
+        fixed(destination("10.255.255.3:8080".parse().unwrap(), "no-proxy")),
+        None,
+    )
+    .await;
+    let url = proxy.url("/");
+    let pending = tokio::spawn(async move { client().get(url).send().await });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert!(
+        request.try_recv().is_err(),
+        "the proxy named in HTTP_PROXY must not have been asked"
+    );
+    pending.abort();
+}
