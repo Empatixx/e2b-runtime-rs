@@ -10,6 +10,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use self::read_retry::with_read_retries;
 use self::retry_timer::RetryTimer;
 use self::state::SharedState;
 use super::prefetch::{Installer, Prefaulted};
@@ -19,6 +20,7 @@ use super::uffd::{CopyOutcome, Event, Uffd};
 use crate::block::build_file::BuildFile;
 use crate::block::page_data::PageData;
 
+mod read_retry;
 mod retry_timer;
 mod state;
 mod write_protect;
@@ -321,7 +323,7 @@ impl Serving {
 
     async fn install(&self, page: u64, write: bool) -> Result<CopyOutcome, String> {
         let offset = self.regions.offset_of(page)?;
-        let bytes = self.page_bytes(offset).await?;
+        let bytes = with_read_retries(|| self.page_bytes(offset)).await?;
         self.install_bytes(page, offset, bytes, write)
     }
 
