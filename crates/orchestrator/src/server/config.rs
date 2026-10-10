@@ -31,6 +31,7 @@ const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
 const DEFAULT_ORCHESTRATOR_IP: &str = "192.0.2.1";
 const DEFAULT_HYPERLOOP_PORT: u16 = 5010;
+const DEFAULT_PROXY_PORT: u16 = 5007;
 
 #[derive(Clone)]
 pub struct BuildStorage {
@@ -66,6 +67,7 @@ pub struct NodeConfig {
     pub services: Services,
     pub orchestrator_ip: String,
     pub hyperloop_port: u16,
+    pub proxy_port: u16,
     pub logs_collector: String,
     pub node_ip: String,
     pub redis: Option<RedisSettings>,
@@ -143,6 +145,7 @@ impl NodeConfig {
             services,
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
             hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
+            proxy_port: number(vars, "PROXY_PORT")?.unwrap_or(DEFAULT_PROXY_PORT),
             logs_collector: var("LOGS_COLLECTOR_ADDRESS").unwrap_or_default(),
             node_ip: var("NODE_IP").unwrap_or_else(|| "localhost".to_owned()),
             redis: RedisSettings::from_vars(vars)?,

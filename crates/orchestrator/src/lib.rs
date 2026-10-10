@@ -13,6 +13,7 @@ pub mod go_gzip;
 pub mod go_humanize;
 pub mod go_os;
 pub mod go_path;
+pub mod go_sniff;
 pub mod go_strconv;
 pub mod go_tar;
 pub mod go_time;

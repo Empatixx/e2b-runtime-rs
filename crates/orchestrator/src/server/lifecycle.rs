@@ -243,6 +243,10 @@ impl Running {
                 self.node.network.discard_slot(self.slot);
             }
         }
+        self.node.proxy.get().iter().for_each(|proxy| {
+            proxy.on_network_release(&lifecycle.lifecycle_id);
+            proxy.remove_from_pool(&lifecycle.lifecycle_id);
+        });
         self.node.registry.finish(&lifecycle);
     }
 

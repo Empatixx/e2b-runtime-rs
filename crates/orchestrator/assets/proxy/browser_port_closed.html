@@ -1,0 +1,13 @@
+{{define "title"}}Port closed{{end}}
+{{define "tone"}}error{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> is running, but no service is listening on port <code>{{.Port}}</code>.</p>
+                    <div class="output"><span class="muted">{{.Host}}</span><br><span class="error">Connection refused on port {{.Port}}</span></div>
+                    <p class="hint">Make sure your service is running inside the sandbox and listening on this port.</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button" href="https://docs.e2b.dev/sdk-reference/cli/latest/sandbox#e2b-sandbox-logs">Sandbox logs{{template "external-link-icon"}}</a>
+                    <a class="button" href="https://docs.e2b.dev/network/public-url">Public URL docs{{template "external-link-icon"}}</a>
+                </div>
+{{end}}

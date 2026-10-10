@@ -1,0 +1,10 @@
+{{define "title"}}Too many connections{{end}}
+{{define "tone"}}warning{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> has too many concurrent incoming connections (limit: {{.ConnectionLimit}}).</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button button-primary" href="">{{template "refresh-icon"}}Try again</a>
+                </div>
+{{end}}

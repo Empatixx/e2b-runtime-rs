@@ -1,0 +1,10 @@
+{{define "title"}}Sandbox not found{{end}}
+{{define "tone"}}error{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> wasn't found.</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button" href="https://docs.e2b.dev/sandbox">Sandbox lifecycle{{template "external-link-icon"}}</a>
+                </div>
+{{end}}

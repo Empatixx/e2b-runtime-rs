@@ -1,0 +1,10 @@
+{{define "title"}}Sandbox limit reached{{end}}
+{{define "tone"}}warning{{end}}
+{{define "body"}}
+                    <p class="message">{{.Message}}</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button" href="https://docs.e2b.dev/billing">Plans and limits{{template "external-link-icon"}}</a>
+                </div>
+{{end}}

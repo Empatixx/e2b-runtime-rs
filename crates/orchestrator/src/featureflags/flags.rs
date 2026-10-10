@@ -28,6 +28,7 @@ pub const FREE_PAGE_HINTING_CONFIG: JsonFlag = Flag::new("free-page-hinting-conf
 pub const EGRESS_RETIREMENT_TIMEOUT_MS: IntFlag = Flag::new("egress-retirement-timeout-ms", 60000);
 pub const MAX_SANDBOXES_PER_NODE: IntFlag = Flag::new("max-sandboxes-per-node", 200);
 pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-instances-per-node", 3);
+pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-incoming-connections", -1);
 
 pub const PEER_TO_PEER_CHUNK_TRANSFER: BoolFlag = Flag::new("peer-to-peer-chunk-transfer", false);
 pub const PEER_TO_PEER_ASYNC_CHECKPOINT: BoolFlag = Flag::new("peer-to-peer-async-checkpoint", false);

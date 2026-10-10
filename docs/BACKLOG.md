@@ -100,3 +100,14 @@ Every final review ends with minors and deferred rulings. They are collected her
 | `Chrooted` has only what the volume service uses; upstream also has rename, remove, symlink, readlink, chtimes, temp files and the trailing-slash rules for them, which only the NFS proxy needs | NFS proxy |
 | `chmod` goes through `/proc/self/fd` (upstream tries `fchmodat2` first); a host without procfs cannot chmod | later |
 | `CreateVolume` reports the full volume path in a mkdir failure; Go reports the first path component that failed | later |
+
+## Orchestrator: sandbox proxy
+
+| Item | Target |
+|---|---|
+| A connection stuck in the h2c preface is closed by a graceful shutdown; Go keeps the hijacked connection until the peer closes or the proxy is closed | later |
+| The idle timeout starts after the first finished request on both HTTP/1 and h2c; Go also times a fresh h2c connection | later |
+| Malformed requests get hyper's 400 and 431 replies; Go answers with its own text bodies | later |
+| The upstream dialer ignores `HTTP_PROXY` and `NO_PROXY`; Go's transport reads them with `ProxyFromEnvironment` | later |
+| A chunked response without a content type is never sniffed; Go sniffs it only when the body write wins a race against the header flush | later |
+| Upstream TLS without skip-verify trusts the bundled web roots; Go trusts the system roots (the sandbox proxy only dials TLS with skip-verify) | later |

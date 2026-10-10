@@ -1,0 +1,10 @@
+{{define "title"}}Unable to resume sandbox{{end}}
+{{define "tone"}}error{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> can't be resumed with the credentials provided. Check your access token and try again.</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button" href="https://docs.e2b.dev/sandbox/auto-resume">Auto-resume docs{{template "external-link-icon"}}</a>
+                </div>
+{{end}}

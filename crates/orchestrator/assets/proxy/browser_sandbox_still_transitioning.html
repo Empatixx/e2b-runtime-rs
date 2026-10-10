@@ -1,0 +1,10 @@
+{{define "title"}}Sandbox still transitioning{{end}}
+{{define "tone"}}info{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> is still transitioning. Try again in a moment.</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button button-primary" href="">{{template "refresh-icon"}}Try again</a>
+                </div>
+{{end}}

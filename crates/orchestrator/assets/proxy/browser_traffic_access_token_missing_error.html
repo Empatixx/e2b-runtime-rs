@@ -1,0 +1,10 @@
+{{define "title"}}Missing traffic access token{{end}}
+{{define "tone"}}error{{end}}
+{{define "body"}}
+                    <p class="message">The sandbox <code>{{.SandboxId}}</code> requires a traffic access token. The <code>{{.Header}}</code> header is missing.</p>
+{{end}}
+{{define "actions"}}
+                <div class="actions">
+                    <a class="button" href="https://docs.e2b.dev/network/restrict-public-access">Restricting public access{{template "external-link-icon"}}</a>
+                </div>
+{{end}}

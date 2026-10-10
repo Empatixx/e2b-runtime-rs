@@ -16,6 +16,8 @@ mod serve {
 
     use orchestrator::clickhouse::sinks::Clickhouse;
     use orchestrator::events::EventSink;
+    use orchestrator::featureflags::flags::SANDBOX_MAX_INCOMING_CONNECTIONS;
+    use orchestrator::proxy::sandbox::SandboxProxy;
     use orchestrator::routing::redis::Redis;
     use orchestrator::server::app::{App, TemplateManagerSetup};
     use orchestrator::server::config::NodeConfig;
@@ -132,6 +134,22 @@ mod serve {
         )
         .start(settings)
         .await?;
+        let flags = feature_flags.clone();
+        let sandbox_proxy = Arc::new(SandboxProxy::new(
+            orchestrator::proxy::sandbox::node::lookup_in(node.clone()),
+            Arc::new(move || flags.get(&SANDBOX_MAX_INCOMING_CONNECTIONS, &[])),
+        ));
+        let proxy_address = SocketAddr::from(([0, 0, 0, 0], config.proxy_port));
+        let proxy_listener = tokio::net::TcpListener::bind(proxy_address)
+            .await
+            .map_err(|e| format!("listen on {proxy_address}: {e}"))?;
+        drop(node.proxy.set(sandbox_proxy.clone()));
+        let serving_proxy = sandbox_proxy.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serving_proxy.serve(proxy_listener).await {
+                tracing::error!(%error, "sandbox proxy stopped");
+            }
+        });
         let mut signals = Signals::new()?;
         signals.next().await;
         tracing::info!("Shutdown signal received");
@@ -152,6 +170,7 @@ mod serve {
         }
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
+        sandbox_proxy.close(config.force_stop).await;
         match config.force_stop {
             true => node.close_forced().await,
             false => node.close().await,

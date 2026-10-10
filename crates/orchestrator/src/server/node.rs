@@ -94,6 +94,7 @@ pub struct Node {
     pub routing: RoutingPublisher,
     pub events: EventsService,
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
+    pub proxy: OnceLock<Arc<SandboxProxy>>,
     admission: Admission,
     pub max_sandboxes: MaxSandboxes,
     pub build_disk: Arc<BuildDisk>,

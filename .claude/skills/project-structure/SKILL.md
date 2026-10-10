@@ -134,7 +134,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/*.proto (no package upstream)
   src/main.rs          orchestrator binary: NodeConfig::from_env, App served by axum on GRPC_PORT (5008), upstream shutdown order
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
-  tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI
+  tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI; proxy_contract.rs and sandbox_proxy_contract.rs
+                       run anywhere (tests/proxy_contract/support.rs: backends, TLS fixtures in tests/fixtures/proxy)
 docker/guest.Dockerfile + envd.service  test microVM rootfs (Debian, envd under systemd)
 scripts/ci/            CI helpers: vm-assets.sh, guest-rootfs.sh, vm-sdk-tests.sh, s3.sh, kvm-spike.sh
 scripts/clippy-linux.sh clippy of the whole workspace in Docker (rust:1.98) to catch Linux-only compile errors on a Mac
