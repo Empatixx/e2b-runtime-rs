@@ -3,6 +3,8 @@ pub mod cpus;
 pub mod files;
 pub mod process;
 pub mod version;
+pub mod quiesce;
+pub mod upgrade;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

@@ -71,7 +71,7 @@ struct ConnectError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Frame {
+pub(super) enum Frame {
     Message(Vec<u8>),
     End(Vec<u8>),
 }
@@ -161,11 +161,11 @@ fn start_request(command: &str, context: &CommandContext) -> serde_json::Value {
     json!({ "process": process })
 }
 
-fn user_header(user: &str) -> String {
+pub(super) fn user_header(user: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("{user}:")))
 }
 
-fn envelope(message: &serde_json::Value) -> Vec<u8> {
+pub(super) fn envelope(message: &serde_json::Value) -> Vec<u8> {
     let payload = message.to_string().into_bytes();
     let mut framed = Vec::with_capacity(FRAME_HEADER + payload.len());
     framed.push(0);
@@ -174,7 +174,7 @@ fn envelope(message: &serde_json::Value) -> Vec<u8> {
     framed
 }
 
-fn next_frame(buffer: &mut BytesMut) -> Option<Frame> {
+pub(super) fn next_frame(buffer: &mut BytesMut) -> Option<Frame> {
     if buffer.len() < FRAME_HEADER {
         return None;
     }

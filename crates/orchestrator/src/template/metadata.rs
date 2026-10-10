@@ -9,6 +9,7 @@ pub use cpu_template::{CpuTemplate, applied_digest};
 
 pub const CURRENT_VERSION: u64 = 2;
 const DEPRECATED_VERSION: u64 = 1;
+const FILESYSTEM_ONLY_VERSION: u64 = DEPRECATED_VERSION + 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TemplateMetadata {
@@ -207,6 +208,18 @@ impl TemplateMetadata {
     pub fn with_vcpu_count(&self, vcpus: i64) -> Self {
         Self {
             vcpu_count: vcpus,
+    pub fn mark_filesystem_only(&self, filesystem_only: bool, quiesced: bool) -> Self {
+        Self {
+            version: match filesystem_only {
+                true => self.version.max(FILESYSTEM_ONLY_VERSION),
+                false => self.version,
+            },
+            filesystem_only,
+            fs_quiesced: filesystem_only && quiesced,
+            ..self.clone()
+        }
+    }
+
             ..self.clone()
         }
     }
@@ -535,3 +548,36 @@ mod tests {
         assert_eq!(decoded.vcpu_count, 0);
     }
 }
+
+    #[test]
+    fn a_filesystem_only_snapshot_of_a_v1_template_survives_a_round_trip() {
+        let v1 = TemplateMetadata::v1();
+
+        let marked = v1.mark_filesystem_only(true, true);
+
+        assert!(marked.filesystem_only && marked.fs_quiesced);
+        assert_eq!(marked.version, FILESYSTEM_ONLY_VERSION);
+        let read = TemplateMetadata::from_json(&marked.to_json()).unwrap();
+        assert!(read.filesystem_only && read.fs_quiesced);
+        let stripped = TemplateMetadata::from_json(br#"{"version":1,"filesystem_only":true}"#).unwrap();
+        assert!(
+            !stripped.filesystem_only,
+            "a version 1 snapshot loses the flag, which is why the version is raised"
+        );
+        assert_eq!(v1.mark_filesystem_only(false, true).version, DEPRECATED_VERSION);
+    }
+
+    #[test]
+    fn a_memory_snapshot_writes_no_filesystem_keys_and_old_metadata_reads_as_memory() {
+        let memory = TemplateMetadata::v1();
+        let json = String::from_utf8(memory.to_json()).unwrap();
+
+        assert!(!json.contains("filesystem_only") && !json.contains("fs_quiesced"));
+        assert!(
+            !TemplateMetadata::from_json(br#"{"version":2}"#)
+                .unwrap()
+                .filesystem_only
+        );
+        let filesystem = TemplateMetadata::from_json(&memory.mark_filesystem_only(true, false).to_json()).unwrap();
+        assert!(filesystem.filesystem_only && !filesystem.fs_quiesced);
+    }
