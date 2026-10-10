@@ -26,9 +26,18 @@ pub const BUILD_CPU_TEMPLATE: JsonFlag = Flag::new("build-cpu-template", Value::
 pub const FREE_PAGE_REPORTING: BoolFlag = Flag::new("free-page-reporting", false);
 pub const FREE_PAGE_HINTING_CONFIG: JsonFlag = Flag::new("free-page-hinting-config", Value::Null);
 pub const EGRESS_RETIREMENT_TIMEOUT_MS: IntFlag = Flag::new("egress-retirement-timeout-ms", 60000);
+pub const STORAGE_CONCURRENT_UPLOAD_LIMIT: IntFlag = Flag::new("gcloud-concurrent-upload-limit", 8);
+pub const STORAGE_MAX_UPLOAD_TASKS: IntFlag = Flag::new("gcloud-max-tasks", 16);
 pub const MAX_SANDBOXES_PER_NODE: IntFlag = Flag::new("max-sandboxes-per-node", 200);
 pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-instances-per-node", 3);
 pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-incoming-connections", -1);
+
+pub const IN_PLACE_CHECKPOINT: BoolFlag = Flag::new("in-place-checkpoint", false);
+pub const FILESYSTEM_ONLY_CHECKPOINT: BoolFlag = Flag::new("filesystem-only-checkpoint", false);
+pub const IN_PLACE_CHECKPOINT_REPORTING: BoolFlag = Flag::new("in-place-checkpoint-reporting", false);
+pub const DEFER_MEMORY_EXPORT: BoolFlag = Flag::new("defer-memory-export", false);
+pub const FS_FREEZE_VIA_EXEC: BoolFlag = Flag::new("fsfreeze-via-exec", false);
+pub const GUEST_SYNC_TIMEOUT_MS: IntFlag = Flag::new("guest-sync-timeout-milliseconds", 0);
 
 pub const PEER_TO_PEER_CHUNK_TRANSFER: BoolFlag = Flag::new("peer-to-peer-chunk-transfer", false);
 pub const PEER_TO_PEER_ASYNC_CHECKPOINT: BoolFlag = Flag::new("peer-to-peer-async-checkpoint", false);
@@ -97,9 +106,64 @@ pub fn build_kernel_cmdline_args() -> StringFlag {
     Flag::new("build-kernel-cmdline-args", String::new())
 }
 
+pub fn envd_upgrade_target() -> StringFlag {
+    Flag::new("envd-upgrade-target", env_or("ENVD_UPGRADE_TARGET", "off"))
+}
+
+pub fn envd_offline_upgrade_target() -> StringFlag {
+    Flag::new(
+        "envd-offline-upgrade-target",
+        env_or("ENVD_OFFLINE_UPGRADE_TARGET", "off"),
+    )
+}
+
+pub fn envd_binary_cache() -> BoolFlag {
+    let development = matches!(env_or("ENVIRONMENT", "prod").as_str(), "dev" | "local");
+    Flag::new(
+        "envd-binary-cache",
+        bool_or(&env_or("ENVD_BINARY_CACHE", ""), development),
+    )
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
+
+fn bool_or(raw: &str, fallback: bool) -> bool {
+    match raw.is_empty() {
+        true => fallback,
+        false => crate::go_strconv::parse_bool(raw).unwrap_or(fallback),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bool_env_value_overrides_the_fallback_only_when_it_parses() {
+        for (name, raw, fallback, expected) in [
+            ("unset keeps the fallback", "", true, true),
+            ("unset keeps a false fallback", "", false, false),
+            ("true overrides a false fallback", "true", false, true),
+            ("false overrides a true fallback", "false", true, false),
+            ("1 is true", "1", false, true),
+            ("0 is false", "0", true, false),
+            ("garbage keeps the fallback", "yes-please", true, true),
+        ] {
+            assert_eq!(bool_or(raw, fallback), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_envd_upgrade_flags_follow_upstream_keys() {
+        assert_eq!(envd_upgrade_target().key, "envd-upgrade-target");
+        assert_eq!(envd_offline_upgrade_target().key, "envd-offline-upgrade-target");
+        assert_eq!(envd_binary_cache().key, "envd-binary-cache");
+    }
 
     #[test]
     fn keys_and_fallbacks_follow_upstream() {
