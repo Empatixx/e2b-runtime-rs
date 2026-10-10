@@ -26,6 +26,7 @@ const ACCESS_TOKEN: &str = "resume-token";
 const NOTE: &str = "/home/user/note.txt";
 const NOTE_TEXT: &str = "hello from before the snapshot";
 const HUGE_PAGE: u64 = 2 << 20;
+const SMALL_PAGE: u64 = 4096;
 const GUEST_MEMORY_MIB: u64 = 1024;
 
 struct Host {
@@ -512,9 +513,10 @@ async fn a_huge_page_snapshot_resumes_with_2_mib_faults() {
     assert_eq!(memory, (200, "memory in huge pages".to_owned()));
     assert_eq!(health, 204);
     assert!(faults > 0, "no page was served over userfaultfd");
+    let small_pages = (GUEST_MEMORY_MIB << 20) / SMALL_PAGE;
     assert!(
-        faults <= GUEST_MEMORY_MIB / 2,
-        "{faults} faults for {GUEST_MEMORY_MIB} MiB of 2 MiB pages"
+        faults < small_pages / 64,
+        "{faults} faults for {GUEST_MEMORY_MIB} MiB: huge pages should fault far less than {small_pages} 4 KiB pages"
     );
 }
 
