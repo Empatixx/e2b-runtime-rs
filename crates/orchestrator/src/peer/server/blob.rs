@@ -82,13 +82,18 @@ async fn stream_metadata(template: &Template) -> Result<Chunks, SourceError> {
 }
 
 async fn stream_header(template: &Template, file: HeaderFile) -> Result<Chunks, SourceError> {
-    let build = template
-        .build()
-        .await
-        .map_err(|e| SourceError::Failed(format!("get device: {e}")))?;
     let header = match file {
-        HeaderFile::Memfile => build.memfile,
-        HeaderFile::Rootfs => build.rootfs,
+        HeaderFile::Memfile => template
+            .durable_memfile_header()
+            .await
+            .map_err(|e| SourceError::Failed(format!("resolve durable header: {e}")))?,
+        HeaderFile::Rootfs => {
+            template
+                .build()
+                .await
+                .map_err(|e| SourceError::Failed(format!("get device: {e}")))?
+                .rootfs
+        }
     };
     if header.metadata.size == 0 {
         return Err(SourceError::NotAvailable);
@@ -109,7 +114,7 @@ async fn stream_header(template: &Template, file: HeaderFile) -> Result<Chunks, 
 
 #[cfg(test)]
 mod tests {
-    use futures::TryStreamExt;
+    use futures::{FutureExt, TryStreamExt};
     use uuid::Uuid;
 
     use super::*;
@@ -273,6 +278,35 @@ mod tests {
         let decoded = Header::decode(&joined(&collected(chunks).await)).unwrap();
         assert_eq!(decoded.metadata.version, VERSION_V5);
         assert_eq!(decoded.mappings, header(build_id, 4096).mappings);
+    }
+
+    #[tokio::test]
+    async fn the_durable_memfile_header_is_served_instead_of_the_provisional_one() {
+        let fixture = cache_fixture();
+        let build_id = Uuid::new_v4();
+        let snapfile = fixture.write_file("snapfile", b"x");
+        let provisional = Header {
+            incomplete_pending_upload: true,
+            ..header(build_id, 0)
+        };
+        fixture.add_template(build_id, provisional, &snapfile);
+        let deduped = Header {
+            incomplete_pending_upload: true,
+            ..header(build_id, 4096)
+        };
+        fixture
+            .cache
+            .templates
+            .lookup(build_id)
+            .unwrap()
+            .memfile_headers()
+            .set_durable(futures::future::ready(Ok(deduped.clone())).boxed());
+
+        let chunks = source(&fixture, build_id, "memfile.header").stream().await.unwrap();
+
+        let decoded = Header::decode(&joined(&collected(chunks).await)).unwrap();
+        assert_eq!(decoded.metadata.size, deduped.metadata.size);
+        assert_eq!(decoded.mappings, deduped.mappings);
     }
 
     #[tokio::test]

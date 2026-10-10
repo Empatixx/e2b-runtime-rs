@@ -5,10 +5,13 @@ use base64::Engine;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use redissun::{Client, Object, StringCodec};
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use super::publisher::{RouteStore, RoutingRecord};
 use crate::events::{EventSink, STREAM, SandboxEvent, delivery_key};
 use crate::peer::registry::{PeerRegistry, redis_key};
+use crate::peer::upload_done::{self, Outcome, UploadDone};
 
 const ROUTING_KEY_PREFIX: &str = "sandbox:routing:";
 const DEFAULT_POOL_SIZE: usize = 5;
@@ -135,6 +138,12 @@ impl Redis {
         }
     }
 
+    pub fn upload_done(&self) -> RedisUploadDone {
+        RedisUploadDone {
+            redis: self.client.clone(),
+        }
+    }
+
     pub fn event_stream(&self) -> EventStream {
         EventStream {
             redis: self.client.clone(),
@@ -181,6 +190,38 @@ impl PeerRegistry for RedisPeerRegistry {
     fn unregister(&self, build_id: &str) -> BoxFuture<'static, Result<(), String>> {
         let entry = self.redis.bucket::<String>(redis_key(build_id));
         async move { entry.get_del().await.map(|_| ()).map_err(|e| e.to_string()) }.boxed()
+    }
+}
+
+#[derive(Clone)]
+pub struct RedisUploadDone {
+    redis: Client<StringCodec>,
+}
+
+impl UploadDone for RedisUploadDone {
+    fn publish(&self, build_id: Uuid, error: Option<String>) -> BoxFuture<'static, ()> {
+        let topic = self.redis.topic::<String>(upload_done::channel(build_id));
+        async move {
+            if let Err(e) = topic.publish(upload_done::payload(&error)).await {
+                tracing::warn!(build = %build_id, error = %e, "failed to publish upload-done signal");
+            }
+        }
+        .boxed()
+    }
+
+    fn subscribe(&self, build_id: Uuid) -> BoxFuture<'static, Option<oneshot::Receiver<Outcome>>> {
+        let topic = self.redis.topic::<String>(upload_done::channel(build_id));
+        async move {
+            let mut subscriber = topic.subscribe().await.ok()?;
+            let (sender, receiver) = oneshot::channel();
+            tokio::spawn(async move {
+                if let Ok(payload) = subscriber.recv().await {
+                    let _ = sender.send(upload_done::outcome_of(payload));
+                }
+            });
+            Some(receiver)
+        }
+        .boxed()
     }
 }
 

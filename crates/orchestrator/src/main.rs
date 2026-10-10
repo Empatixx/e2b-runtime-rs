@@ -82,6 +82,7 @@ mod serve {
                     node.peers
                         .install(Arc::new(redis.peer_registry(address.clone())), address);
                 }
+                node.uploads.signal_through(Arc::new(redis.upload_done()));
                 event_sinks.push(Arc::new(redis.event_stream()));
             }
             None => tracing::warn!("redis disabled; orchestrator sandbox routing records are not published"),

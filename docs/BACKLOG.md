@@ -86,10 +86,8 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Peer reads record no `orchestrator.read.*` storage metrics yet, and peer channels carry no otelgrpc client stats | perf |
-| Headers go on the wire as V3 bytes; upstream sends V5 with `IncompletePendingUpload`, so a Go orchestrator cannot read a Rust peer header | later |
-| A peer transition re-reads from storage without reloading the header, because Rust headers have no V4 compression | later |
-| The wait for a parent that a peer still uploads polls storage on a timer; upstream also subscribes to a Redis upload-done channel | perf |
+| A peer transition re-reads the diff from storage with the header it already holds; the chunker reads only uncompressed objects, so a build a Go peer uploads compressed is unreadable after the transition (upstream reloads the header and its frame table) | later |
+| Nothing produces a provisional memfile header: the pause exports and dedups the memfile before the template is served, so the durable header API (`Template::durable_memfile_header`) always sees the final header | perf |
 
 ## Orchestrator: volumes
 

@@ -1,5 +1,6 @@
 pub mod atomic_write;
 pub mod cache;
+pub mod durable;
 pub mod metadata;
 pub mod optimize;
 
@@ -40,6 +41,7 @@ pub struct Template {
     build: OnceCell<Result<Build, TemplateError>>,
     metadata: OnceCell<Result<TemplateMetadata, TemplateError>>,
     updated_metadata: Mutex<Option<TemplateMetadata>>,
+    memfile_headers: durable::MemfileHeaders,
 }
 
 impl fmt::Debug for Template {
@@ -58,6 +60,7 @@ impl Template {
             build: OnceCell::new(),
             metadata: OnceCell::new(),
             updated_metadata: Mutex::new(None),
+            memfile_headers: durable::MemfileHeaders::default(),
         }
     }
 
@@ -70,6 +73,7 @@ impl Template {
             build: OnceCell::new_with(Some(Ok(build))),
             metadata: OnceCell::new_with(Some(Ok(metadata))),
             updated_metadata: Mutex::new(None),
+            memfile_headers: durable::MemfileHeaders::default(),
         }
     }
 
@@ -83,11 +87,16 @@ impl Template {
             build: OnceCell::new_with(Some(Ok(build))),
             metadata: OnceCell::new_with(Some(Ok(metadata))),
             updated_metadata: Mutex::new(None),
+            memfile_headers: durable::MemfileHeaders::default(),
         }
     }
 
     pub fn loaded_build(&self) -> Option<Build> {
-        self.build.get().and_then(|build| build.as_ref().ok()).cloned()
+        self.build
+            .get()
+            .and_then(|build| build.as_ref().ok())
+            .cloned()
+            .map(|build| self.memfile_headers.apply(build))
     }
 
     pub fn build_id(&self) -> Uuid {
@@ -107,7 +116,25 @@ impl Template {
     }
 
     pub async fn build(&self) -> Result<Build, TemplateError> {
+        self.stored_build().await.map(|build| self.memfile_headers.apply(build))
+    }
+
+    async fn stored_build(&self) -> Result<Build, TemplateError> {
         self.build.get_or_init(|| self.load_build()).await.clone()
+    }
+
+    pub fn memfile_headers(&self) -> &durable::MemfileHeaders {
+        &self.memfile_headers
+    }
+
+    pub async fn durable_memfile_header(&self) -> Result<Header, TemplateError> {
+        let live = self.stored_build().await?.memfile;
+        self.memfile_headers.durable(&live).await.map_err(TemplateError::Failed)
+    }
+
+    pub async fn durable_memfile_header_now(&self) -> Option<Header> {
+        let live = self.stored_build().await.ok()?.memfile;
+        self.memfile_headers.durable_now(&live)
     }
 
     pub async fn metadata(&self) -> Result<TemplateMetadata, TemplateError> {

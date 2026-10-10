@@ -2,6 +2,7 @@ pub mod endpoint;
 pub mod envd_defaults;
 pub mod fc;
 pub mod grpc;
+pub mod header_poll;
 pub mod identity;
 pub mod logs;
 pub mod metrics;

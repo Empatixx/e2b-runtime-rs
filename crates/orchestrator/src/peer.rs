@@ -9,6 +9,7 @@ pub mod seekable;
 pub mod server;
 pub mod stream;
 pub mod switch;
+pub mod upload_done;
 
 #[cfg(test)]
 pub(crate) mod testing;

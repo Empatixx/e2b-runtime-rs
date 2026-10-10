@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::retry::{Failure, retry};
 use crate::peer::parents::PeerParents;
+use crate::peer::upload_done::UploadDone;
 
 const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -27,6 +28,7 @@ pub struct Uploads {
     outcomes: Mutex<HashMap<Uuid, watch::Receiver<Outcome>>>,
     tasks: TaskTracker,
     peer_parents: OnceLock<PeerParents>,
+    upload_done: OnceLock<Arc<dyn UploadDone>>,
 }
 
 impl Uploads {
@@ -50,6 +52,7 @@ impl Uploads {
                     Err(e) => tracing::error!(build = %build_id, error = %e, "snapshot upload did not durably land"),
                 }
                 let outcome = settle(&sender, &uploaded);
+                uploads.announce(build_id, &uploaded).await;
                 uploads.forget_landed(build_id, outcome);
                 finished(outcome);
             }
@@ -70,6 +73,7 @@ impl Uploads {
             .await
             .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
         let outcome = settle(&sender, &uploaded);
+        self.announce(build_id, &uploaded).await;
         self.forget_landed(build_id, outcome);
         uploaded
     }
@@ -88,6 +92,16 @@ impl Uploads {
 
     pub fn follow_peers(&self, peer_parents: PeerParents) {
         let _ = self.peer_parents.set(peer_parents);
+    }
+
+    pub fn signal_through(&self, upload_done: Arc<dyn UploadDone>) {
+        let _ = self.upload_done.set(upload_done);
+    }
+
+    async fn announce(&self, build_id: Uuid, uploaded: &Result<(), String>) {
+        if let Some(upload_done) = self.upload_done.get() {
+            upload_done.publish(build_id, uploaded.as_ref().err().cloned()).await;
+        }
     }
 
     pub fn outcome(&self, build_id: Uuid) -> Option<Outcome> {
@@ -109,7 +123,7 @@ impl Uploads {
         let Some(peer_parents) = self.peer_parents.get().filter(|parents| parents.is_uploading(build_id)) else {
             return Outcome::Landed;
         };
-        match peer_parents.wait_for_headers(build_id).await {
+        match peer_parents.wait_for_headers(build_id, self.upload_done.get()).await {
             Ok(()) => Outcome::Landed,
             Err(e) => {
                 tracing::warn!(build = %build_id, error = %e, "peer upload of a parent did not land");
@@ -381,5 +395,24 @@ mod tests {
         let uploads = Arc::new(Uploads::default());
 
         assert_eq!(uploads.wait(id(5)).await, Outcome::Landed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_announces_its_outcome_to_the_other_orchestrators() {
+        let channels = Arc::new(crate::peer::upload_done::testing::Channels::default());
+        let uploads = Arc::new(Uploads::default());
+        uploads.signal_through(Arc::new(channels.clone()));
+
+        let _ = uploads
+            .run(id(1), Vec::new(), async {
+                Err(Failure::Retryable("bucket is gone".to_owned()))
+            })
+            .await;
+        let _ = uploads.run(id(2), Vec::new(), async { Ok(()) }).await;
+
+        assert_eq!(
+            *channels.published.lock(),
+            vec![(id(1), Some("bucket is gone".to_owned())), (id(2), None)]
+        );
     }
 }
