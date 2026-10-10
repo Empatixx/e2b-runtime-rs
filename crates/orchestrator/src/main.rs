@@ -53,6 +53,11 @@ mod serve {
             .await
             .map_err(|e| format!("failed to create feature flags client: {e}"))?;
         let config = config.with_feature_flags(feature_flags.clone());
+        orchestrator::sandbox_logs::install_external(
+            &config.logs_collector,
+            feature_flags.clone(),
+            &service_name(&config.services),
+        );
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }

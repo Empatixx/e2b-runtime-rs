@@ -1,3 +1,4 @@
+use crate::sandbox_logs::{SandboxMeta, external};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -258,11 +259,14 @@ impl SandboxServer {
             .report_critical("failed to mark sandbox as stopping", &sandbox_attribute(&id))?;
         let info = handle.info.lock().clone();
         let kill_reason = request.kill_reason.filter(|reason| !reason.is_empty());
+        let kill_reason = kill_reason.as_deref().unwrap_or("unknown");
         self.node.events.publish(
             SandboxEvent::new(KILLED, &event_sandbox(&info))
                 .with_execution(&execution(&info))
-                .with("kill_reason", json!(kill_reason.as_deref().unwrap_or("unknown"))),
+                .with("kill_reason", json!(kill_reason)),
         );
+        external(&SandboxMeta::of(&info.config)).info("Killing sandbox", vec![("kill_reason", json!(kill_reason))]);
+        handle.control_healthcheck().await;
         let _ = handle.commands.send(Command::Delete).await;
         Ok(Response::new(()))
     }
@@ -290,6 +294,7 @@ impl SandboxServer {
             .await
             .ok_or_else(|| Status::internal("failed to pause sandbox"))
             .report_critical("failed to mark sandbox as stopping", &sandbox_attribute(&id))?;
+        external(&SandboxMeta::of(&handle.info.lock().config)).info("Pausing sandbox", Vec::new());
         let filesystem_only = request
             .filesystem_only
             .then(|| self.node.quiesce_flags(&handle.info.lock().config));

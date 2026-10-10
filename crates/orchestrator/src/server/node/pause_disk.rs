@@ -12,6 +12,7 @@ use crate::featureflags::{FlagContext, memfile_diff_dedup, pause_admission_disk_
 use crate::firecracker::version::supports_memfd;
 use crate::memory::dedup::config::DedupConfig;
 use crate::proto::SandboxConfig;
+use crate::sandbox_logs::{SandboxMeta, external};
 use crate::server::pause_disk::{CaptureSize, DiskShort, MIB, PauseDiskReservation, rootfs_cache_bytes};
 use crate::server::registry::Lifecycle;
 use crate::telemetry::server::sandbox::record_pause_admission;
@@ -74,12 +75,17 @@ impl Node {
         self.build_disk
             .admit(headroom_mib, &size)
             .map(|reservation| reservation.map(Arc::new))
-            .map_err(|short| refused(sandbox_id, &config.team_id, &short))
+            .map_err(|short| refused(config, &short))
     }
 }
 
-fn refused(sandbox_id: &str, team_id: &str, short: &DiskShort) -> Status {
-    record_pause_admission(team_id, "pause", OUTCOME_REFUSED_DISK, Duration::ZERO);
+fn refused(config: &SandboxConfig, short: &DiskShort) -> Status {
+    let sandbox_id = &config.sandbox_id;
+    record_pause_admission(&config.team_id, "pause", OUTCOME_REFUSED_DISK, Duration::ZERO);
+    external(&SandboxMeta::of(config)).warn(
+        "Refusing pause: the node is short of disk for the snapshot, retry later",
+        Vec::new(),
+    );
     tracing::warn!(
         sandbox = %sandbox_id,
         need_bytes = short.need,

@@ -1,3 +1,5 @@
+use crate::sandbox_logs::{SandboxMeta, external};
+use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,6 +37,16 @@ pub struct ObservedSandbox {
     pub envd: SocketAddr,
     pub access_token: Option<String>,
     pub started_at: SystemTime,
+}
+
+impl ObservedSandbox {
+    fn log_meta(&self) -> SandboxMeta {
+        SandboxMeta {
+            sandbox_id: self.sandbox_id.clone(),
+            template_id: self.template_id.clone(),
+            team_id: self.team_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -178,14 +190,13 @@ fn warn_when_cpu_write_gets_stuck(
     let now_stuck = metrics.cpu_write_pending_ms >= CPU_WRITE_STUCK_MS;
     let was_stuck = stuck.insert(sandbox.sandbox_id.clone(), now_stuck).unwrap_or(false);
     if now_stuck && !was_stuck {
-        tracing::warn!(
-            sandbox_id = %sandbox.sandbox_id,
-            team_id = %sandbox.team_id,
-            template_id = %sandbox.template_id,
-            cpu_write_pending_ms = metrics.cpu_write_pending_ms,
-            cpu_online = metrics.cpu_count,
-            cpu_target = metrics.cpu_target,
-            "CPU hotplug write stuck in the guest kernel"
+        external(&sandbox.log_meta()).warn(
+            "CPU hotplug write stuck in the guest kernel",
+            vec![
+                ("cpu_write_pending_ms", json!(metrics.cpu_write_pending_ms)),
+                ("cpu_online", json!(metrics.cpu_count)),
+                ("cpu_target", json!(metrics.cpu_target)),
+            ],
         );
     }
 }
@@ -194,22 +205,22 @@ fn warn_on_thresholds(sandbox: &ObservedSandbox, metrics: &SandboxMetrics, memor
     if let Some((total, used)) = memory {
         let used_percent = (used as f64 / total as f64 * 10_000.0).floor() / 100.0;
         if used_percent >= MEMORY_THRESHOLD_PERCENT {
-            tracing::warn!(
-                sandbox_id = %sandbox.sandbox_id,
-                team_id = %sandbox.team_id,
-                mem_used_percent = used_percent,
-                mem_threshold_percent = MEMORY_THRESHOLD_PERCENT,
-                "Memory usage threshold exceeded"
+            external(&sandbox.log_meta()).warn(
+                "Memory usage threshold exceeded",
+                vec![
+                    ("mem_used_percent", json!(used_percent as f32)),
+                    ("mem_threshold_percent", json!(MEMORY_THRESHOLD_PERCENT as f32)),
+                ],
             );
         }
     }
     if metrics.cpu_used_percent >= CPU_THRESHOLD_PERCENT {
-        tracing::warn!(
-            sandbox_id = %sandbox.sandbox_id,
-            team_id = %sandbox.team_id,
-            cpu_used_percent = metrics.cpu_used_percent,
-            cpu_threshold_percent = CPU_THRESHOLD_PERCENT,
-            "CPU usage threshold exceeded"
+        external(&sandbox.log_meta()).warn(
+            "CPU usage threshold exceeded",
+            vec![
+                ("cpu_used_percent", json!(metrics.cpu_used_percent as f32)),
+                ("cpu_threshold_percent", json!(CPU_THRESHOLD_PERCENT as f32)),
+            ],
         );
     }
 }

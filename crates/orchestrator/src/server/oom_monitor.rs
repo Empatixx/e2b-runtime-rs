@@ -7,6 +7,8 @@ use tokio::task::JoinHandle;
 
 use crate::envd::body::decode_result;
 use crate::oom::{EnvdMetrics, OomKill, Watermark};
+use crate::sandbox_logs::{SandboxMeta, external};
+use serde_json::json;
 
 const SEED_TIMEOUT: Duration = Duration::from_secs(2);
 const SEED_ATTEMPTS: u32 = 5;
@@ -25,11 +27,11 @@ impl OomMonitor {
     pub fn start(
         envd: SocketAddr,
         access_token: Option<String>,
-        sandbox_id: String,
+        meta: SandboxMeta,
         watermark: SharedWatermark,
     ) -> Self {
         Self {
-            task: tokio::spawn(watch(envd, access_token, sandbox_id, watermark)),
+            task: tokio::spawn(watch(envd, access_token, meta, watermark)),
         }
     }
 }
@@ -40,7 +42,7 @@ impl Drop for OomMonitor {
     }
 }
 
-async fn watch(envd: SocketAddr, access_token: Option<String>, sandbox_id: String, watermark: SharedWatermark) {
+async fn watch(envd: SocketAddr, access_token: Option<String>, meta: SandboxMeta, watermark: SharedWatermark) {
     let client = reqwest::Client::new();
     let fetch = |timeout: Duration| {
         let request = client.get(format!("http://{envd}/metrics")).timeout(timeout);
@@ -59,7 +61,7 @@ async fn watch(envd: SocketAddr, access_token: Option<String>, sandbox_id: Strin
             Ok(kills) => watermark.lock().seed(&kills),
             Err(e) => {
                 watermark.lock().seed_failed();
-                log_seed_failure(&e, &sandbox_id);
+                log_seed_failure(&e, &meta.sandbox_id);
             }
         }
     }
@@ -67,7 +69,7 @@ async fn watch(envd: SocketAddr, access_token: Option<String>, sandbox_id: Strin
     loop {
         polls.tick().await;
         if let Ok(kills) = fetch(POLL_TIMEOUT).await {
-            report(&mut watermark.lock(), &kills, &sandbox_id);
+            report(&mut watermark.lock(), &kills, &meta);
         }
     }
 }
@@ -102,17 +104,19 @@ fn log_seed_failure(error: &str, sandbox_id: &str) {
     }
 }
 
-fn report(watermark: &mut Watermark, kills: &[OomKill], sandbox_id: &str) {
+fn report(watermark: &mut Watermark, kills: &[OomKill], meta: &SandboxMeta) {
     let unseen = watermark.unseen(kills);
-    unseen
-        .kills
-        .iter()
-        .for_each(|kill| tracing::warn!(sandbox_id, process = %kill.process, "Out of memory: process was killed"));
+    let log = external(meta);
+    unseen.kills.iter().for_each(|kill| {
+        log.warn(
+            "Out of memory: process was killed",
+            vec![("process", json!(kill.process))],
+        )
+    });
     if unseen.more > 0 {
-        tracing::warn!(
-            sandbox_id,
-            processes = unseen.more,
-            "Out of memory: at least this many more processes were killed"
+        log.warn(
+            "Out of memory: at least this many more processes were killed",
+            vec![("processes", json!(unseen.more))],
         );
     }
 }

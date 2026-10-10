@@ -37,6 +37,10 @@ Limity a přepínače pocházejí z **LaunchDarkly** se stejnými názvy flagů,
 
 S nastaveným `OTEL_COLLECTOR_GRPC_ENDPOINT` orchestrator exportuje **metriky, trace a logy** přes OTLP, se stejnými názvy metrik, jednotkami, názvy spanů a atributy jako orchestrator v Go, takže existující dashboardy fungují dál.
 
+## Logy sandboxu
+
+Logy, které uživatel u sandboxu vidí, node posílá na `LOGS_COLLECTOR_ADDRESS`, jeden řádek JSON na požadavek, stejně jako Go. Zahrnují kill, pauzu a checkpoint, odmítnuté pauzy a checkpointy, procesy zabité kvůli nedostatku paměti, CPU a paměť nad 80 % a zaseknutý zápis CPU hotplugu. Každých 20 sekund node volá `/health` v envd a sandbox, který začne nebo přestane selhávat, dostane také řádek. `logs-write-config` umí řádky poslat na jinou URL a zkopírovat je na shadow URL.
+
 ## Vypínání
 
 Po `SIGTERM` se node ohlásí jako vypínající se, počká 15 s (pokud není `ENVIRONMENT=local`), aby na něj API přestalo plánovat, nechá doběhnout běžící buildy šablon a pak čeká, dokud API neodstraní všechny sandboxy a nedoběhnou všechny uploady. `FORCE_STOP=true` čekání přeskočí.

@@ -37,6 +37,10 @@ Limits and switches come from **LaunchDarkly** with upstream's flag names, conte
 
 With `OTEL_COLLECTOR_GRPC_ENDPOINT` set, the orchestrator exports **metrics, traces and logs** over OTLP, with the metric names, units, span names and attributes the Go orchestrator uses, so existing dashboards keep working.
 
+## Sandbox logs
+
+The node writes the logs a user sees for a sandbox to `LOGS_COLLECTOR_ADDRESS`, one JSON line per request, like upstream. They cover the kill, the pause and the checkpoint, refused pauses and checkpoints, out of memory kills, CPU and memory above 80 % and a CPU hotplug write that hangs. Every 20 seconds the node calls envd's `/health`, and a sandbox that starts or stops failing it gets a line too. `logs-write-config` can send the lines to another URL and copy them to shadow URLs.
+
 ## Shutdown
 
 On `SIGTERM` the node reports itself as draining, waits 15 s (unless `ENVIRONMENT=local`) so the API stops scheduling to it, lets running template builds finish, then waits until the API has removed every sandbox and every upload has landed. `FORCE_STOP=true` skips the waits.

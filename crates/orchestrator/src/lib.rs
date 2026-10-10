@@ -31,6 +31,7 @@ pub mod routing;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 #[cfg(target_os = "linux")]
+pub mod sandbox_logs;
 pub mod sandbox_observer;
 pub mod server;
 pub mod storage;

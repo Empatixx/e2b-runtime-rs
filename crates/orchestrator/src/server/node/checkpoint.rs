@@ -1,6 +1,8 @@
 mod in_place;
 mod route;
 
+use crate::sandbox_logs::{SandboxMeta, external};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,9 +55,25 @@ impl Node {
         request: CheckpointRequest,
     ) -> Result<SchedulingMetadata, Status> {
         let _work = self.status.track_work();
-        self.admit_snapshot(&handle, "checkpoint", !request.filesystem_only)
-            .await?;
+        let config = handle.info.lock().config.clone();
+        if let Some(error) = self
+            .admit_snapshot(&handle, "checkpoint", !request.filesystem_only)
+            .await?
+        {
+            external(&SandboxMeta::of(&config)).warn(
+                "Refusing checkpoint: sandbox cannot be persisted",
+                vec![("error", json!(error))],
+            );
+            return Err(Status::failed_precondition(format!(
+                "sandbox '{}' cannot be persisted: {error}",
+                config.sandbox_id
+            )));
+        }
         let _permit = self.admission.acquire().await?;
+        external(&SandboxMeta::of(&config)).info(
+            "Checkpointing sandbox",
+            vec![("fs_only", json!(request.filesystem_only))],
+        );
         let lifecycle = handle.lifecycle();
         let id = lifecycle.sandbox_id.clone();
         let fs_only = request.filesystem_only;
@@ -107,7 +125,10 @@ impl Node {
         match admission.refusal {
             None => Ok(None),
             Some(Refusal::Pending) => {
-                tracing::warn!(sandbox = %config.sandbox_id, waited = ?admission.waited, "Refusing {rpc}: {PENDING_TEXT}");
+                external(&SandboxMeta::of(&config)).warn(
+                    &format!("Refusing {rpc}: {PENDING_TEXT}"),
+                    vec![("waited", json!(admission.waited.as_nanos() as u64))],
+                );
                 Err(Status::resource_exhausted(format!(
                     "node is busy persisting sandbox '{}', please retry",
                     config.sandbox_id
