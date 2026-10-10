@@ -2,7 +2,7 @@
 
 **The node side of the [E2B](https://e2b.dev) sandbox runtime, rewritten in Rust.** Firecracker microVMs that resume from a snapshot, run untrusted agent code and pause when the agent stops. Same APIs, file formats and behaviour as the [Go original](https://github.com/e2b-dev/runtime), so the official E2B SDKs work unchanged.
 
-[Documentation](website/content/docs) | [Blog](website/content/blog) | [Running a node](docs/running-a-node.md) | [Go parity](docs/PARITY.md) | [Known gaps](docs/BACKLOG.md)
+[Documentation](https://empatixx.github.io/e2b-runtime-rs/) | [Blog](https://empatixx.github.io/e2b-runtime-rs/en/blog/) | [Running a node](docs/running-a-node.md) | [Go parity](docs/PARITY.md) | [Known gaps](docs/BACKLOG.md)
 
 ## What it is
 
