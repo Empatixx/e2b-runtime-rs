@@ -4,11 +4,13 @@ pub mod reboot;
 pub mod resources;
 pub mod resume;
 pub mod snapshot;
+pub mod upgrade;
 pub mod vcpu_limit;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -21,6 +23,7 @@ use crate::builder::config::host_arch;
 use crate::cgroup::Cgroup;
 use crate::cgroup::cpu_limit::set_sandbox_cpu_limit;
 use crate::envd::cpus::verify_envd_cpu_count;
+use crate::envd::report::EnvdReport;
 use crate::envd::{self, ENVD_PORT};
 use crate::exposure::nbd::expose;
 use crate::firecracker::client::FirecrackerClient;
@@ -48,6 +51,7 @@ pub struct Sandbox {
     prefetch_summary: Option<PrefetchSummary>,
     resolved_vm_vcpus: i64,
     reinit: parking_lot::Mutex<Option<tokio_util::sync::DropGuard>>,
+    envd_report: parking_lot::Mutex<EnvdReport>,
 }
 
 impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
@@ -142,6 +146,7 @@ impl Sandbox {
             prefetch_stats: Arc::default(),
             prefetch_summary: None,
             reinit: parking_lot::Mutex::default(),
+            envd_report: parking_lot::Mutex::default(),
         }
     }
 
@@ -297,7 +302,11 @@ impl Sandbox {
     }
 
     pub async fn wait_for_envd(&mut self) -> Result<(), String> {
-        let deadline = Instant::now() + self.config.envd_timeout;
+        self.wait_for_envd_within(self.config.envd_timeout).await
+    }
+
+    pub async fn wait_for_envd_within(&mut self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
         let address = self.envd_address();
         let settings = self.config.envd.with_cpu_count(self.guest_cpu_count());
         let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;
@@ -308,6 +317,7 @@ impl Sandbox {
         let initialised = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
         self.phases.note("envd_attempts", initialised.attempts);
         self.verify_cpu_count(&initialised.cpus_header);
+        self.keep_report(initialised.report);
         Ok(())
     }
 

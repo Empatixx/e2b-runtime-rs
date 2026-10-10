@@ -19,6 +19,7 @@ const DEFAULT_INIT_PATH: &str = "/sbin/init";
 const DEFAULT_VCPUS: u32 = 2;
 const DEFAULT_MEMORY_MIB: u32 = 1024;
 const DEFAULT_ENVD_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_SANDBOX_TYPE: &str = "sandbox";
 
 pub type Held = Box<dyn std::any::Any + Send + Sync>;
 
@@ -68,6 +69,9 @@ pub struct SandboxConfig {
     pub huge_pages: bool,
     pub hyperloop_ip: Option<String>,
     pub cgroup_name: String,
+    pub sandbox_type: String,
+    pub workdir_withheld: bool,
+    pub throwaway: bool,
 }
 
 impl SandboxConfig {
@@ -116,6 +120,9 @@ impl SandboxConfig {
         #[builder(default = true)] use_memfd: bool,
         #[builder(default)] huge_pages: bool,
         hyperloop_ip: Option<String>,
+        #[builder(default = DEFAULT_SANDBOX_TYPE.to_owned())] sandbox_type: String,
+        #[builder(default)] workdir_withheld: bool,
+        #[builder(default)] throwaway: bool,
     ) -> Self {
         Self {
             cgroup_name: format!("sbx-{id}-{}", Uuid::new_v4().simple()),
@@ -154,6 +161,9 @@ impl SandboxConfig {
             use_memfd,
             huge_pages,
             hyperloop_ip,
+            sandbox_type,
+            workdir_withheld,
+            throwaway,
         }
     }
 }

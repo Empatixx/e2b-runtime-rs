@@ -62,7 +62,7 @@ impl SandboxService for SandboxServer {
             fs_only: created.as_ref().is_ok_and(|created| created.filesystem_only),
             fs_boot_requested,
             success: created.is_ok(),
-            envd_upgraded: false,
+            envd_upgraded: created.as_ref().is_ok_and(|created| created.envd_upgraded),
             fs_recovery: FS_RECOVERY_NONE.to_owned(),
             team_id,
         }
@@ -141,6 +141,7 @@ impl SandboxServer {
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
         Ok(CreatedResponse {
             filesystem_only: created.filesystem_only,
+            envd_upgraded: created.envd_upgraded,
             response: Response::new(SandboxCreateResponse {
                 client_id: self.node.node_id.clone(),
                 scheduling_metadata: Some(created.scheduling),
@@ -389,6 +390,7 @@ fn sandbox_attribute(id: &str) -> [KeyValue; 1] {
 struct CreatedResponse {
     response: Response<SandboxCreateResponse>,
     filesystem_only: bool,
+    envd_upgraded: bool,
 }
 
 fn report_create_failure(created: &Result<CreatedResponse, Status>) {

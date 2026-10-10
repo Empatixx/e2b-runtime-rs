@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use self::route::{BalloonMode, balloon_route, early_route};
 use super::prefetch::pause_contexts as flag_contexts;
-use super::{Lifetime, Node, StartRequest, event_sandbox, routed_sandbox};
+use super::{Lifetime, Node, StartFailure, StartRequest, event_sandbox, routed_sandbox};
 use crate::events::{CHECKPOINTED, SandboxEvent};
 use crate::featureflags::{
     DEFER_MEMORY_EXPORT, FILESYSTEM_ONLY_CHECKPOINT, IN_PLACE_CHECKPOINT, IN_PLACE_CHECKPOINT_REPORTING,
@@ -194,14 +194,16 @@ impl Node {
                 lifecycle: lifecycle.clone(),
                 oom_watermark: parent.oom_watermark.clone(),
                 throwaway: false,
+                upgrade_envd: true,
             })
             .await
             .inspect_err(|_| drop(std::fs::remove_dir_all(self.work_dir_of(&lifecycle))))
-            .map_err(|failure| {
-                Status::internal(format!(
+            .map_err(|failure| match failure {
+                StartFailure::Unrecoverable(message) => Status::unknown(message),
+                failure => Status::internal(format!(
                     "error resuming sandbox after checkpoint: {}",
                     failure.message()
-                ))
+                )),
             })?;
         self.register(&lifecycle, &started)
             .await
@@ -412,6 +414,7 @@ mod tests {
                 execution_id: "execution-1".to_owned(),
             },
             host_ip: Ipv4Addr::LOCALHOST,
+            envd_upgraded: false,
             slot: Slot::new(41).unwrap(),
             scheduling: SchedulingMetadata::default(),
             template: Arc::new(Template::filesystem_layer(

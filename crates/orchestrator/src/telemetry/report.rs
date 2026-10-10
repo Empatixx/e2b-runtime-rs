@@ -19,6 +19,16 @@ fn exception(message: &str, error: Option<&str>, attributes: &[KeyValue]) -> Vec
     event
 }
 
+pub fn record_exception(error: &str) {
+    Span::current().add_event(
+        EXCEPTION_EVENT,
+        vec![
+            KeyValue::new("exception.type", EXCEPTION_TYPE),
+            KeyValue::new("exception.message", error.to_owned()),
+        ],
+    );
+}
+
 pub fn report_critical_error(message: &str, error: Option<&str>, attributes: &[KeyValue]) {
     tracing::error!(error = error.unwrap_or_default(), "{message}");
     let span = Span::current();

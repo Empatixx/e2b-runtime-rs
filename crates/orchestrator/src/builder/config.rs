@@ -25,6 +25,7 @@ const DEFAULT_FIRECRACKER_VERSION: &str = "v1.14-0.2.0";
 pub struct BuilderConfig {
     pub busybox: PathBuf,
     pub envd: PathBuf,
+    pub base_path: PathBuf,
     pub templates_dir: PathBuf,
     pub provider: String,
     pub target_arch: String,
@@ -61,6 +62,7 @@ impl BuilderConfig {
             .iter()
             .collect(),
             envd: absolute(var("HOST_ENVD_PATH", DEFAULT_ENVD_PATH).into()),
+            base_path: var("ORCHESTRATOR_BASE_PATH", DEFAULT_BASE_PATH).into(),
             templates_dir: absolute(with_base("TEMPLATES_DIR", DEFAULT_TEMPLATES_DIR).into()),
             provider: var("PROVIDER", DEFAULT_PROVIDER),
             target_arch: target_arch(vars.get("TARGET_ARCH").map(String::as_str)),

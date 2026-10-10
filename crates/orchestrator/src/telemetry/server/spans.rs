@@ -84,6 +84,23 @@ pub fn execution(config: &SandboxConfig, prefetch: Option<&PrefetchSummary>, ini
     span
 }
 
+pub fn envd_upgrade(from_version: &str, to_version: &str) -> Span {
+    info_span!(
+        "envd-upgrade",
+        "envd.from_version" = from_version,
+        "envd.to_version" = to_version,
+        "envd.observed_version" = Empty,
+        "envd.upgraded" = Empty,
+        "envd.handover.failed" = Empty,
+        "envd.handover.procs" = Empty,
+        "envd.handover.procs_failed" = Empty,
+        "envd.handover.retained" = Empty,
+        "envd.handover.retained_failed" = Empty,
+        "envd.handover.watchers" = Empty,
+        "envd.handover.watchers_failed" = Empty,
+    )
+}
+
 pub fn record_balloon_mode() {
     record(&Span::current(), "balloon_mode", BALLOON_MODE_UNKNOWN);
 }

@@ -5,6 +5,7 @@ use pause_disk::ROOTFS_OVERLAY_FILE;
 use reboot::RebootRequest;
 pub mod prefetch;
 mod reboot;
+mod upgrade;
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -39,6 +40,7 @@ use super::vcpus::{filesystem_boot, validate_cold_boot_vcpus};
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
+use crate::envd::upgrade::rollout::EnvdUpgrades;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::featureflags::{FeatureFlags, FlagContext, memfile_diff_dedup};
@@ -61,7 +63,7 @@ use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::config::sandbox_builder::{
-    SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetTemplateId, SetWorkDir,
+    SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetSandboxType, SetTemplateId, SetWorkDir,
 };
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
@@ -81,7 +83,8 @@ pub(super) const SANDBOX_TYPE: &str = "sandbox";
 pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
-pub type BaseSandbox = SetHugePages<SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>>;
+pub type BaseSandbox =
+    SetHugePages<SetSandboxType<SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>>>;
 
 pub struct Node {
     pub node_id: String,
@@ -113,6 +116,7 @@ pub struct Node {
     work_dir: PathBuf,
     runtime_flags: RuntimeFlags,
     orchestrator_ip: String,
+    envd_upgrades: EnvdUpgrades,
 }
 
 struct ResumeRequest<'a> {
@@ -125,6 +129,8 @@ struct ResumeRequest<'a> {
     slot: Slot,
     init: EnvdInit,
     lifecycle: &'a Lifecycle,
+    workdir_withheld: bool,
+    throwaway: bool,
 }
 
 struct StartRequest {
@@ -134,10 +140,12 @@ struct StartRequest {
     lifecycle: Lifecycle,
     oom_watermark: SharedWatermark,
     throwaway: bool,
+    upgrade_envd: bool,
 }
 
 enum StartFailure {
     Rejected(Status),
+    Unrecoverable(String),
     Template(TemplateError),
     Failed(String),
 }
@@ -146,6 +154,7 @@ impl StartFailure {
     fn create_status(self, sandbox_id: &str) -> Status {
         match self {
             StartFailure::Rejected(status) => status,
+            StartFailure::Unrecoverable(message) => Status::unknown(message),
             StartFailure::Template(TemplateError::NotFound(_)) => {
                 Status::failed_precondition(format!("sandbox files for '{sandbox_id}' not found"))
             }
@@ -159,7 +168,7 @@ impl StartFailure {
         match self {
             StartFailure::Rejected(status) => status.message().to_owned(),
             StartFailure::Template(e) => e.to_string(),
-            StartFailure::Failed(e) => e.clone(),
+            StartFailure::Failed(e) | StartFailure::Unrecoverable(e) => e.clone(),
         }
     }
 }
@@ -184,6 +193,7 @@ pub struct Created {
     pub scheduling: SchedulingMetadata,
     pub filesystem_booted: bool,
     pub filesystem_only: bool,
+    pub envd_upgraded: bool,
 }
 
 impl Node {
@@ -235,6 +245,11 @@ impl Node {
             work_dir: config.work_dir.clone(),
             runtime_flags: config.runtime_flags.clone(),
             orchestrator_ip: config.orchestrator_ip.clone(),
+            envd_upgrades: EnvdUpgrades::new(
+                config.builder.envd.clone(),
+                &config.builder.base_path,
+                config.feature_flags.clone(),
+            ),
         })
     }
 
@@ -250,6 +265,7 @@ impl Node {
             .start_refresh(self.feature_flags.clone(), LIMIT_REFRESH_INTERVAL);
         self.network.start();
         self.upload_limiter.start_refresh();
+        self.envd_upgrades.start_warm();
         tokio::spawn(self.templates.clone().run_eviction());
         let runtime_flags = self.runtime_flags.clone();
         tokio::spawn(
@@ -363,6 +379,7 @@ impl Node {
             .kernel(self.binaries.kernel_for(&self.build_kernel_version))
             .work_dir(self.work_dir.join(sandbox_id))
             .hyperloop_ip(&self.orchestrator_ip)
+            .sandbox_type(BUILD_SANDBOX_TYPE)
             .huge_pages(supports_huge_pages(&self.build_firecracker_version))
             .envd(self.build_envd(EnvdDefaults::default()))
     }
@@ -505,6 +522,7 @@ impl Node {
             };
             let _permit = self.admission.admit(self.registry.running().len(), kind).await?;
             let template = self.template_of(&config)?;
+            let config_snapshot = config.snapshot;
             self.start_with(
                 StartRequest {
                     template,
@@ -513,6 +531,7 @@ impl Node {
                     lifecycle: lifecycle.clone(),
                     oom_watermark: SharedWatermark::default(),
                     throwaway: false,
+                    upgrade_envd: config_snapshot,
                 },
                 filesystem_boot_requested,
             )
@@ -542,6 +561,7 @@ impl Node {
                         scheduling: info.scheduling,
                         filesystem_booted,
                         filesystem_only: info.metadata.as_ref().is_some_and(|metadata| metadata.filesystem_only),
+                        envd_upgraded: info.envd_upgraded,
                     }
                 }),
             Err(status) => {
@@ -626,6 +646,7 @@ impl Node {
             lifecycle,
             oom_watermark,
             throwaway,
+            upgrade_envd,
         } = request;
         let files = async {
             let (build, snapfile) =
@@ -670,6 +691,10 @@ impl Node {
             default_user: default_user(metadata.as_ref()),
             ..EnvdInit::default()
         };
+        let workdir_withheld = init.default_workdir.is_none()
+            && metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.context.workdir.is_some());
         let mut metadata = metadata;
         let sandbox = match filesystem_booted {
             true => {
@@ -709,11 +734,14 @@ impl Node {
                     slot,
                     init,
                     lifecycle: &lifecycle,
+                    workdir_withheld,
+                    throwaway,
                 })
                 .await
                 .map_err(|e| resume_failure(&config, &build, e))?
             }
         };
+        let (sandbox, envd_upgraded) = self.upgraded(sandbox, &config, upgrade_envd).await?;
         let slot = lease.keep().ok_or_else(slot_taken_back)?;
         Ok(lifecycle::spawn(
             sandbox,
@@ -730,10 +758,29 @@ impl Node {
                 scheduling: from_headers(build.rootfs.metadata.build_id, Some(&build.memfile), &build.rootfs, 0),
                 started_at: SystemTime::now(),
                 oom_watermark,
+                envd_upgraded,
             },
             self.clone(),
             throwaway,
         ))
+    }
+
+    async fn upgraded(
+        &self,
+        mut sandbox: Sandbox,
+        config: &SandboxConfig,
+        upgrade_envd: bool,
+    ) -> Result<(Sandbox, bool), StartFailure> {
+        if !upgrade_envd {
+            return Ok((sandbox, false));
+        }
+        match self.maybe_upgrade_envd(&mut sandbox, config).await {
+            Ok(upgraded) => Ok((sandbox, upgraded)),
+            Err(error) => {
+                let _ = sandbox.stop().await;
+                Err(StartFailure::Unrecoverable(error))
+            }
+        }
     }
 
     fn template_of(&self, config: &SandboxConfig) -> Result<Arc<Template>, Status> {
@@ -756,6 +803,8 @@ impl Node {
             slot,
             init,
             lifecycle,
+            workdir_withheld,
+            throwaway,
         } = request;
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
@@ -799,6 +848,8 @@ impl Node {
                     )),
             )
             .hyperloop_ip(&self.orchestrator_ip)
+            .workdir_withheld(workdir_withheld)
+            .throwaway(throwaway)
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await

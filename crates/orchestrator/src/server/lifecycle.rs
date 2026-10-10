@@ -47,6 +47,7 @@ pub struct SandboxInfo {
     pub template: Arc<Template>,
     pub started_at: SystemTime,
     pub oom_watermark: SharedWatermark,
+    pub envd_upgraded: bool,
 }
 
 pub enum Command {

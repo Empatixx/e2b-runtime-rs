@@ -105,6 +105,12 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        pages, Prefaulter), snapshot.rs (memfile export from the memfd or process_vm_readv),
                        trace.rs (PrefetchTracker, Trace intersection), prefetch.rs + prefetch/ (source.rs init/last-cycle/both,
                        last_cycle.rs, plan.rs, flags.rs worker settings)
+  src/envd/upgrade/    resume-time envd live upgrade: target.rs (flag target, candidate, resolve), rollout.rs (EnvdUpgrades: node-local
+                       binary cache at <base>/envdbin, startup warm, plan: flag, old_envd gate, resolve, exec-context gate, cached copy),
+                       gate.rs (decline reasons), phase.rs (phase labels), deliver.rs (POST /upgrade to envd); envd/report.rs
+                       (X-Envd-Version, -Handover, -Defaults headers of /init); sandbox/upgrade.rs (Sandbox keeps the report, compares
+                       defaults, call_envd_upgrade); server/node/upgrade.rs (Node::maybe_upgrade_envd: deliver, wait ready, confirm,
+                       handover metrics, called by start_with); telemetry/envd_defaults.rs (orchestrator.envd.defaults.* counters)
   src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0);
                        envd/process.rs (Connect process.Start client, bash -l -c as a user), body.rs (bounded reads of
                        guest responses), cpus.rs (X-Envd-Cpus check),

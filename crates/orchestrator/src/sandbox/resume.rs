@@ -38,6 +38,7 @@ impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
 
 impl Sandbox {
     async fn start_resumed(&mut self, snapfile: &Path) -> Result<(), String> {
+        self.record_envd_defaults();
         self.resolved_vm_vcpus = resume_vm_vcpus(
             i64::from(self.config.vcpus),
             i64::from(self.config.max_vcpus),

@@ -4,6 +4,7 @@ pub mod cpus;
 pub mod files;
 pub mod process;
 pub mod quiesce;
+pub mod report;
 pub mod upgrade;
 pub mod version;
 
@@ -11,6 +12,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use self::report::EnvdReport;
 use crate::go_time::rfc3339_nano;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -51,6 +53,7 @@ pub struct EnvdInit {
 pub struct Initialised {
     pub attempts: u32,
     pub cpus_header: String,
+    pub report: EnvdReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -112,6 +115,7 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
                 return Ok(Initialised {
                     attempts,
                     cpus_header: response.cpus_header,
+                    report: response.report,
                 });
             }
             Ok(response) => {
@@ -134,6 +138,7 @@ struct InitResponse {
     status: u16,
     body: String,
     cpus_header: String,
+    report: EnvdReport,
 }
 
 async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<InitResponse, String> {
@@ -162,6 +167,7 @@ async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<InitRespo
     let cpus_header = response.headers().get(CPUS_HEADER).map_or_else(String::new, |value| {
         String::from_utf8_lossy(value.as_bytes()).into_owned()
     });
+    let report = EnvdReport::from_headers(response.headers());
     let body = match status {
         204 => String::new(),
         _ => body::error_body(BodyDataStream::new(response.into_body())).await,
@@ -170,6 +176,7 @@ async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<InitRespo
         status,
         body,
         cpus_header,
+        report,
     })
 }
 

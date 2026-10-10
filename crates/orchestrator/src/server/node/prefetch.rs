@@ -158,6 +158,7 @@ impl HarvestResumer for ThrowawayHost {
                 lifecycle,
                 oom_watermark: SharedWatermark::default(),
                 throwaway: true,
+                upgrade_envd: false,
             })
             .await
             .map_err(|failure| failure.message())?;

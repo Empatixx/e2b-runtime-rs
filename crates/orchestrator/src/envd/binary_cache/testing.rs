@@ -324,3 +324,13 @@ impl Drop for OnDrop {
         }
     }
 }
+
+impl Cache {
+    pub fn state_has_copy(&self, source: &Path) -> bool {
+        self.state
+            .lock()
+            .entries
+            .get(source)
+            .is_some_and(|entry| entry.local_path.exists())
+    }
+}
