@@ -201,7 +201,7 @@ impl TemplateMetadata {
         Self {
             prefetch: Some(Prefetch {
                 memory,
-                origin: Some(origin.to_owned()),
+                origin: Some(origin).filter(|origin| !origin.is_empty()).map(str::to_owned),
             }),
             filesystem_only: false,
             fs_quiesced: false,

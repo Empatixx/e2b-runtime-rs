@@ -12,7 +12,7 @@ use super::{
 };
 use crate::proto::SandboxConfig;
 use crate::storage::backend::ObjectMetadata;
-use crate::template::metadata::{MemoryPrefetch, TemplateMetadata};
+use crate::template::metadata::{MemoryPrefetch, PREFETCH_ORIGIN_HARVEST, TemplateMetadata};
 
 pub struct HarvestJob {
     pub config: SandboxConfig,
@@ -100,7 +100,7 @@ impl PrefetchHarvester {
         deadline: Instant,
         landed: bool,
     ) -> Result<(), String> {
-        let metadata = job.metadata.with_prefetch(Some(mapping));
+        let metadata = job.metadata.with_prefetch(Some(mapping), PREFETCH_ORIGIN_HARVEST);
         let local = self.update_local(job, &metadata, deadline).await;
         if local.as_ref().is_err_and(|e| !e.committed) {
             return Err(local_message(&local));

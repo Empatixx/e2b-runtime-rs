@@ -11,7 +11,7 @@ use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta};
 use crate::memory::trace::Trace;
 use crate::server::node::layers::LayerSource;
-use crate::template::metadata::{MemoryPrefetch, TemplateMetadata};
+use crate::template::metadata::{MemoryPrefetch, PREFETCH_ORIGIN_BUILD, TemplateMetadata};
 use crate::template::optimize::collect_prefetch;
 
 const OPTIMIZE: &str = "optimize";
@@ -67,7 +67,7 @@ impl OptimizePhase {
         mapping: Option<MemoryPrefetch>,
     ) -> TemplateMetadata {
         let block_count = mapping.as_ref().map_or(0, |mapping| mapping.indices.len());
-        let updated = source.with_prefetch(mapping);
+        let updated = source.with_prefetch(mapping, PREFETCH_ORIGIN_BUILD);
         let object_metadata = executor.object_metadata(BUILD_ORIGIN);
         match self
             .build

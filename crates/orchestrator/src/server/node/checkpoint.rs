@@ -18,6 +18,7 @@ use crate::server::registry::{Lifecycle, StopReserved};
 use crate::server::scheduling::from_headers;
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
+use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
 use crate::telemetry::report::{ReportStatus, report_critical_error};
 use crate::telemetry::server::sandbox::CheckpointOutcome;
 use crate::telemetry::server::spans;
@@ -176,7 +177,7 @@ impl Node {
         let updated = template
             .metadata()
             .await
-            .map(|metadata| metadata.with_prefetch(Some(prefetch)));
+            .map(|metadata| metadata.with_prefetch(Some(prefetch), PREFETCH_ORIGIN_CHECKPOINT));
         let written = updated.map_err(|e| e.to_string()).and_then(|metadata| {
             std::fs::write(super::metadata_path(local), metadata.to_json())
                 .map(|()| template.update_metadata(metadata))
