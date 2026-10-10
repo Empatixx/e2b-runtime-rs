@@ -9,6 +9,8 @@ Our target is to resume a sandbox in about 150 ms on bare metal, like upstream E
 
 A memory snapshot can be gigabytes. The orchestrator does not copy it before the guest starts. Firecracker maps the guest RAM empty, and the memory server (`memory::server`) fills each page through userfaultfd the first time the guest touches it. See [Memory](../orchestrator/memory/).
 
+Templates use 2 MiB huge pages, like upstream. One fault then fills 2 MiB instead of 4 KiB, so a resume takes about 60 faults instead of about 7000.
+
 The rootfs works the same way. The guest disk is a copy-on-write overlay, and a block is read from the build only when the guest asks for it. See [Block devices](../orchestrator/block-devices/).
 
 ## Resume: start the slow steps at the same time
@@ -28,8 +30,9 @@ flowchart LR
 `} />
 
 - The **prefetch** task starts first. It downloads the recorded pages while Firecracker is still starting.
-- **NBD** and **Firecracker** start together with `tokio::join!`. Firecracker gets a symlink, `rootfs.link`, that points at `/dev/null`. When the NBD device is ready, the link is replaced in one atomic rename.
-- **Loading the snapshot** and the **userfaultfd handshake** run at the same time. Firecracker connects to the memory server while it loads.
+- **NBD** and **Firecracker** start together. NBD runs in its own task, so its setup does not delay the spawn. Firecracker gets a symlink, `rootfs.link`, that points at `/dev/null`. When the NBD device is ready, the link is replaced in one atomic rename.
+- **Firecracker is born inside its cgroup** (`clone3` with `CLONE_INTO_CGROUP`, in `firecracker::process::child`), as upstream does. Moving the process into the cgroup afterwards cost 3 to 7 ms and sometimes 250 ms.
+- **Loading the snapshot** and the **userfaultfd handshake** run at the same time. Firecracker connects to the memory server while it loads, and the prefetch starts installing pages at that moment.
 
 ## Resume: keep slow resources ready
 
@@ -49,6 +52,7 @@ Build files are read from object storage in 4 MiB chunks (`block::chunker`). The
 - **One download per chunk.** The first reader starts the download. Every other reader of the same chunk waits for that download instead of starting its own.
 - **Readers do not wait for the whole chunk.** The download writes data into the cache in page-aligned batches of at least 16 KiB. A reader continues as soon as its own bytes are in the cache.
 - **Cached data stays.** A second sandbox from the same build reads the local file and does not download again.
+- **Reads go through an mmap**, like upstream. A fault and the prefetch install pages straight from the mapped cache file, with no extra copy.
 
 ## Prefetch: fetch what the guest will touch
 
@@ -94,4 +98,6 @@ The [blog post](../../../blog/envd-rust-vs-go/) has the method, the numbers and 
 
 ## Where we are
 
-On GitHub Actions, inside nested virtualization, a resume takes 0.8 to 2.4 seconds. That runner is far slower than bare metal, so it does not show the 150 ms target. Some upstream optimizations are not ported yet: NBD over generic netlink with several connections, in-place pause, huge pages and peer-to-peer chunk transfer between nodes. The list is in `docs/BACKLOG.md`.
+On an Azure node with nested virtualization (4 vCPUs), a resume takes p50 51 ms against 321 ms for the Go orchestrator on the same template. The method and the numbers are in the [blog post](../../../blog/orchestrator-resume-rust-vs-go/). The gRPC server sets `TCP_NODELAY`, as Go does, so a `Create` reply does not wait for a delayed ACK.
+
+NBD connects with ioctls, not with upstream's generic netlink: a netlink connect right after a device is released waits 100 to 250 ms in the kernel. Open items, such as multi-connection NBD and a real-Firecracker test of the in-place pause, are in `docs/BACKLOG.md`.

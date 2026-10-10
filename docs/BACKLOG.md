@@ -9,14 +9,13 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| udev/blkid probing a just-disconnected `/dev/nbdN` can still reset the next owner's size; upstream uses netlink connect | perf |
+| udev/blkid probing a just-disconnected `/dev/nbdN` can still reset the next owner's size. The `nowatch` udev rule from `scripts/ci/nbd-host.sh` stops the inotify probes; the kernel's own change events are still probed | perf |
 
 ## Orchestrator: resume (M6)
 
 | Item | Target |
 |---|---|
-| Huge-page (2 MiB) templates: the server handles the region page size, but CI reserves no hugetlb pages and nothing tests it | perf |
-| Faults are served one page at a time; no read-ahead of neighbouring pages into the guest | perf |
+| Builds use 2 MiB huge pages, but CI reserves no hugetlb pages, so no CI test resumes a huge-page template | perf |
 | The uffd handshake socket is `0777` (upstream parity); `0600` would do, since Firecracker runs as root | API |
 
 ## Orchestrator: pause (M7)
@@ -32,7 +31,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| `VolumeService`, `ChunkService` and the cmux HTTP side are not served | API |
 | Local expiry is opt-in (`E2B_LOCAL_EXPIRY=1`); default leaves expiry and auto-pause to the API evictor like upstream | API |
 | Startup sweep removes every `ns-<N>` netns and all of `/sys/fs/cgroup/e2b/*` and `E2B_WORK_DIR`; assumes a dedicated node | API |
 
@@ -41,21 +39,14 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Matters from |
 |---|---|
 | Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | perf |
-| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn. A netlink port was measured on the Azure test node and reverted: a CONNECT right after a device is released stalls 100 to 250 ms (upstream shows the same stall in its slow resumes), while the ioctl connect takes about 17 ms. The fixed port (one shared netlink connection on its own thread, upstream's close order) is kept outside the repository in `~/e2b-azure/nbd-netlink/` on the maintainer's machine | perf |
+| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn. A netlink port was measured and reverted, see [performance-resume.md](performance-resume.md#tried-and-dropped); the fixed port is kept outside the repository on the maintainer's machine | perf |
 
 ## Orchestrator: async pause (M11)
 
 | Item | Matters from |
 |---|---|
-| No peer-to-peer chunk routing (`ChunkService`): another node resuming a build whose upload is still running gets `FailedPrecondition` | API |
 | A failed upload is only logged; upstream also counts it in a metric and keeps the template marked for the superseded-release logic | API |
 | A process that exits during forced shutdown before starting sandboxes finish leaves their slots and cgroups to the next startup sweep | API |
-
-## Orchestrator: prefetch (M12)
-
-| Item | Matters from |
-|---|---|
-| Huge pages (2 MiB) and `use_sync_wp` are not used | template build |
 
 ## Orchestrator: template builder (M13 to M16)
 

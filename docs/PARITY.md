@@ -60,6 +60,8 @@ These paths are off by default upstream. We follow the default:
 
 Not ported yet: the envd `oom_kills` metric in envd-rs.
 
+Different on purpose: NBD devices connect with ioctls, not generic netlink. A netlink connect right after a device is released waits 100 to 250 ms in the kernel, the same wait upstream shows in its slow resumes, while the ioctl connect takes about 17 ms ([performance-resume.md](performance-resume.md#tried-and-dropped)).
+
 One fragile spot: a rate-limited GCS write is recognised by object_store's `Server returned non-2xx status code: 429` text, because its error types are private.
 
 ## Deliberate rulings where Go is nondeterministic

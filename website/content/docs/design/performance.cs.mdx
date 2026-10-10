@@ -9,6 +9,8 @@ Naším cílem je probudit sandbox na bare metalu zhruba za 150 ms, stejně jako
 
 Snapshot paměti může mít gigabajty. Orchestrator ho před startem hosta nekopíruje. Firecracker namapuje RAM hosta prázdnou a paměťový server (`memory::server`) doplní každou stránku přes userfaultfd, až na ni host poprvé sáhne. Viz [Paměť](../orchestrator/memory/).
 
+Šablony používají huge pages 2 MiB, stejně jako upstream. Jeden výpadek pak načte 2 MiB místo 4 KiB, takže probuzení potřebuje asi 60 výpadků místo asi 7000.
+
 Rootfs funguje stejně. Disk hosta je copy-on-write overlay a blok se z buildu čte, až když o něj host požádá. Viz [Bloková zařízení](../orchestrator/block-devices/).
 
 ## Probuzení: pomalé kroky spustit naráz
@@ -28,8 +30,9 @@ flowchart LR
 `} />
 
 - Úloha **prefetch** startuje první. Stahuje zaznamenané stránky, zatímco se Firecracker teprve spouští.
-- **NBD** a **Firecracker** startují spolu přes `tokio::join!`. Firecracker dostane symlink `rootfs.link`, který ukazuje na `/dev/null`. Když je NBD zařízení připravené, odkaz se nahradí jedním atomickým přejmenováním.
-- **Načtení snapshotu** a **handshake userfaultfd** běží současně. Firecracker se k paměťovému serveru připojí během načítání.
+- **NBD** a **Firecracker** startují spolu. NBD běží ve vlastním tasku, takže jeho příprava nezdržuje spuštění Firecrackeru. Firecracker dostane symlink `rootfs.link`, který ukazuje na `/dev/null`. Když je NBD zařízení připravené, odkaz se nahradí jedním atomickým přejmenováním.
+- **Firecracker vzniká rovnou ve své cgroup** (`clone3` s `CLONE_INTO_CGROUP`, v `firecracker::process::child`), stejně jako u upstreamu. Dodatečný přesun procesu do cgroup stál 3 až 7 ms a někdy i 250 ms.
+- **Načtení snapshotu** a **handshake userfaultfd** běží současně. Firecracker se k paměťovému serveru připojí během načítání a v tu chvíli začne prefetch instalovat stránky.
 
 ## Probuzení: pomalé zdroje držet připravené
 
@@ -49,6 +52,7 @@ Soubory buildu se z objektového úložiště čtou po 4MiB chuncích (`block::c
 - **Jedno stažení na chunk.** První čtenář stažení spustí. Každý další čtenář stejného chunku čeká na to stažení a nespouští vlastní.
 - **Čtenáři nečekají na celý chunk.** Stahování zapisuje data do cache po dávkách zarovnaných na stránky, nejméně 16 KiB. Čtenář pokračuje, jakmile jsou v cache jeho bajty.
 - **Data v cache zůstanou.** Druhý sandbox ze stejného buildu čte lokální soubor a znovu nestahuje.
+- **Čtení jde přes mmap**, stejně jako u upstreamu. Výpadek i prefetch instalují stránky přímo z namapovaného souboru cache, bez kopie navíc.
 
 ## Prefetch: stáhnout, na co host sáhne
 
@@ -94,4 +98,6 @@ envd běží v každém sandboxu, takže jeho rychlost je součástí každého 
 
 ## Kde jsme
 
-Na GitHub Actions ve vnořené virtualizaci trvá probuzení 0,8 až 2,4 sekundy. Ten runner je mnohem pomalejší než bare metal, takže cíl 150 ms neukáže. Některé optimalizace z upstreamu ještě nejsou převedené: NBD přes generic netlink s více spojeními, pauza na místě, huge pages a přenos chunků mezi nody (peer-to-peer). Seznam je v `docs/BACKLOG.md`.
+Na Azure stroji s vnořenou virtualizací (4 vCPU) trvá probuzení p50 51 ms, orchestrator v Go na stejné šabloně 321 ms. Metodika a čísla jsou v [článku na blogu](../../../blog/orchestrator-resume-rust-vs-go/). gRPC server nastavuje `TCP_NODELAY` stejně jako Go, takže odpověď na `Create` nečeká na zpožděné ACK.
+
+NBD se připojuje přes ioctl, ne přes generic netlink jako upstream: připojení přes netlink hned po uvolnění zařízení čeká v jádře 100 až 250 ms. Otevřené věci, například NBD s více spojeními a test pauzy na místě se skutečným Firecrackerem, jsou v `docs/BACKLOG.md`.
