@@ -1,3 +1,4 @@
+pub mod body;
 pub mod files;
 pub mod process;
 pub mod version;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use crate::go_time::rfc3339_nano;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use http_body_util::Full;
+use http_body_util::{BodyDataStream, Full};
 use hyper::Request;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -85,8 +86,15 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
     loop {
         attempts += 1;
         match attempt(address, settings, deadline).await {
-            Ok(204) => return Ok(attempts),
-            Ok(status) => return Err(format!("unexpected status code: {status}")),
+            Ok(response) if response.status == 204 => return Ok(attempts),
+            Ok(response) => {
+                tracing::error!(
+                    status_code = response.status,
+                    response_body = %response.body,
+                    "envd init request failed"
+                );
+                return Err(format!("unexpected status code: {}", response.status));
+            }
             Err(error) if Instant::now() + RETRY_DELAY >= deadline => {
                 return Err(format!("failed to init envd: {error}"));
             }
@@ -95,7 +103,12 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
     }
 }
 
-async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<u16, String> {
+struct InitResponse {
+    status: u16,
+    body: String,
+}
+
+async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<InitResponse, String> {
     let budget = settings
         .request_timeout
         .unwrap_or(DEFAULT_ATTEMPT_TIMEOUT)
@@ -105,7 +118,7 @@ async fn attempt(address: SocketAddr, settings: &EnvdInit, deadline: Instant) ->
         .unwrap_or_else(|_| Err(format!("attempt timed out after {budget:?}")))
 }
 
-async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<u16, String> {
+async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<InitResponse, String> {
     let stream = TcpStream::connect(address)
         .await
         .map_err(|e| format!("connect {address}: {e}"))?;
@@ -117,7 +130,12 @@ async fn post_init(address: SocketAddr, settings: &EnvdInit) -> Result<u16, Stri
         .send_request(init_request(address, settings)?)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(response.status().as_u16())
+    let status = response.status().as_u16();
+    let body = match status {
+        204 => String::new(),
+        _ => body::error_body(BodyDataStream::new(response.into_body())).await,
+    };
+    Ok(InitResponse { status, body })
 }
 
 fn init_request(address: SocketAddr, settings: &EnvdInit) -> Result<Request<Full<Bytes>>, String> {
@@ -307,6 +325,33 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, "unexpected status code: 401");
+    }
+
+    #[tokio::test]
+    async fn init_reads_a_bounded_error_body() {
+        const OVERSIZED: usize = 64 << 20;
+        let (listener, address) = listener().await;
+        let delivered = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let head = format!("HTTP/1.1 500 Internal Server Error\r\ncontent-length: {OVERSIZED}\r\n\r\n");
+            stream.write_all(head.as_bytes()).await.unwrap();
+            let chunk = vec![b'e'; 32 << 10];
+            for _ in 0..OVERSIZED / chunk.len() {
+                if stream.write_all(&chunk).await.is_err() {
+                    return false;
+                }
+            }
+            true
+        });
+
+        let error = init(address, &settings(), soon(Duration::from_secs(10)))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "unexpected status code: 500");
+        assert!(!delivered.await.unwrap(), "the client read the whole body");
     }
 
     #[tokio::test]

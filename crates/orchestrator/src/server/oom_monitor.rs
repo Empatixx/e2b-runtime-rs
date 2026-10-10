@@ -5,6 +5,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::envd::body::decode_result;
 use crate::oom::{EnvdMetrics, OomKill, Watermark};
 
 const SEED_TIMEOUT: Duration = Duration::from_secs(2);
@@ -48,13 +49,8 @@ async fn watch(envd: SocketAddr, access_token: Option<String>, sandbox_id: Strin
             None => request,
         };
         async move {
-            let metrics: EnvdMetrics = request
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .json()
-                .await
-                .map_err(|e| e.to_string())?;
+            let response = request.send().await.map_err(|e| e.to_string())?;
+            let metrics: EnvdMetrics = decode_result(response.bytes_stream()).await?;
             metrics.oom_kills.ok_or_else(|| UNKNOWN.to_owned())
         }
     };
