@@ -36,10 +36,10 @@ pub mod system;
 pub mod tcpfirewall;
 pub mod telemetry;
 pub mod template;
-
-pub fn version() -> &'static str {
 #[cfg(target_os = "linux")]
 pub mod volumes;
+
+pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
