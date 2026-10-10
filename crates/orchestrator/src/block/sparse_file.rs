@@ -1,3 +1,5 @@
+pub mod mapping;
+
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -5,8 +7,11 @@ use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
 
+use self::mapping::ReadMapping;
+
 pub struct SparseFile {
     file: File,
+    mapping: Option<ReadMapping>,
     path: PathBuf,
     size: u64,
 }
@@ -19,6 +24,7 @@ impl SparseFile {
         let file = OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
         file.set_len(size)?;
         Ok(Self {
+            mapping: ReadMapping::of(&file, size)?,
             file,
             path: path.to_path_buf(),
             size,
@@ -29,6 +35,7 @@ impl SparseFile {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let size = file.metadata()?.len();
         Ok(Self {
+            mapping: ReadMapping::of(&file, size)?,
             file,
             path: path.to_path_buf(),
             size,
@@ -41,6 +48,20 @@ impl SparseFile {
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.file.read_exact_at(buf, offset)
+    }
+
+    pub fn slice(&self, offset: u64, length: usize) -> io::Result<&[u8]> {
+        let start = offset as usize;
+        self.mapping
+            .as_ref()
+            .map_or(&[][..], ReadMapping::bytes)
+            .get(start..start + length)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("slice {offset}+{length} is past the end ({} bytes)", self.size),
+                )
+            })
     }
 
     pub fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
@@ -160,6 +181,22 @@ mod tests {
         assert_eq!(block, [0; 4096]);
         assert_eq!(file.size(), 16384);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 16384);
+    }
+
+    #[test]
+    fn slices_see_writes_and_punched_holes_without_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = SparseFile::create(&dir.path().join("cache"), 16384).unwrap();
+
+        file.write_at(4096, &[7; 4096]).unwrap();
+        assert_eq!(file.slice(4096, 4096).unwrap(), &[7; 4096]);
+
+        file.punch_hole(4096, 4096).unwrap();
+        assert_eq!(file.slice(4096, 4096).unwrap(), &[0; 4096]);
+        assert_eq!(
+            file.slice(12288, 8192).unwrap_err().to_string(),
+            "slice 12288+8192 is past the end (16384 bytes)"
+        );
     }
 
     #[test]

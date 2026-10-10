@@ -11,6 +11,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::chunker::Chunker;
+use super::page_data::PageData;
 use crate::storage::backend::Storage;
 use crate::storage::header::Header;
 use crate::storage::paths::BuildPaths;
@@ -132,6 +133,13 @@ impl DiffStore {
         })
         .await
         .cloned()
+    }
+
+    pub async fn cached(&self, build_id: Uuid, artifact: Artifact) -> Option<Arc<Chunker>> {
+        match self.contains(build_id, artifact) {
+            true => self.chunker(build_id, artifact).await.ok(),
+            false => None,
+        }
     }
 
     pub fn add_local_when(&self, build_id: Uuid, artifact: Artifact, path: &Path, ready: Ready) {
@@ -268,6 +276,25 @@ impl BuildFile {
         self.header.metadata.block_size
     }
 
+    pub async fn slice(&self, offset: u64, length: usize) -> Result<PageData, String> {
+        let location = self.header.locate(offset)?;
+        if (location.length as usize) < length {
+            let mut bytes = vec![0; length];
+            self.read_at(offset, &mut bytes).await?;
+            return Ok(PageData::Owned(bytes));
+        }
+        match location.build_id.is_nil() {
+            true => Ok(PageData::zeroes(length)),
+            false => self
+                .store
+                .chunker(location.build_id, self.artifact)
+                .await?
+                .slice(location.storage_offset, length)
+                .await
+                .map(PageData::Mapped),
+        }
+    }
+
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         let mut done = 0;
         while done < buf.len() {
@@ -346,6 +373,17 @@ mod tests {
         assert_eq!(
             file.read_at(4 * 4096, &mut past).await.unwrap_err(),
             "offset 16384 is out of bounds (size: 16384)"
+        );
+
+        let mapped = file.slice(4096, 4096).await.unwrap();
+        let zeroes = file.slice(8192, 4096).await.unwrap();
+        let spanning = file.slice(4000, 200).await.unwrap();
+        assert!(matches!(mapped, PageData::Mapped(_)));
+        assert!(matches!(zeroes, PageData::Zeroes(4096)));
+        assert!(matches!(spanning, PageData::Owned(_)));
+        assert_eq!(
+            (&*mapped, &*zeroes, &*spanning),
+            (&[2; 4096][..], &[0; 4096][..], &[vec![1; 96], vec![2; 104]].concat()[..])
         );
     }
 

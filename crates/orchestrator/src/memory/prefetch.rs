@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use self::extent::{Extent, coalesce_indices};
 use self::workers::PrefetchWorkers;
 use crate::block::build_file::BuildFile;
+use crate::block::page_data::PageData;
 use crate::template::metadata::MemoryPrefetch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +64,7 @@ pub async fn prefetch<I: Installer>(
     let warming = tokio::spawn(warm(
         mapping.indices,
         block_size,
-        memfile.clone(),
+        memfile,
         warmed,
         stats.clone(),
         workers,
@@ -83,24 +84,15 @@ pub async fn prefetch<I: Installer>(
     let fetching = warming.abort_handle();
     futures::stream::poll_fn(|context| ready.poll_recv(context))
         .take_while(|_| std::future::ready(!closed.load(Ordering::Relaxed)))
-        .for_each_concurrent(workers.copy, |offset| {
+        .for_each_concurrent(workers.copy, |block| {
             let installer = installer.clone();
-            let memfile = memfile.clone();
             let stats = stats.clone();
             let closed = closed.clone();
             let fetching = fetching.clone();
             async move {
-                let mut data = vec![0; block_size as usize];
-                match memfile.read_at(offset, &mut data).await {
-                    Ok(()) => {
-                        if install_blocking(installer, offset, data, stats).await == Flow::Stop {
-                            closed.store(true, Ordering::Relaxed);
-                            fetching.abort();
-                        }
-                    }
-                    Err(_) => {
-                        stats.skipped.fetch_add(1, Ordering::Relaxed);
-                    }
+                if install_blocking(installer, block, block_size, stats).await == Flow::Stop {
+                    closed.store(true, Ordering::Relaxed);
+                    fetching.abort();
                 }
             }
         })
@@ -110,7 +102,19 @@ pub async fn prefetch<I: Installer>(
 
 struct FetchedExtent {
     extent: Extent,
-    read: Result<(), String>,
+    data: Result<PageData, String>,
+}
+
+struct FetchedBlock {
+    offset: u64,
+    extent: Arc<PageData>,
+    start: usize,
+}
+
+impl FetchedBlock {
+    fn bytes(&self, block_size: u64) -> &[u8] {
+        &self.extent[self.start..self.start + block_size as usize]
+    }
 }
 
 fn fetched_extents(
@@ -131,12 +135,13 @@ fn fetched_extents(
         .map(move |extent| {
             let memfile = memfile.clone();
             async move {
-                let mut data = vec![0; extent.bytes(block_size)];
-                let read = memfile.read_at(extent.offset(block_size), &mut data).await;
-                FetchedExtent { extent, read }
+                let data = memfile
+                    .slice(extent.offset(block_size), extent.bytes(block_size))
+                    .await;
+                FetchedExtent { extent, data }
             }
         })
-        .buffered(workers.fetch)
+        .buffer_unordered(workers.fetch)
 }
 
 pub async fn fetch_only(
@@ -160,8 +165,8 @@ pub async fn fetch_only(
 
 fn record_fetch(fetched: &FetchedExtent, stats: &PrefetchStats) {
     let blocks = fetched.extent.blocks as u64;
-    match &fetched.read {
-        Ok(()) => stats.fetched.fetch_add(blocks, Ordering::Relaxed),
+    match &fetched.data {
+        Ok(_) => stats.fetched.fetch_add(blocks, Ordering::Relaxed),
         Err(e) => {
             tracing::warn!(error = %e, "prefetch read failed");
             stats.skipped.fetch_add(blocks, Ordering::Relaxed)
@@ -173,7 +178,7 @@ async fn warm(
     indices: Vec<u64>,
     block_size: u64,
     memfile: Arc<BuildFile>,
-    warmed: mpsc::UnboundedSender<u64>,
+    warmed: mpsc::UnboundedSender<FetchedBlock>,
     stats: Arc<PrefetchStats>,
     workers: PrefetchWorkers,
 ) {
@@ -181,12 +186,24 @@ async fn warm(
     futures::pin_mut!(reads);
     while let Some(fetched) = reads.next().await {
         record_fetch(&fetched, &stats);
-        if fetched.read.is_ok()
-            && fetched
-                .extent
-                .block_offsets(block_size)
-                .any(|offset| warmed.send(offset).is_err())
-        {
+        let Ok(data) = fetched.data else {
+            continue;
+        };
+        let extent = Arc::new(data);
+        let sent = fetched
+            .extent
+            .block_offsets(block_size)
+            .zip((0..).step_by(block_size as usize))
+            .all(|(offset, start)| {
+                warmed
+                    .send(FetchedBlock {
+                        offset,
+                        extent: extent.clone(),
+                        start,
+                    })
+                    .is_ok()
+            });
+        if !sent {
             return;
         }
     }
@@ -200,11 +217,11 @@ enum Flow {
 
 async fn install_blocking<I: Installer>(
     installer: Arc<I>,
-    offset: u64,
-    data: Vec<u8>,
+    block: FetchedBlock,
+    block_size: u64,
     stats: Arc<PrefetchStats>,
 ) -> Flow {
-    tokio::task::spawn_blocking(move || install(&*installer, offset, &data, &stats))
+    tokio::task::spawn_blocking(move || install(&*installer, block.offset, block.bytes(block_size), &stats))
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "prefault task failed"))
         .unwrap_or(Flow::Continue)

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,6 +31,20 @@ type Sessions = Arc<Mutex<HashMap<u64, watch::Receiver<FetchState>>>>;
 pub struct Chunker {
     source: Arc<Source>,
     sessions: Sessions,
+}
+
+pub struct ChunkSlice {
+    source: Arc<Source>,
+    offset: u64,
+    length: usize,
+}
+
+impl Deref for ChunkSlice {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.source.cache.slice(self.offset, self.length).unwrap_or_default()
+    }
 }
 
 struct Source {
@@ -95,7 +109,13 @@ impl Chunker {
     }
 
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        let end = offset + buf.len() as u64;
+        let slice = self.slice(offset, buf.len()).await?;
+        buf.copy_from_slice(&slice);
+        Ok(())
+    }
+
+    pub async fn slice(&self, offset: u64, length: usize) -> Result<ChunkSlice, String> {
+        let end = offset + length as u64;
         if end > self.size() {
             return Err(format!(
                 "read {offset}..{end} is past the end of {} ({} bytes)",
@@ -108,9 +128,7 @@ impl Chunker {
             self.ensure(chunk, offset.max(chunk_range.start)..end.min(chunk_range.end))
                 .await?;
         }
-        let bytes = self.source.clone().read_cached(offset, buf.len()).await?;
-        buf.copy_from_slice(&bytes);
-        Ok(())
+        self.source.slice(offset, length)
     }
 
     async fn ensure(&self, chunk: u64, wanted: Range<u64>) -> Result<(), String> {
@@ -271,15 +289,15 @@ impl Source {
             .map(|()| end)
     }
 
-    async fn read_cached(self: Arc<Self>, offset: u64, length: usize) -> Result<Vec<u8>, String> {
-        let cache = self.cache.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut bytes = vec![0; length];
-            cache.read_at(offset, &mut bytes).map(|()| bytes)
+    fn slice(self: &Arc<Self>, offset: u64, length: usize) -> Result<ChunkSlice, String> {
+        self.cache
+            .slice(offset, length)
+            .map_err(|e| format!("read cache of {} at {offset}: {e}", self.object))?;
+        Ok(ChunkSlice {
+            source: self.clone(),
+            offset,
+            length,
         })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("read cache of {} at {offset}: {e}", self.object))
     }
 
     fn is_cached(&self, range: &Range<u64>) -> bool {

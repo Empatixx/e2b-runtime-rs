@@ -17,6 +17,7 @@ use super::region::Regions;
 use super::trace::{Access, Trace};
 use super::uffd::{CopyOutcome, Event, Uffd};
 use crate::block::build_file::BuildFile;
+use crate::block::page_data::PageData;
 
 mod retry_timer;
 mod state;
@@ -324,12 +325,13 @@ impl Serving {
         self.install_bytes(page, offset, bytes, write)
     }
 
-    fn install_bytes(&self, page: u64, offset: u64, mut bytes: Vec<u8>, write: bool) -> Result<CopyOutcome, String> {
+    fn install_bytes(&self, page: u64, offset: u64, bytes: PageData, write: bool) -> Result<CopyOutcome, String> {
         let index = (offset / self.regions.page_size()) as u32;
         let _installing = self.state.installing();
-        if self.state.is_removed(index) {
-            bytes.fill(0);
-        }
+        let bytes = match self.state.is_removed(index) {
+            true => PageData::zeroes(bytes.len()),
+            false => bytes,
+        };
         let outcome = self.state.copy_page(self.uffd.get_ref(), page, &bytes, !write)?;
         self.after_copy(page, outcome)?;
         if matches!(outcome, CopyOutcome::Copied | CopyOutcome::AlreadyPresent) {
@@ -354,13 +356,12 @@ impl Serving {
         }
     }
 
-    async fn page_bytes(&self, offset: u64) -> Result<Vec<u8>, String> {
+    async fn page_bytes(&self, offset: u64) -> Result<PageData, String> {
         let page_size = self.regions.page_size();
-        let mut bytes = vec![0; page_size as usize];
-        if !self.state.is_removed((offset / page_size) as u32) {
-            self.memfile.read_at(offset, &mut bytes).await?;
+        match self.state.is_removed((offset / page_size) as u32) {
+            true => Ok(PageData::zeroes(page_size as usize)),
+            false => self.memfile.slice(offset, page_size as usize).await,
         }
-        Ok(bytes)
     }
 }
 

@@ -54,6 +54,10 @@ impl BlockCache {
         self.file.read_at(offset, buf)
     }
 
+    pub fn slice(&self, offset: u64, length: usize) -> io::Result<&[u8]> {
+        self.file.slice(offset, length)
+    }
+
     pub fn read_if_present(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
         let tracker = self.tracker.read();
         if !tracker.is_present(self.blocks(offset, buf.len() as u64)) {

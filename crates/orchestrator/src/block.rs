@@ -3,5 +3,6 @@ pub mod cache;
 pub mod chunker;
 pub mod file_diff;
 pub mod overlay;
+pub mod page_data;
 pub mod sparse_file;
 pub mod tracker;
