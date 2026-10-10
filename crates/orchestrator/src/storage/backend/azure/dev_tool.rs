@@ -96,6 +96,13 @@ pub fn fake_shell(body: &str) -> (tempfile::TempDir, ShellExec) {
     let path = directory.path().join("sh");
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    while std::process::Command::new(&path)
+        .args(["-c", ":"])
+        .output()
+        .is_err_and(|e| e.raw_os_error() == Some(nix::libc::ETXTBSY))
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let shell = ShellExec {
         timeout: Duration::from_secs(120),
         ..ShellExec::with_shell(path.to_str().unwrap())
