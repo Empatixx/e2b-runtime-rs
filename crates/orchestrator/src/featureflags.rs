@@ -20,7 +20,7 @@ pub use flags::{
     REBOOT_CPU_TEMPLATE_OVERRIDE, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, SANDBOX_MAX_INCOMING_CONNECTIONS, STORAGE_CONCURRENT_UPLOAD_LIMIT,
     STORAGE_MAX_UPLOAD_TASKS, USE_MEMFD, build_envd_version, build_firecracker_version, build_io_engine,
     build_kernel_cmdline_args, build_kernel_version, envd_binary_cache, envd_offline_upgrade_target,
-    envd_timeout_milliseconds, envd_upgrade_target, pause_admission_disk_headroom_mib, resume_prefetch_source,
+    envd_timeout_milliseconds, envd_upgrade_target, memfile_diff_dedup, pause_admission_disk_headroom_mib, resume_prefetch_source,
 };
 pub use flags::{BoolFlag, Flag, IntFlag, JsonFlag, StringFlag};
 pub use prefetch::ScopedPrefetchFlags;

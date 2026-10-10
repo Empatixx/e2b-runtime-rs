@@ -319,13 +319,8 @@ impl SandboxServer {
         filesystem_only: bool,
     ) -> Result<Option<Arc<PauseDiskReservation>>, Status> {
         let info = running.info.lock();
-        self.node.admit_pause_disk(
-            &info.config.sandbox_id,
-            &info.config.team_id,
-            info.config.ram_mb,
-            &self.node.rootfs_cache_of(lifecycle),
-            filesystem_only,
-        )
+        self.node
+            .admit_pause_disk(&info.config, &self.node.rootfs_cache_of(lifecycle), filesystem_only)
     }
 
     fn team_of(&self, sandbox_id: &str) -> String {

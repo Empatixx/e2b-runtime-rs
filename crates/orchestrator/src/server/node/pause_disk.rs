@@ -5,8 +5,13 @@ use std::time::Duration;
 use tonic::Status;
 
 use super::Node;
+use super::SANDBOX_TYPE;
+use super::prefetch::pause_contexts;
 use crate::block::build_file::Ready;
-use crate::featureflags::pause_admission_disk_headroom_mib;
+use crate::featureflags::{FlagContext, memfile_diff_dedup, pause_admission_disk_headroom_mib};
+use crate::firecracker::version::supports_memfd;
+use crate::memory::dedup::config::DedupConfig;
+use crate::proto::SandboxConfig;
 use crate::server::pause_disk::{CaptureSize, DiskShort, MIB, PauseDiskReservation, rootfs_cache_bytes};
 use crate::server::registry::Lifecycle;
 use crate::telemetry::server::sandbox::record_pause_admission;
@@ -17,6 +22,20 @@ const OUTCOME_REFUSED_DISK: &str = "refused_disk";
 impl Node {
     pub fn rootfs_cache_of(&self, lifecycle: &Lifecycle) -> PathBuf {
         self.work_dir_of(lifecycle).join(ROOTFS_OVERLAY_FILE)
+    }
+
+    fn dedup_keeps_an_intermediate_copy(&self, config: &SandboxConfig) -> bool {
+        let dedup = DedupConfig::from_flag(&self.feature_flags.get(&memfile_diff_dedup(), &pause_contexts(config)));
+        let memfd = supports_memfd(&config.firecracker_version)
+            && self.runtime_flags.use_memfd(FlagContext::sandbox_runtime(
+                &config.sandbox_id,
+                &config.template_id,
+                &config.kernel_version,
+                &config.firecracker_version,
+                &config.envd_version,
+                SANDBOX_TYPE,
+            ));
+        dedup.enabled && !memfd
     }
 
     pub fn mark_written_when_ready(&self, reservation: Option<Arc<PauseDiskReservation>>, ready: Ready) {
@@ -32,9 +51,7 @@ impl Node {
 
     pub fn admit_pause_disk(
         &self,
-        sandbox_id: &str,
-        team_id: &str,
-        ram_mb: i64,
+        config: &SandboxConfig,
         rootfs_cache: &Path,
         filesystem_only: bool,
     ) -> Result<Option<Arc<PauseDiskReservation>>, Status> {
@@ -42,20 +59,22 @@ impl Node {
         if headroom_mib < 0 {
             return Ok(None);
         }
+        let sandbox_id = config.sandbox_id.as_str();
         let Ok(rootfs_cache_bytes) = rootfs_cache_bytes(rootfs_cache).inspect_err(|e| {
             tracing::warn!(sandbox = %sandbox_id, error = %e, "Cannot estimate the snapshot's size, admitting the pause");
         }) else {
             return Ok(None);
         };
         let size = CaptureSize {
-            ram_bytes: ram_mb << 20,
+            ram_bytes: config.ram_mb << 20,
             rootfs_cache_bytes,
             filesystem_only,
+            dedup_intermediate_copy: self.dedup_keeps_an_intermediate_copy(config),
         };
         self.build_disk
             .admit(headroom_mib, &size)
             .map(|reservation| reservation.map(Arc::new))
-            .map_err(|short| refused(sandbox_id, team_id, &short))
+            .map_err(|short| refused(sandbox_id, &config.team_id, &short))
     }
 }
 

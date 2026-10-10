@@ -3,6 +3,7 @@ pub mod filesystem;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -11,12 +12,13 @@ use uuid::Uuid;
 
 use super::Sandbox;
 use super::config::Rootfs;
-use crate::block::build_file::{Ready, ready_now};
+use crate::block::build_file::{BuildFile, Ready, ready_now};
 use crate::block::file_diff::export_file_diff;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
+use crate::memory::dedup::config::DedupConfig;
 use crate::memory::server::MemoryServer;
-use crate::memory::snapshot::{GuestMemory, diff_metadata, export_pages, memfile_pages};
+use crate::memory::snapshot::{BuildFileBase, GuestMemory, diff_metadata, export_deduped, export_pages, memfile_pages};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
@@ -122,12 +124,21 @@ impl Sandbox {
     }
 
     pub async fn snapshot_into(&self, dir: &Path, build_id: Uuid) -> Result<LocalSnapshot, String> {
+        self.snapshot_deduped_into(dir, build_id, DedupConfig::default()).await
+    }
+
+    pub async fn snapshot_deduped_into(
+        &self,
+        dir: &Path,
+        build_id: Uuid,
+        dedup: DedupConfig,
+    ) -> Result<LocalSnapshot, String> {
         let vm = self.resources.vm.as_ref().ok_or("firecracker is not running")?;
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let files = SnapshotFiles::in_dir(dir);
-        self.write(&client, pid, &files, build_id)
+        self.write(&client, pid, &files, build_id, dedup)
             .await
             .map(|(snapshot, memfile_ready)| LocalSnapshot {
                 snapshot,
@@ -143,13 +154,14 @@ impl Sandbox {
         pid: u32,
         files: &SnapshotFiles,
         build_id: Uuid,
+        dedup: DedupConfig,
     ) -> Result<(Snapshot, Ready), String> {
         client.pause().await?;
         client.create_snapshot(&files.snapfile).await?;
         let pages = self.memory_pages(client).await?;
         let memory_bytes = pages.regions.iter().map(|region| region.size).sum();
         let tracked_writes = pages.tracked_writes;
-        let (memfile, memfile_ready) = self.export_memory(pages, pid, &files.memfile, build_id).await?;
+        let (memfile, memfile_ready) = self.export_memory(pages, pid, &files.memfile, build_id, dedup).await?;
         let rootfs = match self.export_disk(&files.rootfs, build_id).await {
             Ok(rootfs) => rootfs,
             Err(e) => {
@@ -221,6 +233,7 @@ impl Sandbox {
         pid: u32,
         path: &Path,
         build_id: Uuid,
+        dedup: DedupConfig,
     ) -> Result<(Exported, Ready), String> {
         let page_size = pages
             .regions
@@ -230,6 +243,14 @@ impl Sandbox {
         let size = pages.regions.iter().map(|region| region.size).sum();
         let path = path.to_path_buf();
         let parent = self.memory_parent(page_size, size)?;
+        if let Some(base) = self.config.memfile.clone().filter(|_| dedup.enabled) {
+            let memory = match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
+                Some(memfd) => GuestMemory::Memfd(memfd),
+                None => GuestMemory::Process { pid },
+            };
+            let diff = deduped_export(memory, pages, path, base, dedup).await?;
+            return Ok((exported(&diff, &parent, build_id)?, ready_now()));
+        }
         match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
             Some(memfd) => {
                 let diff = diff_metadata(&pages.regions, &pages.dirty, &pages.empty)
@@ -319,6 +340,31 @@ fn write_pages(memory: &GuestMemory, pages: &MemoryPages, path: &Path) -> io::Re
     let mut out = BufWriter::new(File::create(path)?);
     let diff = export_pages(memory, &pages.regions, &pages.dirty, &pages.empty, &mut out)?;
     out.flush().map(|()| diff)
+}
+
+async fn deduped_export(
+    memory: GuestMemory,
+    pages: MemoryPages,
+    path: PathBuf,
+    base: Arc<BuildFile>,
+    dedup: DedupConfig,
+) -> Result<DiffMetadata, String> {
+    let runtime = tokio::runtime::Handle::current();
+    blocking("export deduped memfile", move || {
+        let base = BuildFileBase { file: base, runtime };
+        let mut out = BufWriter::new(File::create(&path)?);
+        let diff = export_deduped(
+            &memory,
+            &pages.regions,
+            &pages.dirty,
+            &pages.empty,
+            &base,
+            &dedup,
+            &mut out,
+        )?;
+        out.flush().map(|()| diff)
+    })
+    .await
 }
 
 fn background_copy(memory: GuestMemory, pages: MemoryPages, path: PathBuf) -> Ready {

@@ -97,6 +97,22 @@ pub fn pause_admission_disk_headroom_mib() -> IntFlag {
     Flag::new("pause-admission-disk-headroom-mib", fallback)
 }
 
+pub fn memfile_diff_dedup() -> JsonFlag {
+    Flag::new(
+        "memfile-diff-dedup",
+        serde_json::json!({
+            "enabled": false,
+            "bestEffort": false,
+            "directIO": false,
+            "maxFetchWindowsPerBlock": 0,
+            "maxPromotedParentPagesPerBlock": 0,
+            "maxPagesPerPromotedFrame": 0,
+            "blockFaultPct": 0,
+            "fetchRunWindowPages": 0,
+        }),
+    )
+}
+
 pub fn build_io_engine() -> StringFlag {
     Flag::new("build-io-engine", "Sync".to_owned())
 }

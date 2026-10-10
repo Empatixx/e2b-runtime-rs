@@ -8,7 +8,10 @@ use nix::unistd::Pid;
 use roaring::RoaringBitmap;
 
 use crate::firecracker::memory_info::GuestRegion;
+mod deduped;
+
 use crate::storage::header::DiffMetadata;
+pub use deduped::{BuildFileBase, export_deduped};
 
 const MAX_RUN_BYTES: u64 = 4 << 20;
 

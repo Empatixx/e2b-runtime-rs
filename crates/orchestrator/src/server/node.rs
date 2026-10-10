@@ -43,10 +43,11 @@ use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
-use crate::featureflags::{FeatureFlags, FlagContext};
+use crate::featureflags::{FeatureFlags, FlagContext, memfile_diff_dedup};
 use crate::firecracker::version::{supports_huge_pages, supports_memfd};
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
+use crate::memory::dedup::config::DedupConfig;
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
@@ -76,7 +77,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
 const TEMPLATE_DEFAULT_USER: &str = "user";
-const SANDBOX_TYPE: &str = "sandbox";
+pub(super) const SANDBOX_TYPE: &str = "sandbox";
 pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
@@ -259,6 +260,14 @@ impl Node {
         );
     }
 
+    fn memfile_dedup(&self, config: &SandboxConfig) -> DedupConfig {
+        DedupConfig::from_flag(
+            &self
+                .feature_flags
+                .get(&memfile_diff_dedup(), &prefetch::pause_contexts(config)),
+        )
+    }
+
     pub async fn snapshot_locally(
         &self,
         sandbox: &Sandbox,
@@ -267,7 +276,7 @@ impl Node {
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
         let local = sandbox
-            .snapshot_into(&dir, build_id)
+            .snapshot_deduped_into(&dir, build_id, self.memfile_dedup(&parent.config))
             .await
             .map_err(|e| format!("error snapshotting sandbox: {e}"))
             .inspect_err(|_| discard_snapshot_dir(&dir))?;

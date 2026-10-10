@@ -295,6 +295,20 @@ impl BuildFile {
         }
     }
 
+    pub async fn is_cached(&self, offset: u64, length: usize) -> bool {
+        let Ok(location) = self.header.locate(offset) else {
+            return false;
+        };
+        match location.build_id.is_nil() {
+            true => true,
+            false => self
+                .store
+                .cached(location.build_id, self.artifact)
+                .await
+                .is_some_and(|chunker| chunker.is_cached(location.storage_offset, length)),
+        }
+    }
+
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         let mut done = 0;
         while done < buf.len() {

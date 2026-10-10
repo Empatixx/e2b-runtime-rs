@@ -99,6 +99,10 @@ impl Chunker {
         self.source.cache.size()
     }
 
+    pub fn is_cached(&self, offset: u64, length: usize) -> bool {
+        self.source.is_cached(&(offset..offset + length as u64))
+    }
+
     pub fn fetch_count(&self) -> u64 {
         self.source.fetches.load(Ordering::Relaxed)
     }

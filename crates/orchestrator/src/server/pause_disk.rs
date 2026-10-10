@@ -19,6 +19,7 @@ pub struct CaptureSize {
     pub ram_bytes: i64,
     pub rootfs_cache_bytes: i64,
     pub filesystem_only: bool,
+    pub dedup_intermediate_copy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,14 +27,16 @@ struct PauseCapture {
     ram_bytes: i64,
     rootfs_cache_bytes: i64,
     filesystem_only: bool,
+    dedup_intermediate_copy: bool,
     storage_shares_disk: bool,
 }
 
 impl PauseCapture {
     fn need(&self) -> i64 {
-        let memory = match self.filesystem_only {
-            true => 0,
-            false => self.ram_bytes,
+        let memory = match (self.filesystem_only, self.dedup_intermediate_copy) {
+            (true, _) => 0,
+            (false, false) => self.ram_bytes,
+            (false, true) => 2 * self.ram_bytes,
         };
         let copies = match self.storage_shares_disk {
             true => 2,
@@ -116,6 +119,7 @@ impl BuildDisk {
             ram_bytes: size.ram_bytes,
             rootfs_cache_bytes: size.rootfs_cache_bytes,
             filesystem_only: size.filesystem_only,
+            dedup_intermediate_copy: size.dedup_intermediate_copy,
             storage_shares_disk: (self.storage_shares)(),
         };
         match self.reserve(&capture, headroom_mib * MIB) {
@@ -247,6 +251,7 @@ mod tests {
             ram_bytes: ram_mb << 20,
             rootfs_cache_bytes: 0,
             filesystem_only,
+            dedup_intermediate_copy: false,
         }
     }
 
@@ -302,6 +307,20 @@ mod tests {
         let reservation = disk.admit(0, &size(2048, true)).unwrap().unwrap();
 
         assert_eq!(disk.reserved(), SNAPFILE_ALLOWANCE);
+        drop(reservation);
+    }
+
+    #[test]
+    fn without_a_memfd_and_with_dedup_the_intermediate_copy_counts_the_memory_twice() {
+        let disk = disk(10 * GIB);
+        let capture = CaptureSize {
+            dedup_intermediate_copy: true,
+            ..size(1024, false)
+        };
+
+        let reservation = disk.admit(0, &capture).unwrap().unwrap();
+
+        assert_eq!(disk.reserved(), 2 * GIB + SNAPFILE_ALLOWANCE);
         drop(reservation);
     }
 
