@@ -16,8 +16,8 @@ use super::console::ConsoleTap;
 use super::exit::ExitInfo;
 use super::launch::Launch;
 
-const READY_POLLS: u32 = 500;
-const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const READY_POLLS: u32 = 5000;
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const CONSOLE_DRAIN: Duration = Duration::from_secs(1);
 
 pub struct FirecrackerExit {

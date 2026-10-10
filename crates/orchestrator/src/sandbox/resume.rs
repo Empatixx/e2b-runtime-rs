@@ -10,6 +10,7 @@ use super::Sandbox;
 use super::config::{SandboxBuilder, sandbox_builder};
 use super::vcpu_limit::{limit_vcpus_before_resume, resolve_vm_vcpus, resume_vm_vcpus};
 use crate::block::build_file::BuildFile;
+use crate::block::overlay::Overlay;
 use crate::exposure::nbd::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::process::FirecrackerProcess;
@@ -52,7 +53,7 @@ impl Sandbox {
         let client = self.launch_with_rootfs().await?;
         self.phases.mark("rootfs+firecracker");
         let loading = client.load_snapshot(snapfile, &socket, self.config.use_memfd);
-        let serving = serve_memory(listener, memfile);
+        let serving = serve_memory(listener, memfile, prefaulter);
         tokio::pin!(loading, serving);
         let (loaded, served) = tokio::select! {
             loaded = &mut loading => match loaded {
@@ -62,9 +63,6 @@ impl Sandbox {
             served = &mut serving => (loading.await, served),
         };
         let started = served.map(|server| {
-            if let Some(prefaulter) = prefaulter {
-                let _ = prefaulter.send(server.prefaulter());
-            }
             self.resources.memory = Some(server);
         });
         all_ok([started, loaded]).map_err(|e| format!("{e}; {}", self.resume_diagnostics()))?;
@@ -160,7 +158,7 @@ impl Sandbox {
         let link = self.config.work_dir.join("rootfs.link");
         point_link(&link, Path::new(NO_DEVICE)).map_err(|e| format!("link {}: {e}", link.display()))?;
         let overlay = self.config.overlay()?;
-        let (disk, client) = tokio::join!(expose(overlay), self.spawn_in_slot(link.clone()));
+        let (disk, client) = tokio::join!(expose_apart(overlay), self.spawn_in_slot(link.clone()));
         let device = self.keep_disk(disk)?;
         let client = client?;
         point_link(&link, &device).map_err(|e| format!("link {} to {}: {e}", link.display(), device.display()))?;
@@ -227,8 +225,22 @@ async fn memory_failure(watch: Option<MemoryWatch>) -> String {
     }
 }
 
-async fn serve_memory(listener: UffdListener, memfile: Arc<BuildFile>) -> Result<MemoryServer, String> {
+async fn expose_apart(overlay: Arc<Overlay>) -> io::Result<Exposure> {
+    tokio::spawn(expose(overlay))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
+}
+
+async fn serve_memory(
+    listener: UffdListener,
+    memfile: Arc<BuildFile>,
+    prefaulter: Option<oneshot::Sender<Arc<Prefaulter>>>,
+) -> Result<MemoryServer, String> {
     let handshake = listener.accept(HANDSHAKE_TIMEOUT).await?;
-    MemoryServer::start(handshake.uffd, handshake.regions, memfile, handshake.memfd)
-        .map_err(|e| format!("start memory server: {e}"))
+    let server = MemoryServer::start(handshake.uffd, handshake.regions, memfile, handshake.memfd)
+        .map_err(|e| format!("start memory server: {e}"))?;
+    if let Some(prefaulter) = prefaulter {
+        let _ = prefaulter.send(server.prefaulter());
+    }
+    Ok(server)
 }
