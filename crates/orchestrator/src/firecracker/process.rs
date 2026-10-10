@@ -1,16 +1,14 @@
-use std::fs::{File, OpenOptions};
+mod child;
+
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
-
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
+use self::child::{Child, Spawned, find_in_path};
 use super::client::FirecrackerClient;
 use super::console::ConsoleTap;
 use super::exit::ExitInfo;
@@ -35,28 +33,10 @@ pub struct FirecrackerProcess {
 impl FirecrackerProcess {
     pub async fn spawn(launch: &Launch) -> Result<Self, String> {
         remove_stale_socket(&launch.socket)?;
-        let mut command = Command::new("setsid");
-        command
-            .args(["unshare", "-m", "--", "sh", "-c"])
-            .arg(launch.script())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let cgroup_procs = launch
-            .cgroup
-            .as_deref()
-            .map(|cgroup| join_cgroup_on_exec(&mut command, cgroup))
-            .transpose()?;
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
-        drop(cgroup_procs);
+        let Spawned { child, stdout, stderr } =
+            start_in_cgroup(launch).map_err(|e| format!("spawn firecracker {}: {e}", launch.binary.display()))?;
         let console_tap = ConsoleTap::open();
-        let drained = match (child.stdout.take(), child.stderr.take()) {
-            (Some(stdout), Some(stderr)) => Some(console_tap.pump(stdout, stderr)),
-            _ => None,
-        };
+        let drained = Some(console_tap.pump(stdout, stderr));
         let mut process = Self {
             child,
             socket: launch.socket.clone(),
@@ -135,21 +115,13 @@ impl FirecrackerProcess {
     }
 }
 
-fn join_cgroup_on_exec(command: &mut Command, cgroup: &Path) -> Result<File, String> {
-    let path = cgroup.join("cgroup.procs");
-    let procs = OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let fd = procs.as_raw_fd();
-    unsafe {
-        command.pre_exec(move || {
-            nix::unistd::write(BorrowedFd::borrow_raw(fd), b"0")
-                .map(|_| ())
-                .map_err(io::Error::from)
-        });
-    }
-    Ok(procs)
+fn start_in_cgroup(launch: &Launch) -> io::Result<Spawned> {
+    let script = launch.script();
+    child::spawn(
+        &find_in_path("unshare")?,
+        &["-m", "--", "sh", "-c", &script],
+        launch.cgroup.as_deref(),
+    )
 }
 
 fn remove_stale_socket(socket: &Path) -> Result<(), String> {
