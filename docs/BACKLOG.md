@@ -15,7 +15,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Builds use 2 MiB huge pages, but CI reserves no hugetlb pages, so no CI test resumes a huge-page template | perf |
 | The uffd handshake socket is `0777` (upstream parity); `0600` would do, since Firecracker runs as root | API |
 
 ## Orchestrator: pause (M7)
@@ -91,7 +90,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The memory in-place checkpoint is ported but untested against a real Firecracker (needs KVM, a Firecracker build that accepts `use_sync_wp` and a kernel with uffd-wp for anonymous memory; the Docker kernel on a Mac has none); the template build never installs a balloon device, so balloon-reporting sandboxes are not produced here | perf |
+| The memory in-place checkpoint is tested only with the synchronous copy. The deferred export needs free-page reporting, and the template build never installs a balloon device, so balloon-reporting sandboxes are not produced here | perf |
 | The filesystem-only checkpoint exports the rootfs synchronously from the live overlay; upstream can swap in a fresh COW cache and seal in the background (`defer-rootfs-export`) | perf |
 | Pause and checkpoint skip the cgroup freeze and unfreeze, the pre-pause reclaim, and the hinting drain | perf |
 | A snapshot has no lineage (`AbandonsPredecessor`) in the template cache | later |

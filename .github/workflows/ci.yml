@@ -23,6 +23,7 @@ jobs:
       - run: docker run -d --name e2b-redis -p 6379:6379 redis:7-alpine
       - run: cargo fmt --all --check
       - run: scripts/ci/nbd-host.sh
+      - run: scripts/ci/hugepages.sh
       - run: sudo sysctl -w net.ipv4.ip_forward=1
       - run: scripts/ci/vm-assets.sh
       - run: scripts/ci/guest-rootfs.sh

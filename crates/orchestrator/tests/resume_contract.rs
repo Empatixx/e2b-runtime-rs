@@ -14,7 +14,8 @@ use orchestrator::sandbox::config::SandboxBuilder;
 use orchestrator::sandbox::config::sandbox_builder::{
     SetFirecracker, SetId, SetKernel, SetSlot, SetTemplateId, SetWorkDir,
 };
-use orchestrator::storage::backend::Storage;
+use orchestrator::sandbox::snapshot::in_place::memory::MemoryCheckpointRequest;
+use orchestrator::storage::backend::{ObjectMetadata, Storage};
 use orchestrator::storage::build::Build;
 use orchestrator::storage::header::{Header, Metadata};
 use orchestrator::template::cache::TemplateCache;
@@ -24,6 +25,8 @@ use uuid::Uuid;
 const ACCESS_TOKEN: &str = "resume-token";
 const NOTE: &str = "/home/user/note.txt";
 const NOTE_TEXT: &str = "hello from before the snapshot";
+const HUGE_PAGE: u64 = 2 << 20;
+const GUEST_MEMORY_MIB: u64 = 1024;
 
 struct Host {
     firecracker: PathBuf,
@@ -447,4 +450,159 @@ async fn an_optimized_trace_prefetches_memory_on_resume() {
     assert!(!mapping.indices.is_empty());
     assert!(installed > 0, "no page was prefetched");
     assert_eq!(health, 204);
+}
+
+fn free_huge_pages() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix("HugePages_Free:"))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn huge_pages_ready() -> bool {
+    let in_ci = std::env::var("CI").is_ok_and(|value| value == "true");
+    let ready = free_huge_pages() * HUGE_PAGE >= GUEST_MEMORY_MIB << 20;
+    assert!(
+        ready || !in_ci,
+        "huge page resume needs {GUEST_MEMORY_MIB} MiB of free 2 MiB pages in CI"
+    );
+    ready
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_huge_page_snapshot_resumes_with_2_mib_faults() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    if !huge_pages_ready() {
+        eprintln!("skipping: needs {GUEST_MEMORY_MIB} MiB of free 2 MiB huge pages");
+        return;
+    }
+    let templates = templates(&host).await;
+    let cold = templates
+        .sandbox(&host, "sbx-huge-cold", fresh_slot(4050).await)
+        .rootfs(templates.overlay(templates.template.clone(), "huge-cold"))
+        .huge_pages(true)
+        .kernel_logs(true)
+        .cold_boot()
+        .await
+        .unwrap();
+    write_file(&cold, "/dev/shm/e2b/huge", "memory in huge pages").await;
+    let build = cold.pause(&templates.storage, Uuid::new_v4()).await.unwrap().build;
+
+    let started = Instant::now();
+    let resumed = templates.resume(&host, "sbx-huge-resumed", 4051, &build).await;
+    let took = started.elapsed();
+    println!("huge page resume took {} ms: {}", took.as_millis(), resumed.phases());
+    let memory = read_file(&resumed, "/dev/shm/e2b/huge").await;
+    let health = health(&resumed).await;
+    let faults = resumed.faults_served();
+    println!("huge page resume served {faults} faults");
+    resumed.stop().await.unwrap();
+
+    assert_eq!(build.memfile.metadata.block_size, HUGE_PAGE);
+    assert_eq!(memory, (200, "memory in huge pages".to_owned()));
+    assert_eq!(health, 204);
+    assert!(faults > 0, "no page was served over userfaultfd");
+    assert!(
+        faults <= GUEST_MEMORY_MIB / 2,
+        "{faults} faults for {GUEST_MEMORY_MIB} MiB of 2 MiB pages"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_memory_checkpoint_in_place_keeps_the_sandbox_running() {
+    let Some(host) = host() else {
+        eprintln!("skipping: needs root, KVM, nbd and E2B_FIRECRACKER / E2B_KERNEL / E2B_ROOTFS");
+        return;
+    };
+    let templates = templates(&host).await;
+    let cold = templates
+        .sandbox(&host, "sbx-wp-cold", fresh_slot(4052).await)
+        .rootfs(templates.overlay(templates.template.clone(), "wp-cold"))
+        .kernel_logs(true)
+        .cold_boot()
+        .await
+        .unwrap();
+    let paused = cold.pause(&templates.storage, Uuid::new_v4()).await.unwrap().build;
+    let snapfile = templates.cache.get(paused.build_id).snapfile().await.unwrap();
+    let running = templates
+        .sandbox(&host, "sbx-wp-running", fresh_slot(4053).await)
+        .rootfs(templates.overlay(paused.rootfs.clone(), "wp-running"))
+        .memfile(templates.memfile(paused.memfile.clone()))
+        .use_sync_wp(true)
+        .resume(&snapfile)
+        .await
+        .unwrap();
+    write_file(&running, "/dev/shm/e2b/state", "before checkpoint").await;
+    write_file(&running, "/home/user/disk.txt", "disk before checkpoint").await;
+    run_in_guest(
+        &running,
+        "nohup sleep 600 >/dev/null 2>&1 & echo $! > /dev/shm/sleep.pid; sync",
+    )
+    .await;
+
+    let checkpoint_build = Uuid::new_v4();
+    let started = Instant::now();
+    let checkpoint = running
+        .checkpoint_memory_in_place(&MemoryCheckpointRequest {
+            dir: templates.work.join("wp-checkpoint"),
+            build_id: checkpoint_build,
+            team_id: "test-team".to_owned(),
+            balloon_mode: String::new(),
+            defer_export: false,
+            tracker_dirty: false,
+        })
+        .await
+        .map_err(|failure| failure.message)
+        .unwrap();
+    println!("in-place memory checkpoint took {} ms", started.elapsed().as_millis());
+    checkpoint
+        .snapshot
+        .upload(&templates.storage, &ObjectMetadata::default())
+        .await
+        .unwrap();
+    write_file(&running, "/dev/shm/e2b/state", "after checkpoint").await;
+    let still_running = (health(&running).await, read_file(&running, "/dev/shm/e2b/state").await);
+    running.stop().await.unwrap();
+
+    let restored = templates
+        .resume(&host, "sbx-wp-restored", 4054, &checkpoint.snapshot.snapshot.build)
+        .await;
+    run_in_guest(
+        &restored,
+        "kill -0 $(cat /dev/shm/sleep.pid) && echo alive > /dev/shm/alive",
+    )
+    .await;
+    let restored_files = [
+        read_file(&restored, "/dev/shm/e2b/state").await,
+        read_file(&restored, "/home/user/disk.txt").await,
+        read_file(&restored, "/dev/shm/alive").await,
+    ];
+    restored.stop().await.unwrap();
+
+    let exported = &checkpoint.snapshot.snapshot;
+    println!(
+        "checkpoint: memfile {} of {} bytes (tracked writes: {}), rootfs {} bytes",
+        exported.memfile_bytes, exported.memory_bytes, exported.tracked_writes, exported.rootfs_bytes
+    );
+    assert_eq!(still_running, (204, (200, "after checkpoint".to_owned())));
+    assert_eq!(
+        restored_files,
+        ["before checkpoint", "disk before checkpoint", "alive\n"].map(|text| (200, text.to_owned()))
+    );
+    assert!(!checkpoint.deferred);
+    assert!(
+        exported.tracked_writes,
+        "the checkpoint did not use write-protect tracking"
+    );
+    assert!(
+        exported.memfile_bytes < exported.memory_bytes / 2,
+        "checkpoint exported {} of {} memory bytes",
+        exported.memfile_bytes,
+        exported.memory_bytes
+    );
 }

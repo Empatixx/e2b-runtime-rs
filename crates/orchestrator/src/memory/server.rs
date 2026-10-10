@@ -242,7 +242,13 @@ impl CowExporter {
                 self.uffd
                     .get_ref()
                     .write_protect(run.start, run.length, true)
-                    .map_err(|e| format!("arm write-protect [{:#x}, {:#x}): {e}", run.start, run.start + run.length))
+                    .map_err(|e| {
+                        format!(
+                            "arm write-protect [{:#x}, {:#x}): {e}",
+                            run.start,
+                            run.start + run.length
+                        )
+                    })
             })
     }
 
@@ -1099,7 +1105,8 @@ mod tests {
         let dirty: RoaringBitmap = (0..4).collect();
         let window = fixture
             .server
-            .exporter().begin(&dirty, Arc::new(LiveSource(fixture.pages.clone())), sink.clone())
+            .exporter()
+            .begin(&dirty, Arc::new(LiveSource(fixture.pages.clone())), sink.clone())
             .unwrap();
 
         write_page(&fixture.pages, 0, 0x99).await;
@@ -1141,7 +1148,8 @@ mod tests {
         let dirty: RoaringBitmap = (0..4).collect();
         let window = fixture
             .server
-            .exporter().begin(&dirty, Arc::new(Zeros), Arc::new(Void))
+            .exporter()
+            .begin(&dirty, Arc::new(Zeros), Arc::new(Void))
             .unwrap();
 
         let pages = fixture.pages.clone();
