@@ -3,6 +3,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -120,7 +122,7 @@ impl<F: SlotFactory> NetworkPool<F> {
 
     fn return_now(self: &Arc<Self>, lease: SlotLease<F>) {
         if let Some(slot) = lease.keep() {
-            self.return_after(slot, Duration::ZERO);
+            self.return_after(slot, Duration::ZERO, nothing_to_release());
         }
     }
 
@@ -135,35 +137,45 @@ impl<F: SlotFactory> NetworkPool<F> {
     }
 
     pub fn return_slot(self: &Arc<Self>, slot: Slot) {
-        self.return_after(slot, RETURN_DELAY);
+        self.return_after(slot, RETURN_DELAY, nothing_to_release());
+    }
+
+    pub fn return_slot_with(self: &Arc<Self>, slot: Slot, release: Release) {
+        self.return_after(slot, RETURN_DELAY, release);
     }
 
     pub fn discard_slot(self: &Arc<Self>, slot: Slot) {
-        let pool = self.clone();
-        self.tasks.spawn(async move { pool.destroy(slot).await });
+        self.discard_slot_with(slot, nothing_to_release());
     }
 
-    fn return_after(self: &Arc<Self>, slot: Slot, delay: Duration) {
+    pub fn discard_slot_with(self: &Arc<Self>, slot: Slot, release: Release) {
+        let pool = self.clone();
+        self.tasks.spawn(async move {
+            match release().await {
+                Ok(()) => pool.destroy(slot).await,
+                Err(e) => retained(slot, &e),
+            }
+        });
+    }
+
+    fn return_after(self: &Arc<Self>, slot: Slot, delay: Duration, release: Release) {
         let pool = self.clone();
         self.tasks.spawn(
-            async move { pool.return_timed(slot, delay).await }.instrument(tracing::info_span!(
+            async move { pool.return_timed(slot, delay, release).await }.instrument(tracing::info_span!(
                 "clean network-slot",
                 network_version = self.network_version
             )),
         );
     }
 
-    async fn return_timed(&self, slot: Slot, delay: Duration) {
+    async fn return_timed(&self, slot: Slot, delay: Duration, release: Release) {
         let started = Instant::now();
         let shutdown = tokio::select! {
             () = tokio::time::sleep(delay) => false,
             () = self.done.cancelled() => true,
         };
         let cleanup_started = Instant::now();
-        let returned = match shutdown {
-            true => self.cleanup(slot).await,
-            false => self.recycle(slot).await,
-        };
+        let returned = self.release_then_settle(slot, release, shutdown).await;
         SlotReturn {
             network_version: self.network_version,
             result: slot_return_result(shutdown, &returned),
@@ -217,6 +229,18 @@ impl<F: SlotFactory> NetworkPool<F> {
         }
     }
 
+    async fn release_then_settle(&self, slot: Slot, release: Release, shutdown: bool) -> Result<(), ReturnFailure> {
+        if let Err(e) = release().await {
+            retained(slot, &e);
+            return Err(ReturnFailure::Retained);
+        }
+        match shutdown {
+            true => self.cleanup(slot).await,
+            false => self.recycle(slot).await,
+        }
+        .map_err(ReturnFailure::Failed)
+    }
+
     async fn recycle(&self, slot: Slot) -> Result<(), String> {
         if self.custom_rules.lock().remove(&slot.index)
             && let Err(e) = self.factory.configure(slot, &EgressRules::default()).await
@@ -255,12 +279,33 @@ impl<F: SlotFactory> NetworkPool<F> {
     }
 }
 
-fn slot_return_result(shutdown: bool, returned: &Result<(), String>) -> SlotReturnResult {
+fn slot_return_result(shutdown: bool, returned: &Result<(), ReturnFailure>) -> SlotReturnResult {
     match (returned, shutdown) {
-        (Err(_), _) => SlotReturnResult::Error,
+        (Err(ReturnFailure::Retained), _) => SlotReturnResult::Retained,
+        (Err(ReturnFailure::Failed(_)), _) => SlotReturnResult::Error,
         (Ok(()), true) => SlotReturnResult::Shutdown,
         (Ok(()), false) => SlotReturnResult::Success,
     }
+}
+
+fn retained(slot: Slot, error: &str) {
+    tracing::error!(
+        slot = slot.index,
+        error,
+        "network slot retained and unavailable for reuse"
+    );
+}
+
+pub type Release = Box<dyn FnOnce() -> BoxFuture<'static, Result<(), String>> + Send>;
+
+pub fn nothing_to_release() -> Release {
+    Box::new(|| std::future::ready(Ok(())).boxed())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReturnFailure {
+    Retained,
+    Failed(String),
 }
 
 #[cfg(test)]
@@ -391,6 +436,43 @@ mod tests {
         pool.return_slot(returned);
 
         assert_eq!(waiting.await.unwrap(), Ok(returned));
+    }
+
+    fn failing_release() -> Release {
+        Box::new(|| std::future::ready(Err("boom".to_owned())).boxed())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_release_keeps_the_slot_allocated_and_out_of_reuse_on_every_path() {
+        let (pool, slots) = pool(1..=100);
+        pool.start();
+        let normal = pool.get().await.unwrap();
+        let shutdown = pool.get().await.unwrap();
+        pool.return_slot_with(normal, failing_release());
+        tokio::time::sleep(RETURN_DELAY + Duration::from_millis(10)).await;
+        assert!(pool.reused.lock().is_empty());
+        assert!(!slots.destroyed.lock().contains(&normal.index));
+
+        pool.discard_slot_with(shutdown, failing_release());
+        pool.close().await;
+        pool.return_slot_with(Slot::new(99).unwrap(), failing_release());
+        settle().await;
+
+        assert!(!slots.destroyed.lock().contains(&shutdown.index));
+        assert!(!slots.destroyed.lock().contains(&99));
+        assert!(pool.reused.lock().is_empty());
+    }
+
+    #[test]
+    fn a_retained_slot_reads_as_retained_in_the_metric() {
+        assert_eq!(
+            slot_return_result(false, &Err(ReturnFailure::Retained)),
+            SlotReturnResult::Retained
+        );
+        assert_eq!(
+            slot_return_result(true, &Err(ReturnFailure::Failed("x".to_owned()))),
+            SlotReturnResult::Error
+        );
     }
 
     #[tokio::test(start_paused = true)]

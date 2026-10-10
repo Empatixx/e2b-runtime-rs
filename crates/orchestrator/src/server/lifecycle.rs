@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -16,6 +17,7 @@ use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
 use super::status::Work;
+use crate::network::pool::Release;
 use crate::events::{PAUSED, SandboxEvent};
 use crate::firecracker::exit::{CrashCause, ExitInfo};
 use crate::memory::trace::Trace;
@@ -236,17 +238,19 @@ impl Running {
         }
         let stopped = self.sandbox.stop().await;
         let _ = std::fs::remove_dir_all(self.node.work_dir_of(&lifecycle));
+        let release = network_release(self.node.clone(), lifecycle.lifecycle_id.clone());
         match stopped {
-            Ok(()) => self.node.network.return_slot(self.slot),
+            Ok(()) => self.node.network.return_slot_with(self.slot, release),
             Err(e) => {
                 tracing::error!(sandbox = %id, error = %e, "sandbox did not stop cleanly");
-                self.node.network.discard_slot(self.slot);
+                self.node.network.discard_slot_with(self.slot, release);
             }
         }
-        self.node.proxy.get().iter().for_each(|proxy| {
-            proxy.on_network_release(&lifecycle.lifecycle_id);
-            proxy.remove_from_pool(&lifecycle.lifecycle_id);
-        });
+        self.node
+            .proxy
+            .get()
+            .iter()
+            .for_each(|proxy| proxy.remove_from_pool(&lifecycle.lifecycle_id));
         self.node.registry.finish(&lifecycle);
     }
 
@@ -317,6 +321,13 @@ impl Running {
             .local_expiry
             .then(|| Instant::now() + end.duration_since(SystemTime::now()).unwrap_or_default())
     }
+}
+
+fn network_release(node: Arc<Node>, lifecycle_id: String) -> Release {
+    Box::new(move || {
+        node.proxy.get().iter().for_each(|proxy| proxy.on_network_release(&lifecycle_id));
+        std::future::ready(Ok(())).boxed()
+    })
 }
 
 async fn expiry(deadline: Option<Instant>) {
