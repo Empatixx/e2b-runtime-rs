@@ -9,6 +9,7 @@ use super::contexts::{FlagContext, merge_contexts};
 use super::flags::Flag;
 
 pub const LAUNCH_DARKLY_API_KEY: &str = "LAUNCH_DARKLY_API_KEY";
+const UNDEFINED_DEPLOYMENT_ENVIRONMENT: &str = "undefined";
 pub const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait FlagValue: Clone {
@@ -77,7 +78,7 @@ pub struct FlagSettings {
     #[builder(default)]
     api_key: String,
     #[builder(default)]
-    deployment_name: String,
+    deployment_environment: String,
     #[builder(default)]
     service_name: String,
 }
@@ -129,13 +130,14 @@ impl FlagSettings {
     }
 
     fn extra_contexts(&self) -> Vec<FlagContext> {
-        let deployment = Some(&self.deployment_name)
+        let deployment = Some(self.deployment_environment.as_str())
             .filter(|name| !name.is_empty())
-            .map(|name| FlagContext::deployment(name));
+            .unwrap_or(UNDEFINED_DEPLOYMENT_ENVIRONMENT);
+        let deployment = FlagContext::deployment_environment(deployment);
         let service = Some(&self.service_name)
             .filter(|name| !name.is_empty())
             .map(|name| FlagContext::service(name));
-        deployment
+        Some(deployment)
             .into_iter()
             .chain(service)
             .chain(self.context_providers.iter().cloned())
@@ -244,7 +246,7 @@ mod tests {
     #[test]
     fn deployment_service_and_providers_follow_the_evaluation_contexts() {
         let flags = FeatureFlags::builder()
-            .deployment_name("e2b.dev")
+            .deployment_environment("staging")
             .service_name("")
             .context_provider(FlagContext::orchestrator("node-1", "abc"))
             .context_provider(FlagContext::instance_group(""))
@@ -260,10 +262,30 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                ("deployment".to_owned(), "e2b.dev".to_owned()),
+                ("deployment_environment".to_owned(), "staging".to_owned()),
                 ("orchestrator".to_owned(), "node-1".to_owned()),
                 ("instance-group".to_owned(), String::new()),
             ]
+        );
+    }
+
+    #[test]
+    fn an_empty_deployment_environment_is_undefined() {
+        let flags = FeatureFlags::builder()
+            .deployment_environment("")
+            .service_name("")
+            .offline();
+
+        let kinds: Vec<_> = flags
+            .connection
+            .extra_contexts
+            .iter()
+            .map(|context| (context.kind().to_owned(), context.key().to_owned()))
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![("deployment_environment".to_owned(), "undefined".to_owned())]
         );
     }
 

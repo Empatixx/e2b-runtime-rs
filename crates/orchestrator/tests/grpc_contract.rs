@@ -177,7 +177,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         slots: pool.indices(),
         local_expiry,
         labels: Vec::new(),
-        domain_name: String::new(),
+        deployment_environment: String::new(),
         instance_group_name: String::new(),
         runtime_flags: RuntimeFlags::new(
             feature_flags.clone(),

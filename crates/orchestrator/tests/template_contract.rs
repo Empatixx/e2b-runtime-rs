@@ -174,7 +174,7 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         slots: SLOTS,
         local_expiry: false,
         labels: Vec::new(),
-        domain_name: String::new(),
+        deployment_environment: String::new(),
         instance_group_name: String::new(),
         runtime_flags: RuntimeFlags::new(
             feature_flags.clone(),

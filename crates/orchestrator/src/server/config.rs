@@ -10,7 +10,7 @@ use super::services::Services;
 use super::upload::UploadHandler;
 use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
-use crate::featureflags::feature_flags_builder::{SetApiKey, SetDeploymentName};
+use crate::featureflags::feature_flags_builder::{SetApiKey, SetDeploymentEnvironment};
 use crate::featureflags::{FeatureFlags, FeatureFlagsBuilder, FlagContext, LAUNCH_DARKLY_API_KEY};
 use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
@@ -51,7 +51,7 @@ pub struct NodeConfig {
     pub slots: RangeInclusive<u32>,
     pub local_expiry: bool,
     pub labels: Vec<String>,
-    pub domain_name: String,
+    pub deployment_environment: String,
     pub instance_group_name: String,
     pub feature_flags: FeatureFlags,
     pub runtime_flags: RuntimeFlags,
@@ -127,7 +127,7 @@ impl NodeConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            domain_name: var("DOMAIN_NAME").unwrap_or_default(),
+            deployment_environment: var("DEPLOYMENT_ENVIRONMENT").unwrap_or_default(),
             instance_group_name: var("INSTANCE_GROUP_NAME").unwrap_or_default(),
             feature_flags: FeatureFlags::offline(),
             runtime_flags: RuntimeFlags::new(FeatureFlags::offline(), services.clone()),
@@ -145,10 +145,10 @@ impl NodeConfig {
         })
     }
 
-    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder<SetDeploymentName<SetApiKey>> {
+    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder<SetDeploymentEnvironment<SetApiKey>> {
         FeatureFlags::builder()
             .api_key(std::env::var(LAUNCH_DARKLY_API_KEY).unwrap_or_default())
-            .deployment_name(self.domain_name.as_str())
+            .deployment_environment(self.deployment_environment.as_str())
             .context_provider(FlagContext::orchestrator(&self.node_id, commit))
             .context_provider(FlagContext::instance_group(self.instance_group_name.trim()))
     }

@@ -51,8 +51,8 @@ impl FlagContext {
         Self::of_kind("instance-group", instance_group_name)
     }
 
-    pub fn deployment(deployment_name: &str) -> Self {
-        Self::of_kind("deployment", deployment_name)
+    pub fn deployment_environment(name: &str) -> Self {
+        Self::of_kind("deployment_environment", name)
     }
 
     pub fn service(service_name: &str) -> Self {
