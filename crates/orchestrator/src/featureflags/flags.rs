@@ -35,6 +35,12 @@ pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-inc
 
 pub const USE_SYNC_WP: BoolFlag = Flag::new("use-sync-wp", false);
 pub const PREBOOT_FS_RECOVERY: BoolFlag = Flag::new("preboot-fs-recovery", false);
+pub const FREEZE_USER_CGROUP_TIMEOUT_MS: IntFlag = Flag::new("freeze-user-cgroup-timeout-ms", 2000);
+pub const FREEZE_GUEST_HIERARCHY: BoolFlag = Flag::new("freeze-guest-hierarchy", false);
+pub const FREEZE_GUEST_HIERARCHY_MAX_CGROUPS: IntFlag = Flag::new("freeze-guest-hierarchy-max-cgroups", 512);
+pub const COLLAPSE_ENVD_HEAP: BoolFlag = Flag::new("collapse-envd-heap", false);
+pub const COLLAPSE_ENVD_HEAP_TIMEOUT_MS: IntFlag = Flag::new("collapse-envd-heap-timeout-ms", 10000);
+pub const GUEST_PAUSE_RECLAIM: JsonFlag = Flag::new("guest-pause-reclaim", Value::Null);
 pub const SYNC_WP_TRACKER_DIRTY: BoolFlag = Flag::new("sync-wp-tracker-dirty", false);
 pub const MEMFD_BACKGROUND_COPY: BoolFlag = Flag::new("memfd-background-copy", true);
 pub const IN_PLACE_CHECKPOINT: BoolFlag = Flag::new("in-place-checkpoint", false);
@@ -138,6 +144,11 @@ pub fn envd_offline_upgrade_target() -> StringFlag {
         "envd-offline-upgrade-target",
         env_or("ENVD_OFFLINE_UPGRADE_TARGET", "off"),
     )
+}
+
+pub fn freeze_user_cgroup() -> BoolFlag {
+    let development = matches!(env_or("ENVIRONMENT", "prod").as_str(), "dev" | "local");
+    Flag::new("freeze-user-cgroup", development)
 }
 
 pub fn envd_binary_cache() -> BoolFlag {

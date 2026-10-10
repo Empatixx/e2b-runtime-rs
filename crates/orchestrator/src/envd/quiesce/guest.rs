@@ -16,6 +16,18 @@ const ELLIPSES: &str = "...";
 const START_PATH: &str = "/process.Process/Start";
 const NO_EXIT_CODE: i32 = -1;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvdReply {
+    pub status: u16,
+    pub body: bytes::Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvdFailure {
+    pub message: String,
+    pub timed_out: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct GuestEnvd {
     pub base_url: String,
@@ -70,6 +82,32 @@ impl GuestEnvd {
                 error_body(&response.bytes().await.unwrap_or_default())
             )),
         }
+    }
+
+    pub async fn post_for_body(&self, path: &str, query: &str, timeout: Duration) -> Result<EnvdReply, EnvdFailure> {
+        let url = match query.is_empty() {
+            true => format!("{}/{path}", self.base_url),
+            false => format!("{}/{path}?{query}", self.base_url),
+        };
+        let response = self
+            .request(reqwest::Client::new().post(url))
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| EnvdFailure {
+                message: format!("{path} request: {e}"),
+                timed_out: e.is_timeout(),
+            })?;
+        let status = response.status().as_u16();
+        let body = response.bytes().await.map_err(|e| EnvdFailure {
+            message: format!("{path} response: {e}"),
+            timed_out: e.is_timeout(),
+        })?;
+        Ok(EnvdReply { status, body })
+    }
+
+    pub fn error_text(path: &str, reply: &EnvdReply) -> String {
+        format!("{path} returned {}: {}", reply.status, error_body(&reply.body))
     }
 
     pub async fn shell(&self, script: &str, timeout: Duration) -> Result<i32, String> {

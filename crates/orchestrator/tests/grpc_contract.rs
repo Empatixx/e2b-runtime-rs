@@ -35,6 +35,7 @@ use tonic::Code;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+const GUEST_ENVD_VERSION: &str = "0.9.0";
 const TOKEN: &str = "grpc-token";
 const LIFECYCLE_POOL: Pool = Pool {
     template_slot: 4099,
@@ -148,6 +149,12 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
     });
     let feature_flags = FeatureFlags::builder()
         .override_flag("max-sandboxes-per-node", max_sandboxes)
+        .override_flag("freeze-user-cgroup", true)
+        .override_flag("collapse-envd-heap", true)
+        .override_flag(
+            "guest-pause-reclaim",
+            serde_json::json!({"sync": 2000, "drop_caches": 1000}),
+        )
         .offline();
     let builder = BuilderConfig {
         feature_flags: feature_flags.clone(),
@@ -231,7 +238,7 @@ fn create_request(id: &str, build: Uuid, lifetime: Duration) -> SandboxCreateReq
             envd_access_token: Some(TOKEN.to_owned()),
             team_id: "team".to_owned(),
             execution_id: format!("{id}-execution"),
-            envd_version: "0.5.0".to_owned(),
+            envd_version: GUEST_ENVD_VERSION.to_owned(),
             firecracker_version: "v1.14.1_e2b".to_owned(),
             vcpu: 2,
             ram_mb: 1024,

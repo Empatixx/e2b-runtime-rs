@@ -21,6 +21,7 @@ use crate::envd::EnvdDefaults;
 use crate::envd::files::copy_file;
 use crate::envd::process::CommandContext;
 use crate::envd::version::is_at_least;
+use crate::featureflags::FlagContext;
 use crate::network::pool::SlotLease;
 use crate::network::slot::{HostSlots, Slot};
 use crate::proto::LogLevel;
@@ -32,7 +33,7 @@ use crate::sandbox::config::sandbox_builder::{
 use crate::sandbox::config::{PreBoot, SandboxBuilder};
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::server::node::layers::{LayerSandbox, LayerSource};
-use crate::server::node::{BuildNetwork, BuildSandbox};
+use crate::server::node::{BUILD_SANDBOX_TYPE, BuildNetwork, BuildSandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
 
@@ -325,12 +326,31 @@ impl LayerExecutor<'_> {
         let build_id =
             Uuid::parse_str(&metadata.template.build_id).map_err(|e| paused(format!("error processing vm: {e}")))?;
         let dir = self.env.node.layer_dir(build_id);
+        self.env
+            .node
+            .reclaim_before_pause(&sandbox, &self.reclaim_contexts(&sandbox), false)
+            .await;
         let local = sandbox
             .pause_into(&dir, build_id)
             .await
             .map_err(|e| paused(format!("error processing vm: {e}")))?;
         self.upload(local, dir, &metadata, hash, build_origin).map_err(paused)?;
         Ok(metadata)
+    }
+
+    fn reclaim_contexts(&self, sandbox: &Sandbox) -> Vec<FlagContext> {
+        vec![
+            FlagContext::sandbox_runtime(
+                sandbox.id(),
+                self.template_id,
+                &self.settings.kernel_version,
+                &self.settings.firecracker_version,
+                self.envd_version,
+                BUILD_SANDBOX_TYPE,
+            ),
+            FlagContext::team(self.team_id),
+            FlagContext::template(self.template_id),
+        ]
     }
 
     fn upload(

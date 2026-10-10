@@ -1,4 +1,4 @@
-mod guest;
+pub mod guest;
 
 use std::time::Duration;
 

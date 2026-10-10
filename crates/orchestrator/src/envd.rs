@@ -4,6 +4,7 @@ pub mod cpus;
 pub mod files;
 pub mod process;
 pub mod quiesce;
+pub mod reclaim;
 pub mod report;
 pub mod upgrade;
 pub mod version;

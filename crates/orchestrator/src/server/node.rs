@@ -5,6 +5,7 @@ use pause_disk::ROOTFS_OVERLAY_FILE;
 use reboot::RebootRequest;
 pub mod prefetch;
 mod reboot;
+pub mod reclaim;
 mod upgrade;
 
 use std::collections::{BTreeMap, HashMap};
@@ -83,7 +84,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
 const TEMPLATE_DEFAULT_USER: &str = "user";
 pub(super) const SANDBOX_TYPE: &str = "sandbox";
-pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
+pub const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub type BaseSandbox =

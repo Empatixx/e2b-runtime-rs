@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{Exported, SnapshotFiles};
+use crate::envd::quiesce::guest::GuestEnvd;
 use crate::envd::quiesce::{GuestQuiesce, Preparation, PreparationFailure};
+use crate::envd::reclaim::GuestReclaim;
 use crate::envd::{self};
 use crate::sandbox::Sandbox;
 use crate::storage::build::Build;
@@ -77,6 +79,18 @@ struct Freeze {
 }
 
 impl Sandbox {
+    pub fn guest_reclaim(&self) -> GuestReclaim<'_> {
+        GuestReclaim {
+            envd: GuestEnvd {
+                base_url: format!("http://{}", self.envd_address()),
+                access_token: self.config.envd.access_token.clone(),
+            },
+            envd_version: &self.config.envd_version,
+            sandbox_id: &self.config.id,
+            team_id: &self.config.team_id,
+        }
+    }
+
     pub fn guest_quiesce(&self, flags: QuiesceFlags) -> GuestQuiesce {
         GuestQuiesce::builder()
             .base_url(format!("http://{}", self.envd_address()))

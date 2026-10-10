@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
 use super::node::prefetch::PausedBuild;
+use super::node::reclaim::reclaim_contexts;
 use super::node::{Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::pause_disk::PauseDiskReservation;
@@ -335,6 +336,7 @@ impl Running {
         disk: Option<Arc<PauseDiskReservation>>,
     ) {
         let parent = self.info.lock().clone();
+        self.reclaim(&parent, true).await;
         let paused = self
             .node
             .pause_filesystem_locally(&self.sandbox, &parent, build_id, flags)
@@ -365,6 +367,7 @@ impl Running {
         disk: Option<Arc<PauseDiskReservation>>,
     ) {
         let parent = self.info.lock().clone();
+        self.reclaim(&parent, false).await;
         let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
         if snapshotted.is_ok() {
             self.node.events.publish(
@@ -392,7 +395,14 @@ impl Running {
 
     async fn checkpoint(&self, build_id: Uuid, reply: oneshot::Sender<Result<LocalSnapshot, String>>) {
         let parent = self.info.lock().clone();
+        self.reclaim(&parent, false).await;
         let _ = reply.send(self.node.snapshot_locally(&self.sandbox, &parent, build_id).await);
+    }
+
+    async fn reclaim(&self, parent: &SandboxInfo, filesystem_only: bool) {
+        self.node
+            .reclaim_before_pause(&self.sandbox, &reclaim_contexts(&parent.config), filesystem_only)
+            .await;
     }
 
     async fn wait_for_ending(&mut self) -> Ending {
@@ -403,8 +413,13 @@ impl Running {
                     Some(Command::Extend) => continue,
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
                     Some(Command::CheckpointInPlace { request, reply }) => {
+                        let parent = self.info.lock().clone();
+                        self.reclaim(&parent, true).await;
                         let checkpointed = self.sandbox.checkpoint_filesystem_in_place(&request).await;
                         let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
+                        if !lost {
+                            self.sandbox.guest_reclaim().unfreeze().await;
+                        }
                         drop(reply.send(checkpointed));
                         if lost {
                             return Ending::Stop { reason: "lost during an in-place checkpoint".to_owned() };
@@ -412,8 +427,13 @@ impl Running {
                     }
                     Some(Command::ResolveBalloonMode { reply }) => drop(reply.send(self.sandbox.resolve_balloon_mode().await)),
                     Some(Command::CheckpointMemoryInPlace { request, reply }) => {
+                        let parent = self.info.lock().clone();
+                        self.reclaim(&parent, false).await;
                         let checkpointed = self.sandbox.checkpoint_memory_in_place(&request).await;
                         let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
+                        if !lost {
+                            self.sandbox.guest_reclaim().unfreeze().await;
+                        }
                         drop(reply.send(checkpointed));
                         if lost {
                             return Ending::Stop { reason: "lost during an in-place checkpoint".to_owned() };
