@@ -1,0 +1,13 @@
+e2b-runtime-rs
+Copyright 2026 Jiří Krokviak
+
+This product is a Rust rewrite of parts of E2B (https://github.com/e2b-dev/infra),
+Copyright 2023 FoundryLabs, Inc., licensed under the Apache License, Version 2.0.
+
+The protocol definitions in proto/ and the envd API description in
+crates/envd/reference/ are copied from E2B; the commit each copy comes from is
+recorded in the UPSTREAM_COMMIT file next to it. The Rust code reimplements the
+behaviour of E2B's envd and orchestrator; it is not a line by line translation.
+
+E2B is a trademark of FoundryLabs, Inc. This project is not affiliated with,
+endorsed by or sponsored by FoundryLabs, Inc.

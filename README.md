@@ -178,3 +178,9 @@ docs/superpowers/      specs and implementation plans
 ```
 
 Code style rules live in [CLAUDE.md](CLAUDE.md): readability first, small methods, method chains, builders, no comments.
+
+## License
+
+Apache License 2.0, the same license as E2B. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+This project rewrites parts of [E2B](https://github.com/e2b-dev/infra) (Copyright 2023 FoundryLabs, Inc.) in Rust. It is not affiliated with, endorsed by or sponsored by FoundryLabs, Inc. E2B is their trademark.
