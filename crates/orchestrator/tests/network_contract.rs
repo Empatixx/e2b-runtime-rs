@@ -281,7 +281,7 @@ async fn pool_recycles_a_returned_slot() {
     for index in 4020..=4021 {
         let _ = Slot::new(index).unwrap().destroy().await;
     }
-    let pool = NetworkPool::new(HostSlots, host_slot_storage(4020..=4021));
+    let pool = NetworkPool::new(HostSlots, host_slot_storage(4020..=4021), 1);
     pool.start();
 
     let slot = next_slot(&pool).await;
