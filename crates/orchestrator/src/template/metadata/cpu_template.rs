@@ -3,7 +3,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::null_as_default;
-use crate::firecracker::version::parse_firecracker_version;
+use crate::firecracker::version::FirecrackerVersion;
 
 const MIN_TSC_KHZ: i64 = 100_000;
 const MAX_TSC_KHZ: i64 = 10_000_000;
@@ -95,8 +95,7 @@ impl CpuTemplate {
         Ok((!template.is_empty()).then_some(template))
     }
 
-    pub fn validate(&self, firecracker_version: &str) -> Result<(), String> {
-        let version = parse_firecracker_version(firecracker_version)?;
+    pub fn validate(&self, version: &FirecrackerVersion) -> Result<(), String> {
         if self.x86_tsc_khz != 0 && !version.has_tsc_khz_template() {
             return Err("CPU template sets x86_tsc_khz, which this Firecracker version does not support".to_owned());
         }
@@ -332,6 +331,10 @@ mod tests {
         "x86_tsc_khz": 3200000
     }"#;
 
+    fn fc(version: &str) -> FirecrackerVersion {
+        crate::firecracker::version::parse_firecracker_version(version).unwrap()
+    }
+
     fn tsc(khz: i64) -> CpuTemplate {
         CpuTemplate {
             x86_tsc_khz: khz,
@@ -493,7 +496,7 @@ mod tests {
 
         assert_eq!(
             template.validate_for(go_arch(std::env::consts::ARCH)).is_ok(),
-            template.validate("v1.14-0.2.0").is_ok()
+            template.validate(&fc("v1.14-0.2.0")).is_ok()
         );
     }
 
@@ -530,25 +533,13 @@ mod tests {
 
     #[test]
     fn the_tsc_frequency_needs_a_release_that_serves_it() {
-        let error = tsc(3_200_000).validate("v1.14-0.2.0").unwrap_err();
+        let error = tsc(3_200_000).validate(&fc("v1.14-0.2.0")).unwrap_err();
         assert!(error.contains("x86_tsc_khz"), "{error}");
-        assert_eq!(kvm().validate("v1.14-0.2.0"), Ok(()));
-        assert_eq!(CpuTemplate::default().validate("v1.14-0.2.0"), Ok(()));
+        assert_eq!(kvm().validate(&fc("v1.14-0.2.0")), Ok(()));
+        assert_eq!(CpuTemplate::default().validate(&fc("v1.14-0.2.0")), Ok(()));
         if go_arch(std::env::consts::ARCH) == "amd64" {
-            assert_eq!(tsc(3_200_000).validate("v1.14-0.3.0"), Ok(()));
+            assert_eq!(tsc(3_200_000).validate(&fc("v1.14-0.3.0")), Ok(()));
         }
-    }
-
-    #[test]
-    fn a_template_is_checked_against_the_version_it_boots_with() {
-        assert!(
-            tsc(3_200_000)
-                .validate("v1.14-0.2.0")
-                .unwrap_err()
-                .contains("x86_tsc_khz")
-        );
-        assert!(kvm().validate("not-a-version").is_err());
-        assert_eq!(kvm().validate("v1.14-0.3.0"), Ok(()));
     }
 
     #[test]

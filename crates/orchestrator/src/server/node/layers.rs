@@ -177,7 +177,7 @@ impl Node {
             .map_err(|e| format!("create {}: {e}", work_dir.display()))
     }
 
-    fn layer_overlay(&self, build: &Build, work_dir: &Path) -> Result<Arc<Overlay>, String> {
+    pub(super) fn layer_overlay(&self, build: &Build, work_dir: &Path) -> Result<Arc<Overlay>, String> {
         let rootfs = Arc::new(BuildFile::new(
             build.rootfs.clone(),
             Artifact::Rootfs,

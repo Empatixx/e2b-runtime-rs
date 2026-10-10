@@ -59,7 +59,7 @@ impl SandboxService for SandboxServer {
         let created = self.create_sandbox(request).instrument(span).await;
         CreateOutcome {
             resume,
-            fs_only: false,
+            fs_only: created.as_ref().is_ok_and(|created| created.filesystem_only),
             fs_boot_requested,
             success: created.is_ok(),
             envd_upgraded: false,
@@ -67,7 +67,7 @@ impl SandboxService for SandboxServer {
             team_id,
         }
         .record(started.elapsed());
-        created
+        created.map(|created| created.response)
     }
 
     async fn update(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
@@ -115,10 +115,7 @@ impl SandboxService for SandboxServer {
 }
 
 impl SandboxServer {
-    async fn create_sandbox(
-        &self,
-        request: Request<SandboxCreateRequest>,
-    ) -> Result<Response<SandboxCreateResponse>, Status> {
+    async fn create_sandbox(&self, request: Request<SandboxCreateRequest>) -> Result<CreatedResponse, Status> {
         let created = self.start_sandbox(request).await;
         report_create_failure(&created);
         if created.is_ok() {
@@ -127,11 +124,9 @@ impl SandboxServer {
         created
     }
 
-    async fn start_sandbox(
-        &self,
-        request: Request<SandboxCreateRequest>,
-    ) -> Result<Response<SandboxCreateResponse>, Status> {
+    async fn start_sandbox(&self, request: Request<SandboxCreateRequest>) -> Result<CreatedResponse, Status> {
         let request = request.into_inner();
+        let filesystem_boot_requested = request.filesystem_boot.unwrap_or_default();
         let config = request
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox config is required"))?;
@@ -141,16 +136,19 @@ impl SandboxServer {
             end: request.end_time.map_or(SystemTime::UNIX_EPOCH, system_time),
         };
         let resolved_firecracker_version = config.firecracker_version.clone();
-        let scheduling_metadata = tokio::spawn(self.node.clone().create(config, lifetime))
+        let created = tokio::spawn(self.node.clone().create(config, lifetime, filesystem_boot_requested))
             .await
             .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
-        Ok(Response::new(SandboxCreateResponse {
-            client_id: self.node.node_id.clone(),
-            scheduling_metadata: Some(scheduling_metadata),
-            filesystem_boot_applied: false,
-            resolved_firecracker_version,
-            network_placement: None,
-        }))
+        Ok(CreatedResponse {
+            filesystem_only: created.filesystem_only,
+            response: Response::new(SandboxCreateResponse {
+                client_id: self.node.node_id.clone(),
+                scheduling_metadata: Some(created.scheduling),
+                filesystem_boot_applied: created.filesystem_booted,
+                resolved_firecracker_version,
+                network_placement: None,
+            }),
+        })
     }
 
     async fn update_sandbox(&self, request: Request<SandboxUpdateRequest>) -> Result<Response<()>, Status> {
@@ -393,7 +391,12 @@ fn sandbox_attribute(id: &str) -> [KeyValue; 1] {
     [KeyValue::new("sandbox.id", id.to_owned())]
 }
 
-fn report_create_failure(created: &Result<Response<SandboxCreateResponse>, Status>) {
+struct CreatedResponse {
+    response: Response<SandboxCreateResponse>,
+    filesystem_only: bool,
+}
+
+fn report_create_failure(created: &Result<CreatedResponse, Status>) {
     let Err(status) = created else { return };
     match (status.code(), status.message().starts_with("sandbox files for ")) {
         (tonic::Code::FailedPrecondition, true) => {

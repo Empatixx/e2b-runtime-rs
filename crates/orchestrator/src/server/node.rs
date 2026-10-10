@@ -2,7 +2,9 @@ mod checkpoint;
 pub mod layers;
 mod pause_disk;
 use pause_disk::ROOTFS_OVERLAY_FILE;
+use reboot::RebootRequest;
 pub mod prefetch;
+mod reboot;
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -33,6 +35,7 @@ use super::retry::Failure;
 use super::scheduling::from_headers;
 use super::services::Services;
 use super::status::NodeStatus;
+use super::vcpus::{filesystem_boot, validate_cold_boot_vcpus};
 use super::uploads::{Outcome, Uploads};
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
@@ -174,6 +177,12 @@ impl Drop for BuildNetwork {
 pub struct Lifetime {
     pub start: SystemTime,
     pub end: SystemTime,
+}
+
+pub struct Created {
+    pub scheduling: SchedulingMetadata,
+    pub filesystem_booted: bool,
+    pub filesystem_only: bool,
 }
 
 impl Node {
@@ -470,7 +479,8 @@ impl Node {
         self: Arc<Self>,
         config: SandboxConfig,
         lifetime: Lifetime,
-    ) -> Result<SchedulingMetadata, Status> {
+        filesystem_boot_requested: bool,
+    ) -> Result<Created, Status> {
         let _work = self.status.track_work();
         let lifecycle = Lifecycle {
             sandbox_id: config.sandbox_id.clone(),
@@ -487,14 +497,17 @@ impl Node {
             };
             let _permit = self.admission.admit(self.registry.running().len(), kind).await?;
             let template = self.template_of(&config)?;
-            self.start(StartRequest {
-                template,
-                config,
-                lifetime,
-                lifecycle: lifecycle.clone(),
-                oom_watermark: SharedWatermark::default(),
-                throwaway: false,
-            })
+            self.start_with(
+                StartRequest {
+                    template,
+                    config,
+                    lifetime,
+                    lifecycle: lifecycle.clone(),
+                    oom_watermark: SharedWatermark::default(),
+                    throwaway: false,
+                },
+                filesystem_boot_requested,
+            )
             .await
             .map_err(|failure| failure.create_status(&id))
         };
@@ -511,12 +524,17 @@ impl Node {
                 .await
                 .map_err(|e| Status::internal(format!("failed to register sandbox: {e}")))
                 .map(|info| {
+                    let filesystem_booted = filesystem_boot(info.metadata.as_ref(), filesystem_boot_requested);
                     let event = match info.config.snapshot {
-                        true => SandboxEvent::new(RESUMED, &event_sandbox(&info)).with_resume_mode(false),
+                        true => SandboxEvent::new(RESUMED, &event_sandbox(&info)).with_resume_mode(filesystem_booted),
                         false => SandboxEvent::new(CREATED, &event_sandbox(&info)),
                     };
                     self.events.publish(event);
-                    info.scheduling
+                    Created {
+                        scheduling: info.scheduling,
+                        filesystem_booted,
+                        filesystem_only: info.metadata.as_ref().is_some_and(|metadata| metadata.filesystem_only),
+                    }
                 }),
             Err(status) => {
                 let _ = std::fs::remove_dir_all(self.work_dir_of(&lifecycle));
@@ -585,6 +603,14 @@ impl Node {
     }
 
     async fn start(self: &Arc<Self>, request: StartRequest) -> Result<SandboxHandle, StartFailure> {
+        self.start_with(request, false).await
+    }
+
+    async fn start_with(
+        self: &Arc<Self>,
+        request: StartRequest,
+        filesystem_boot_requested: bool,
+    ) -> Result<SandboxHandle, StartFailure> {
         let StartRequest {
             template,
             config,
@@ -593,7 +619,13 @@ impl Node {
             oom_watermark,
             throwaway,
         } = request;
-        let files = async { tokio::try_join!(template.build(), template.snapfile()) };
+        let files = async {
+            let (build, snapfile) = tokio::join!(
+                template.build(),
+                snapfile_unless(&template, filesystem_boot_requested)
+            );
+            build.map(|build| (build, snapfile))
+        };
         let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))
             .map_err(StartFailure::Rejected)?;
         let lease = self.network.lease(egress.as_ref());
@@ -619,6 +651,7 @@ impl Node {
                 .await
                 .map_err(|e| StartFailure::Failed(format!("failed to deny egress for resumed sandbox: {e}")))?;
         }
+        let filesystem_booted = filesystem_boot(metadata.as_ref(), filesystem_boot_requested);
         let prefetch = metadata.as_ref().and_then(TemplateMetadata::memory_prefetch).cloned();
         let recorded_vm_vcpus = metadata.as_ref().map_or(0, |metadata| metadata.vcpu_count);
         let prefetch_settings = self.prefetch_settings(&config);
@@ -631,20 +664,50 @@ impl Node {
             default_user: default_user(metadata.as_ref()),
             ..EnvdInit::default()
         };
-        let sandbox = self
-            .resume(ResumeRequest {
-                config: &config,
-                build: &build,
-                snapfile: &snapfile,
-                prefetch,
-                prefetch_settings,
-                recorded_vm_vcpus,
-                slot,
-                init,
-                lifecycle: &lifecycle,
-            })
-            .await
-            .map_err(|e| resume_failure(&config, &build, e))?;
+        let mut metadata = metadata;
+        let sandbox = match filesystem_booted {
+            true => {
+                validate_cold_boot_vcpus(config.vcpu, config.max_vcpus, recorded_vm_vcpus)
+                    .map_err(StartFailure::Rejected)?;
+                let booted_from = metadata.clone().unwrap_or_else(TemplateMetadata::v1);
+                let rebooted = self
+                    .reboot(RebootRequest {
+                        config: &config,
+                        build: &build,
+                        metadata: &booted_from,
+                        slot,
+                        init,
+                        lifecycle: &lifecycle,
+                        end: lifetime.end,
+                        requested: filesystem_boot_requested,
+                    })
+                    .await
+                    .map_err(StartFailure::Failed)?;
+                metadata = Some(TemplateMetadata {
+                    cpu_template: rebooted.cpu_template,
+                    ..booted_from
+                });
+                rebooted.sandbox
+            }
+            false => {
+                let snapfile = snapfile
+                    .map_err(StartFailure::Template)?
+                    .ok_or_else(|| StartFailure::Failed("the snapfile was not fetched".to_owned()))?;
+                self.resume(ResumeRequest {
+                    config: &config,
+                    build: &build,
+                    snapfile: &snapfile,
+                    prefetch,
+                    prefetch_settings,
+                    recorded_vm_vcpus,
+                    slot,
+                    init,
+                    lifecycle: &lifecycle,
+                })
+                .await
+                .map_err(|e| resume_failure(&config, &build, e))?
+            }
+        };
         let slot = lease.keep().ok_or_else(slot_taken_back)?;
         Ok(lifecycle::spawn(
             sandbox,
@@ -733,6 +796,13 @@ impl Node {
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await
+    }
+}
+
+async fn snapfile_unless(template: &Template, skipped: bool) -> Result<Option<PathBuf>, TemplateError> {
+    match skipped {
+        true => Ok(None),
+        false => template.snapfile().await.map(Some),
     }
 }
 

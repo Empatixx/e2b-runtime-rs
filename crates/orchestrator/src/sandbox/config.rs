@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use crate::envd::EnvdInit;
 use crate::firecracker::kernel_args::BootOptions;
 use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::slot::Slot;
-use crate::template::metadata::MemoryPrefetch;
+use crate::template::metadata::{CpuTemplate, MemoryPrefetch};
 
 const DEFAULT_INIT_PATH: &str = "/sbin/init";
 const DEFAULT_VCPUS: u32 = 2;
@@ -56,6 +57,7 @@ pub struct SandboxConfig {
     pub max_vcpus: u32,
     pub recorded_vm_vcpus: i64,
     pub envd_version: String,
+    pub cpu_template: Option<CpuTemplate>,
     pub memory_mib: u32,
     pub work_dir: PathBuf,
     pub envd: EnvdInit,
@@ -104,6 +106,8 @@ impl SandboxConfig {
         #[builder(default)] max_vcpus: u32,
         #[builder(default)] recorded_vm_vcpus: i64,
         #[builder(default)] envd_version: String,
+        cpu_template: Option<CpuTemplate>,
+        #[builder(default)] cmdline_args: BTreeMap<String, String>,
         #[builder(default = DEFAULT_MEMORY_MIB)] memory_mib: u32,
         work_dir: PathBuf,
         #[builder(default = DEFAULT_ENVD_TIMEOUT)] envd_timeout: Duration,
@@ -118,6 +122,7 @@ impl SandboxConfig {
             boot: BootOptions {
                 kernel_logs,
                 kvm_clock,
+                cmdline_args,
                 ..BootOptions::new(&init_path)
             },
             mmds: !without_mmds,
@@ -139,6 +144,7 @@ impl SandboxConfig {
             max_vcpus,
             recorded_vm_vcpus,
             envd_version,
+            cpu_template,
             memory_mib,
             work_dir,
             envd,

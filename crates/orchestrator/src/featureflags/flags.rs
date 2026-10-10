@@ -23,6 +23,7 @@ pub const BUILD_RESERVED_DISK_SPACE_MB: IntFlag = Flag::new("build-reserved-disk
 pub const BUILD_BASE_ROOTFS_SIZE_LIMIT_MB: IntFlag = Flag::new("build-base-rootfs-size-limit-mb", 25000);
 pub const BUILD_ENSURE_FREE_DISK_SPACE: BoolFlag = Flag::new("build-ensure-free-disk-space", false);
 pub const BUILD_CPU_TEMPLATE: JsonFlag = Flag::new("build-cpu-template", Value::Null);
+pub const REBOOT_CPU_TEMPLATE_OVERRIDE: JsonFlag = Flag::new("reboot-cpu-template-override", Value::Null);
 pub const FREE_PAGE_REPORTING: BoolFlag = Flag::new("free-page-reporting", false);
 pub const FREE_PAGE_HINTING_CONFIG: JsonFlag = Flag::new("free-page-hinting-config", Value::Null);
 pub const EGRESS_RETIREMENT_TIMEOUT_MS: IntFlag = Flag::new("egress-retirement-timeout-ms", 60000);

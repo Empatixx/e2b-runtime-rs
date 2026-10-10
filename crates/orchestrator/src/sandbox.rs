@@ -1,5 +1,6 @@
 pub mod config;
 pub mod harvest;
+pub mod reboot;
 pub mod resources;
 pub mod resume;
 pub mod snapshot;
@@ -271,6 +272,7 @@ impl Sandbox {
             .boot_args(self.config.boot.kernel_args(host_arch()))
             .maybe_io_engine(self.config.io_engine.as_deref())
             .huge_pages(self.config.huge_pages)
+            .maybe_cpu_template(self.config.cpu_template.clone())
             .build();
         let metadata = self.config.mmds.then(|| self.mmds_metadata());
         client.boot(&vm_config, metadata.as_ref()).await
