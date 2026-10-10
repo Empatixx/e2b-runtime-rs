@@ -7,7 +7,7 @@ use opentelemetry::KeyValue;
 use tokio::sync::oneshot;
 
 use super::Sandbox;
-use super::config::{SandboxBuilder, sandbox_builder};
+use super::config::{START_RESUME, SandboxBuilder, sandbox_builder};
 use super::vcpu_limit::{limit_vcpus_before_resume, resolve_vm_vcpus, resume_vm_vcpus};
 use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
@@ -38,6 +38,7 @@ impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
 
 impl Sandbox {
     async fn start_resumed(&mut self, snapfile: &Path) -> Result<(), String> {
+        self.config.start_type = START_RESUME;
         self.record_envd_defaults();
         self.resolved_vm_vcpus = resume_vm_vcpus(
             i64::from(self.config.vcpus),

@@ -1,5 +1,7 @@
+pub mod build;
 pub mod endpoint;
 pub mod envd_defaults;
+pub mod envd_init;
 pub mod fc;
 pub mod grpc;
 pub mod header_poll;
@@ -10,6 +12,7 @@ pub mod reads;
 pub mod report;
 pub mod resume;
 pub mod server;
+pub mod snapshot_diff;
 pub mod traces;
 pub mod uffd;
 

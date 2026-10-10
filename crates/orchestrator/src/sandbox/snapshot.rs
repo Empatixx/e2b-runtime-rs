@@ -23,6 +23,7 @@ use crate::memory::snapshot::{BuildFileBase, GuestMemory, diff_metadata, export_
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
+use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
 
 const ROOTFS_BLOCK_SIZE: u64 = 4096;
 
@@ -266,18 +267,22 @@ impl Sandbox {
         let size = pages.regions.iter().map(|region| region.size).sum();
         let path = path.to_path_buf();
         let parent = self.memory_parent(page_size, size)?;
+        let pre =
+            diff_metadata(&pages.regions, &pages.dirty, &pages.empty).map_err(|e| format!("export memfile: {e}"))?;
+        record_snapshot_diff(&self.config.team_id, "memfile", &pre, &parent);
         if let Some(base) = self.config.memfile.clone().filter(|_| dedup.enabled) {
             let memory = match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
                 Some(memfd) => GuestMemory::Memfd(memfd),
                 None => GuestMemory::Process { pid },
             };
             let diff = deduped_export(memory, pages, path, base, dedup).await?;
+            record_snapshot_dedup(&self.config.team_id, "memfile", &pre, Some(&diff), dedup.best_effort);
             return Ok((exported(&diff, &parent, build_id)?, ready_now()));
         }
+        record_snapshot_dedup(&self.config.team_id, "memfile", &pre, None, false);
         match self.resources.memory.as_ref().and_then(MemoryServer::memfd) {
             Some(memfd) => {
-                let diff = diff_metadata(&pages.regions, &pages.dirty, &pages.empty)
-                    .map_err(|e| format!("export memfile: {e}"))?;
+                let diff = pre;
                 let ready = background_copy(GuestMemory::Memfd(memfd), pages, path);
                 Ok((exported(&diff, &parent, build_id)?, ready))
             }
@@ -331,9 +336,12 @@ impl Sandbox {
                     File::create(&path).and_then(|mut out| overlay.export_diff(&mut out))
                 })
                 .await?;
+                record_snapshot_diff(&self.config.team_id, "rootfs", &diff, &parent);
                 exported(&diff, &parent, build_id)
             }
-            Rootfs::File(source) => export_file(source.clone(), path.to_path_buf(), build_id).await,
+            Rootfs::File(source) => {
+                export_file(source.clone(), path.to_path_buf(), build_id, &self.config.team_id).await
+            }
         }
     }
 }
@@ -345,7 +353,7 @@ async fn sync_file(device: PathBuf) -> Result<(), String> {
         .map_err(|e| format!("flush rootfs device: {e}"))
 }
 
-async fn export_file(source: PathBuf, path: PathBuf, build_id: Uuid) -> Result<Exported, String> {
+async fn export_file(source: PathBuf, path: PathBuf, build_id: Uuid, team_id: &str) -> Result<Exported, String> {
     let size = std::fs::metadata(&source)
         .map_err(|e| format!("stat rootfs {}: {e}", source.display()))?
         .len();
@@ -356,6 +364,7 @@ async fn export_file(source: PathBuf, path: PathBuf, build_id: Uuid) -> Result<E
     })
     .await?;
     let parent = Header::new(Metadata::template(build_id, ROOTFS_BLOCK_SIZE, size), Vec::new())?;
+    record_snapshot_diff(team_id, "rootfs", &diff, &parent);
     exported(&diff, &parent, build_id)
 }
 

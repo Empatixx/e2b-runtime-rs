@@ -100,7 +100,7 @@ pub struct Node {
     pub services: Services,
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
-    build_network: Arc<Mutex<HashMap<Ipv4Addr, String>>>,
+    build_network: Arc<Mutex<HashMap<Ipv4Addr, BuildSandbox>>>,
     pub routing: RoutingPublisher,
     pub events: EventsService,
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
@@ -176,8 +176,17 @@ impl StartFailure {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BuildSandbox {
+    pub sandbox_id: String,
+    pub team_id: String,
+    pub template_id: String,
+    pub envd_version: String,
+    pub started_at: SystemTime,
+}
+
 pub struct BuildNetwork {
-    map: Arc<Mutex<HashMap<Ipv4Addr, String>>>,
+    map: Arc<Mutex<HashMap<Ipv4Addr, BuildSandbox>>>,
     host_ip: Ipv4Addr,
 }
 
@@ -448,8 +457,16 @@ impl Node {
             })
     }
 
-    pub fn assign_build_network(&self, host_ip: Ipv4Addr, sandbox_id: &str) -> BuildNetwork {
-        self.build_network.lock().insert(host_ip, sandbox_id.to_owned());
+    pub fn building(&self) -> Vec<(Ipv4Addr, BuildSandbox)> {
+        self.build_network
+            .lock()
+            .iter()
+            .map(|(host_ip, sandbox)| (*host_ip, sandbox.clone()))
+            .collect()
+    }
+
+    pub fn assign_build_network(&self, host_ip: Ipv4Addr, sandbox: BuildSandbox) -> BuildNetwork {
+        self.build_network.lock().insert(host_ip, sandbox);
         BuildNetwork {
             map: self.build_network.clone(),
             host_ip,
@@ -461,9 +478,9 @@ impl Node {
             IpAddr::V4(v4) => self.build_network.lock().get(&v4).cloned(),
             IpAddr::V6(_) => None,
         };
-        if let Some(sandbox_id) = build {
+        if let Some(build) = build {
             return Some(FirewallSandbox {
-                sandbox_id,
+                sandbox_id: build.sandbox_id,
                 egress: None,
             });
         }
@@ -872,6 +889,7 @@ impl Node {
             .workdir_withheld(workdir_withheld)
             .throwaway(throwaway)
             .use_sync_wp(use_sync_wp)
+            .team_id(&config.team_id)
             .balloon_mode(balloon_mode)
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)

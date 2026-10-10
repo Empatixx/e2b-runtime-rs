@@ -4,7 +4,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::FutureExt;
 use uuid::Uuid;
@@ -31,8 +31,8 @@ use crate::sandbox::config::sandbox_builder::{
 };
 use crate::sandbox::config::{PreBoot, SandboxBuilder};
 use crate::sandbox::snapshot::LocalSnapshot;
-use crate::server::node::BuildNetwork;
 use crate::server::node::layers::{LayerSandbox, LayerSource};
+use crate::server::node::{BuildNetwork, BuildSandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
 
@@ -95,6 +95,7 @@ pub struct LayerExecutor<'a> {
     pub log: &'a ScopedLog<'a>,
     pub template_id: &'a str,
     pub team_id: &'a str,
+    pub envd_version: &'a str,
 }
 
 pub struct SandboxShape<'a> {
@@ -286,7 +287,16 @@ impl LayerExecutor<'_> {
             .ok_or_else(|| BuildError::Internal(format!("{context}: no network slot")))?;
         Ok(BuildSlot {
             slot,
-            network: node.assign_build_network(slot.host_ip(), sandbox_id),
+            network: node.assign_build_network(
+                slot.host_ip(),
+                BuildSandbox {
+                    sandbox_id: sandbox_id.to_owned(),
+                    team_id: self.team_id.to_owned(),
+                    template_id: self.template_id.to_owned(),
+                    envd_version: self.envd_version.to_owned(),
+                    started_at: SystemTime::now(),
+                },
+            ),
             lease,
         })
     }

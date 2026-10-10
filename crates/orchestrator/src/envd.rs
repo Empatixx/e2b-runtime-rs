@@ -107,12 +107,20 @@ pub fn hash_access_token(token: &str) -> String {
 }
 
 pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -> Result<Initialised, String> {
+    init_counted(address, settings, deadline).await.1
+}
+
+pub async fn init_counted(
+    address: SocketAddr,
+    settings: &EnvdInit,
+    deadline: Instant,
+) -> (u32, Result<Initialised, String>) {
     let mut attempts = 0;
-    loop {
+    let result = loop {
         attempts += 1;
         match attempt(address, settings, deadline).await {
             Ok(response) if response.status == 204 => {
-                return Ok(Initialised {
+                break Ok(Initialised {
                     attempts,
                     cpus_header: response.cpus_header,
                     report: response.report,
@@ -124,14 +132,15 @@ pub async fn init(address: SocketAddr, settings: &EnvdInit, deadline: Instant) -
                     response_body = %response.body,
                     "envd init request failed"
                 );
-                return Err(format!("unexpected status code: {}", response.status));
+                break Err(format!("unexpected status code: {}", response.status));
             }
             Err(error) if Instant::now() + RETRY_DELAY >= deadline => {
-                return Err(format!("failed to init envd: {error}"));
+                break Err(format!("failed to init envd: {error}"));
             }
             Err(_) => tokio::time::sleep(RETRY_DELAY).await,
         }
-    }
+    };
+    (attempts, result)
 }
 
 struct InitResponse {

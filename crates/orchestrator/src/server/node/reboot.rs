@@ -12,6 +12,7 @@ use crate::firecracker::kernel_args::{render, validate_cmdline_args};
 use crate::go_time::rfc3339;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
+use crate::sandbox::config::START_REBOOT;
 use crate::sandbox::reboot::{
     RebootCpuTemplate, check_reboot_cpu_template, reboot_allowed, reboot_cpu_template, reboot_max_vcpus,
 };
@@ -108,6 +109,8 @@ impl Node {
             .hyperloop_ip(&self.orchestrator_ip)
             .envd(self.with_init_request_timeout(init))
             .envd_version(&config.envd_version)
+            .team_id(&config.team_id)
+            .start_type(START_REBOOT)
             .cmdline_args(metadata.cmdline_args.clone())
             .maybe_cpu_template(chosen.template.clone())
             .cold_boot()

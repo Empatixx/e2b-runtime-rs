@@ -36,6 +36,7 @@ use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::prefetch::PrefetchStats;
 use crate::memory::prefetch::plan::PrefetchSummary;
 use crate::phases::PhaseTimer;
+use crate::telemetry::envd_init::{ExitType, InitCall};
 use crate::telemetry::report::report_error;
 
 pub struct Death {
@@ -55,6 +56,7 @@ pub struct Sandbox {
     envd_report: parking_lot::Mutex<EnvdReport>,
     memory_export: self::snapshot::in_place::memory::MemoryExport,
     balloon: Arc<balloon::BalloonProbe>,
+    startup_recorded: std::sync::atomic::AtomicBool,
 }
 
 impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
@@ -152,6 +154,7 @@ impl Sandbox {
             envd_report: parking_lot::Mutex::default(),
             memory_export: Default::default(),
             balloon: Default::default(),
+            startup_recorded: Default::default(),
         }
     }
 
@@ -312,19 +315,67 @@ impl Sandbox {
     }
 
     pub async fn wait_for_envd_within(&mut self, timeout: Duration) -> Result<(), String> {
+        let first = !self.startup_recorded.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let started = Instant::now();
+        let (attempts, outcome) = self.init_envd(timeout).await;
+        if first {
+            self.record_envd_init(attempts, outcome.as_ref().err().map(String::as_str), started.elapsed());
+        }
+        outcome
+    }
+
+    async fn init_envd(&mut self, timeout: Duration) -> (u32, Result<(), String>) {
         let deadline = Instant::now() + timeout;
         let address = self.envd_address();
         let settings = self.config.envd.with_cpu_count(self.guest_cpu_count());
-        let vm = self.resources.vm.as_mut().ok_or("firecracker is not running")?;
-        let initialised = tokio::select! {
-            initialised = envd::init(address, &settings, deadline) => initialised,
-            exited = vm.exited() => return Err(exited.message),
+        let Some(vm) = self.resources.vm.as_mut() else {
+            return (0, Err("firecracker is not running".to_owned()));
         };
-        let initialised = initialised.map_err(|e| format!("{e}; console: {}", self.console_tail()))?;
-        self.phases.note("envd_attempts", initialised.attempts);
-        self.verify_cpu_count(&initialised.cpus_header);
-        self.keep_report(initialised.report);
-        Ok(())
+        let (attempts, initialised) = tokio::select! {
+            initialised = envd::init_counted(address, &settings, deadline) => initialised,
+            exited = vm.exited() => return (0, Err(exited.message)),
+        };
+        match initialised {
+            Err(e) => (attempts, Err(format!("{e}; console: {}", self.console_tail()))),
+            Ok(initialised) => {
+                self.phases.note("envd_attempts", initialised.attempts);
+                self.verify_cpu_count(&initialised.cpus_header);
+                self.keep_report(initialised.report);
+                (attempts, Ok(()))
+            }
+        }
+    }
+
+    fn record_envd_init(&self, attempts: u32, error: Option<&str>, took: Duration) {
+        let call = InitCall {
+            envd_version: self.config.envd_version.clone(),
+            timeout_ms: self
+                .config
+                .envd
+                .request_timeout
+                .map_or(50, |timeout| timeout.as_millis() as i64),
+            start_type: self.config.start_type,
+            team_id: self.config.team_id.clone(),
+        };
+        let exit = ExitType::of(error);
+        match error {
+            None => {
+                call.count(ExitType::Transient, u64::from(attempts.saturating_sub(1)));
+                call.count(ExitType::Success, 1);
+            }
+            Some(_) => call.count(exit, u64::from(attempts)),
+        }
+        if self.config.throwaway {
+            return;
+        }
+        call.record_duration(exit, took);
+        let stats = self
+            .resources
+            .memory
+            .as_ref()
+            .map(|memory| memory.serve_stats())
+            .unwrap_or_default();
+        call.record_startup(error.is_none(), stats.pages, stats.source_pages, stats.bytes);
     }
 
     fn guest_cpu_count(&self) -> i64 {

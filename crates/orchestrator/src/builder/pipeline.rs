@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -23,6 +24,7 @@ use crate::proto::template_config::Source;
 use crate::proto::{SchedulingMetadata, TemplateBuildMetadata, TemplateConfig, TemplateCreateRequest};
 use crate::server::scheduling::from_headers;
 use crate::storage::paths::BuildPaths;
+use crate::telemetry::build::{BuildResult, record_build_duration, record_build_result, record_rootfs_size};
 
 const MB: u64 = 1 << 20;
 const TEMPLATE_V2_RELEASE_VERSION: &str = "v2.1.0";
@@ -129,6 +131,42 @@ impl TemplateBuilder for PhasePipeline {
         let env = self.env.clone();
         let pipeline = PhasePipeline { env: env.clone() };
         async move {
+            let started = Instant::now();
+            let team_id = request.template.clone().unwrap_or_default().team_id;
+            let built = pipeline.run(request, info, uploads).await;
+            record_build_outcome(&team_id, started.elapsed(), &built);
+            built.map(|(metadata, _)| metadata)
+        }
+        .boxed()
+    }
+}
+
+fn result_of<T>(built: &Result<T, BuildError>) -> BuildResult {
+    match built {
+        Ok(_) => BuildResult::Success,
+        Err(BuildError::User { .. }) => BuildResult::UserError,
+        Err(BuildError::Internal(_)) => BuildResult::InternalError,
+    }
+}
+
+fn record_build_outcome(team_id: &str, took: Duration, built: &Result<(TemplateBuildMetadata, u64), BuildError>) {
+    record_build_duration(team_id, took, built.is_ok());
+    record_build_result(team_id, result_of(built));
+    if let Ok((_, rootfs_bytes)) = built {
+        record_rootfs_size(team_id, *rootfs_bytes);
+    }
+}
+
+impl PhasePipeline {
+    async fn run(
+        &self,
+        request: TemplateCreateRequest,
+        info: Arc<BuildInfo>,
+        uploads: Arc<LayerUploads>,
+    ) -> Result<(TemplateBuildMetadata, u64), BuildError> {
+        let env = self.env.clone();
+        let pipeline = PhasePipeline { env: env.clone() };
+        async move {
             let template = request.template.clone().unwrap_or_default();
             let settings = BuildSettings::resolve(&env.config, &template.template_id, &template.team_id)
                 .await
@@ -138,7 +176,7 @@ impl TemplateBuilder for PhasePipeline {
                 .await
                 .map_err(|e| BuildError::Internal(format!("error getting envd version: {e}")))?;
             let phases = pipeline.phases(&request, &envd_version, &settings, &uploads, &info.cancel)?;
-            let last = run_phases(&info.log, &phases).await?;
+            let last = run_phases(&info.log, &template.team_id, &phases).await?;
             uploads
                 .wait()
                 .await
@@ -150,9 +188,12 @@ impl TemplateBuilder for PhasePipeline {
             }
             let rootfs_size = rootfs_size(&env, &last).await?;
             let scheduling = scheduling_metadata(&env, &last).await;
-            Ok(result_metadata(&settings, rootfs_size, envd_version, scheduling))
+            Ok((
+                result_metadata(&settings, rootfs_size, envd_version, scheduling),
+                rootfs_size,
+            ))
         }
-        .boxed()
+        .await
     }
 }
 
@@ -234,5 +275,29 @@ mod tests {
                 "error checking build version: invalid current version format: vlatest".to_owned()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn a_build_result_is_classified_like_upstream() {
+        let user = BuildError::User {
+            phase: "steps".to_owned(),
+            step: "1".to_owned(),
+            message: "command failed".to_owned(),
+        };
+
+        assert_eq!(result_of::<()>(&Ok(())), BuildResult::Success);
+        assert_eq!(result_of::<()>(&Err(user)), BuildResult::UserError);
+        assert_eq!(result_of::<()>(&Err(BuildError::cancelled())), BuildResult::UserError);
+        assert_eq!(
+            result_of::<()>(&Err(BuildError::Internal("disk".to_owned()))),
+            BuildResult::InternalError
+        );
+        assert_eq!(BuildResult::UserError.label(), "user_error");
+        assert_eq!(BuildResult::InternalError.label(), "internal_error");
     }
 }

@@ -17,6 +17,7 @@ use crate::sandbox::Sandbox;
 use crate::sandbox::snapshot::{Exported, LocalSnapshot, MemoryPages, Snapshot, SnapshotFiles, exported};
 use crate::storage::build::Build;
 use crate::telemetry::server::in_place::ProcessMemoryOutcome;
+use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
 
 #[derive(Default)]
 pub struct MemoryExport {
@@ -197,6 +198,8 @@ impl Sandbox {
                 *self.memory_export.seal.lock() = Some(occupancy);
                 let diff =
                     diff_metadata(&pages.regions, &pages.dirty, &pages.empty).map_err(|e| failed(e.to_string()))?;
+                record_snapshot_diff(&request.team_id, "memfile", &diff, &parent);
+                record_snapshot_dedup(&request.team_id, "memfile", &diff, None, false);
                 let memfile = exported(&diff, &parent, request.build_id).map_err(failed)?;
                 (memfile, ready, Some(pending), true)
             }

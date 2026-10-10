@@ -20,6 +20,9 @@ const DEFAULT_INIT_PATH: &str = "/sbin/init";
 const DEFAULT_VCPUS: u32 = 2;
 const DEFAULT_MEMORY_MIB: u32 = 1024;
 const DEFAULT_ENVD_TIMEOUT: Duration = Duration::from_secs(60);
+pub const START_CREATE: &str = "create";
+pub const START_RESUME: &str = "resume";
+pub const START_REBOOT: &str = "reboot";
 const DEFAULT_SANDBOX_TYPE: &str = "sandbox";
 
 pub type Held = Box<dyn std::any::Any + Send + Sync>;
@@ -75,6 +78,8 @@ pub struct SandboxConfig {
     pub throwaway: bool,
     pub use_sync_wp: bool,
     pub balloon_mode: BalloonMode,
+    pub team_id: String,
+    pub start_type: &'static str,
 }
 
 impl SandboxConfig {
@@ -128,6 +133,8 @@ impl SandboxConfig {
         #[builder(default)] throwaway: bool,
         #[builder(default)] use_sync_wp: bool,
         #[builder(default)] balloon_mode: BalloonMode,
+        #[builder(default)] team_id: String,
+        #[builder(default = START_CREATE)] start_type: &'static str,
     ) -> Self {
         Self {
             cgroup_name: format!("sbx-{id}-{}", Uuid::new_v4().simple()),
@@ -171,6 +178,8 @@ impl SandboxConfig {
             throwaway,
             use_sync_wp,
             balloon_mode,
+            team_id,
+            start_type,
         }
     }
 }

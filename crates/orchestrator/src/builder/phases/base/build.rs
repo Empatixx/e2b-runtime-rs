@@ -172,6 +172,7 @@ impl BaseBuild<'_> {
             log: self.log,
             template_id: &self.phase.request.template_id,
             team_id: &self.phase.request.team_id,
+            envd_version: &self.phase.request.envd_version,
         }
     }
 

@@ -52,6 +52,7 @@ impl StepsBuild {
             log,
             template_id: &self.template_id,
             team_id: &self.team_id,
+            envd_version: &self.envd_version,
         }
     }
 

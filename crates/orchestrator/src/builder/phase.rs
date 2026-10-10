@@ -1,9 +1,12 @@
+use std::time::Instant;
+
 use futures::future::BoxFuture;
 
 use std::collections::BTreeMap;
 
 use super::logs::{BuildLog, ScopedLog};
 use crate::proto::{LogLevel, TemplateBuildStatusReason};
+use crate::telemetry::build::{record_cache_result, record_phase_duration};
 use crate::template::metadata::TemplateMetadata;
 
 pub const INTERNAL_ERROR_MESSAGE: &str =
@@ -116,16 +119,23 @@ pub trait Phase: Send + Sync {
     ) -> BoxFuture<'a, Result<LayerResult, BuildError>>;
 }
 
-pub async fn run_phases(log: &BuildLog, phases: &[Box<dyn Phase>]) -> Result<LayerResult, BuildError> {
+pub async fn run_phases(log: &BuildLog, team_id: &str, phases: &[Box<dyn Phase>]) -> Result<LayerResult, BuildError> {
     let mut source = LayerResult::default();
     for phase in phases {
-        source = run_phase(log, phase.as_ref(), &source).await?;
+        source = run_phase(log, team_id, phase.as_ref(), &source).await?;
     }
     Ok(source)
 }
 
-async fn run_phase(log: &BuildLog, phase: &dyn Phase, source: &LayerResult) -> Result<LayerResult, BuildError> {
-    let fields = phase.meta().log_fields();
+async fn run_phase(
+    log: &BuildLog,
+    team_id: &str,
+    phase: &dyn Phase,
+    source: &LayerResult,
+) -> Result<LayerResult, BuildError> {
+    let started = Instant::now();
+    let meta = phase.meta();
+    let fields = meta.log_fields();
     let log = log.scoped(&fields);
     let hash = phase
         .hash(source)
@@ -135,15 +145,19 @@ async fn run_phase(log: &BuildLog, phase: &dyn Phase, source: &LayerResult) -> R
         .layer(source, hash)
         .await
         .map_err(|e| internal_context("getting layer", e))?;
+    record_cache_result(team_id, meta.phase, &meta.step_type, current.cached);
     log.push(
         LogLevel::Info,
         layer_info(current.cached, &phase.prefix(), &phase.describe(), &current.hash),
     );
     if current.cached {
+        record_phase_duration(team_id, started.elapsed(), meta.phase, &meta.step_type, true);
         return Ok(current);
     }
     validate_layer(&current).map_err(|e| BuildError::Internal(format!("validating layer: {e}")))?;
-    phase.build(log, source, current).await
+    let built = phase.build(log, source, current).await;
+    record_phase_duration(team_id, started.elapsed(), meta.phase, &meta.step_type, false);
+    built
 }
 
 pub fn internal_context(context: &str, error: BuildError) -> BuildError {
@@ -282,9 +296,13 @@ mod tests {
         let built = Arc::default();
         let log = BuildLog::default();
 
-        let result = run_phases(&log, &[stub("a", true, None, &built), stub("b", false, None, &built)])
-            .await
-            .unwrap();
+        let result = run_phases(
+            &log,
+            "team",
+            &[stub("a", true, None, &built), stub("b", false, None, &built)],
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.hash, "ab");
         assert_eq!(*built.lock(), vec!["b"]);
@@ -316,7 +334,7 @@ mod tests {
         };
         let user = BuildError::user(&meta, "command exited with 1");
 
-        let error = run_phases(&BuildLog::default(), &[stub("a", false, Some(user), &built)])
+        let error = run_phases(&BuildLog::default(), "team", &[stub("a", false, Some(user), &built)])
             .await
             .unwrap_err();
         assert_eq!(
