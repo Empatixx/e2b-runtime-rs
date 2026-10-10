@@ -17,6 +17,8 @@ const METER_NAME: &str = "go.opentelemetry.io/contrib/instrumentation/google.gol
 const GRPC_CONTENT_TYPE: &str = "application/grpc";
 const GRPC_STATUS_HEADER: &str = "grpc-status";
 const GRPC_OK: i32 = 0;
+const IS_RESUME_METADATA_KEY: &str = "x-sandbox-resume";
+const TEAM_ID_METADATA_KEY: &str = "x-team-id";
 
 static SERVER_DURATION: LazyLock<Histogram<f64>> = LazyLock::new(|| {
     global::meter(METER_NAME)
@@ -68,7 +70,7 @@ impl GrpcCall {
         )
     }
 
-    fn finish(&self, span: &Span, status: i32, took: Duration) {
+    fn finish(&self, span: &Span, status: i32, took: Duration, sandbox: Vec<KeyValue>) {
         span.record("rpc.grpc.status_code", i64::from(status));
         if is_server_error(status) {
             span.record("otel.status_code", "ERROR");
@@ -80,9 +82,25 @@ impl GrpcCall {
                 KeyValue::new("rpc.service", self.service.clone()),
                 KeyValue::new("rpc.method", self.method.clone()),
                 KeyValue::new("rpc.grpc.status_code", i64::from(status)),
-            ],
+            ]
+            .into_iter()
+            .chain(sandbox)
+            .collect::<Vec<_>>(),
         );
     }
+}
+
+fn sandbox_metric_attributes(headers: &HeaderMap) -> Vec<KeyValue> {
+    let resume = headers
+        .get(IS_RESUME_METADATA_KEY)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| KeyValue::new("sandbox.resume", value == "true"));
+    let team = headers
+        .get(TEAM_ID_METADATA_KEY)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(|value| KeyValue::new("team.id", value.to_owned()));
+    resume.into_iter().chain(team).collect()
 }
 
 fn is_server_error(status: i32) -> bool {
@@ -117,9 +135,10 @@ pub async fn trace_grpc(request: Request, next: Next) -> Response {
     let span = call.span();
     let parent = global::get_text_map_propagator(|propagator| propagator.extract(&Headers(request.headers())));
     let _ = span.set_parent(parent);
+    let sandbox = sandbox_metric_attributes(request.headers());
     let started = Instant::now();
     let response = next.run(request).instrument(span.clone()).await;
-    call.finish(&span, grpc_status(&response), started.elapsed());
+    call.finish(&span, grpc_status(&response), started.elapsed(), sandbox);
     response
 }
 
@@ -137,6 +156,34 @@ mod tests {
             })
         );
         assert_eq!(GrpcCall::parse("/health"), None);
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        pairs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    axum::http::HeaderValue::from_str(value).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_team_and_resume_flag_come_from_the_request_metadata() {
+        assert_eq!(
+            sandbox_metric_attributes(&headers(&[("x-team-id", "team-1"), ("x-sandbox-resume", "true")])),
+            [
+                KeyValue::new("sandbox.resume", true),
+                KeyValue::new("team.id", "team-1")
+            ]
+        );
+        assert_eq!(sandbox_metric_attributes(&HeaderMap::new()), []);
+        assert_eq!(
+            sandbox_metric_attributes(&headers(&[("x-sandbox-resume", "false"), ("x-team-id", "")])),
+            [KeyValue::new("sandbox.resume", false)]
+        );
     }
 
     #[test]

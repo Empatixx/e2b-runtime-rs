@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{METER, counter, millis, milliseconds};
+use super::{METER, counter, millis, milliseconds, team};
 
 static ATTEMPTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     counter(
@@ -53,13 +53,14 @@ pub struct HarvestRun {
     pub slot_hold: Duration,
     pub persist_wait: Option<Duration>,
     pub pages: Option<u64>,
+    pub team_id: String,
 }
 
 impl HarvestRun {
     pub fn record(&self) {
         let result = self.result_attributes();
         SEAL_WAIT_DURATION.record(millis(self.seal_wait), &result);
-        ATTEMPTS.add(1, &result);
+        ATTEMPTS.add(1, &self.attempt_attributes());
         DURATION.record(millis(self.slot_hold), &result);
         self.persist_wait
             .iter()
@@ -67,6 +68,14 @@ impl HarvestRun {
         self.pages
             .iter()
             .for_each(|pages| PAGES.record(*pages, &[KeyValue::new("path", self.path)]));
+    }
+
+    pub fn attempt_attributes(&self) -> [KeyValue; 3] {
+        [
+            KeyValue::new("result", self.result.clone()),
+            KeyValue::new("path", self.path),
+            team(&self.team_id),
+        ]
     }
 
     pub fn result_attributes(&self) -> [KeyValue; 2] {
@@ -90,11 +99,20 @@ mod tests {
             slot_hold: Duration::from_millis(5),
             persist_wait: None,
             pages: None,
+            team_id: "team-1".to_owned(),
         };
 
         assert_eq!(
             run.result_attributes(),
             [KeyValue::new("result", "slot_timeout"), KeyValue::new("path", "pause")]
+        );
+        assert_eq!(
+            run.attempt_attributes(),
+            [
+                KeyValue::new("result", "slot_timeout"),
+                KeyValue::new("path", "pause"),
+                KeyValue::new("team.id", "team-1")
+            ]
         );
     }
 }

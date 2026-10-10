@@ -47,6 +47,12 @@ impl SandboxService for SandboxServer {
             .as_ref()
             .is_some_and(|sandbox| sandbox.snapshot);
         let fs_boot_requested = request.get_ref().filesystem_boot.unwrap_or_default();
+        let team_id = request
+            .get_ref()
+            .sandbox
+            .as_ref()
+            .map(|sandbox| sandbox.team_id.clone())
+            .unwrap_or_default();
         let created = self.create_sandbox(request).instrument(span).await;
         CreateOutcome {
             resume,
@@ -55,6 +61,7 @@ impl SandboxService for SandboxServer {
             success: created.is_ok(),
             envd_upgraded: false,
             fs_recovery: FS_RECOVERY_NONE.to_owned(),
+            team_id,
         }
         .record(started.elapsed());
         created
@@ -72,9 +79,10 @@ impl SandboxService for SandboxServer {
     async fn delete(&self, request: Request<SandboxDeleteRequest>) -> Result<Response<()>, Status> {
         let span = spans::sandbox_delete(&request.get_ref().sandbox_id);
         let kill_reason = request.get_ref().kill_reason.clone().unwrap_or_default();
+        let team_id = self.team_of(&request.get_ref().sandbox_id);
         let deleted = self.delete_sandbox(request).instrument(span).await;
         if deleted.is_ok() {
-            record_kill(&kill_reason);
+            record_kill(&team_id, &kill_reason);
         }
         deleted
     }
@@ -83,10 +91,12 @@ impl SandboxService for SandboxServer {
         let span = spans::sandbox_pause(request.get_ref());
         let started = Instant::now();
         let fs_only = request.get_ref().filesystem_only;
+        let team_id = self.team_of(&request.get_ref().sandbox_id);
         let paused = self.pause_sandbox(request).instrument(span).await;
         PauseOutcome {
             fs_only,
             success: paused.is_ok(),
+            team_id,
         }
         .record(started.elapsed());
         paused
@@ -299,6 +309,14 @@ impl SandboxServer {
 }
 
 impl SandboxServer {
+    fn team_of(&self, sandbox_id: &str) -> String {
+        self.node
+            .registry
+            .get(sandbox_id)
+            .map(|handle| handle.info.lock().config.team_id.clone())
+            .unwrap_or_default()
+    }
+
     fn running(&self, id: &str, missing: &str, attributes: &[KeyValue]) -> Result<SandboxHandle, Status> {
         self.node.registry.get(id).ok_or_else(|| {
             report_critical_error("sandbox not found", None, attributes);

@@ -114,12 +114,12 @@ impl Ending {
         }
     }
 
-    fn record_metrics(&self, sandbox_id: &str, ran_for: Duration) {
+    fn record_metrics(&self, sandbox_id: &str, team_id: &str, ran_for: Duration) {
         if let Self::Crashed { death } = self {
-            record_crash(death.cause.as_str());
+            record_crash(team_id, death.cause.as_str());
             log_crash(sandbox_id, death);
         }
-        record_execution(ran_for, self.stop_reason());
+        record_execution(team_id, ran_for, self.stop_reason());
     }
 }
 
@@ -206,7 +206,8 @@ impl Running {
         let ending = self.wait_for_ending().await;
         let lifecycle = self.info.lock().lifecycle.clone();
         if !self.throwaway {
-            ending.record_metrics(self.sandbox.id(), self.ran_for());
+            let team_id = self.info.lock().config.team_id.clone();
+            ending.record_metrics(self.sandbox.id(), &team_id, self.ran_for());
         }
         self.tear_down(ending, lifecycle).await;
     }

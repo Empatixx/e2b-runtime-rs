@@ -3,7 +3,7 @@ use std::time::Duration;
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader;
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, InstrumentKind, SdkMeterProvider, Stream};
+use opentelemetry_sdk::metrics::{Aggregation, Instrument, InstrumentKind, SdkMeterProvider, Stream, Temporality};
 use opentelemetry_sdk::runtime::Tokio;
 
 use super::endpoint::Endpoint;
@@ -20,6 +20,7 @@ const EXPLICIT_BOUNDARIES: [f64; 14] = [
 pub fn meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMeterProvider, String> {
     let exporter = MetricExporter::builder()
         .with_tonic()
+        .with_temporality(Temporality::LowMemory)
         .with_endpoint(endpoint.url())
         .build()
         .map_err(|e| format!("failed to create metrics exporter: {e}"))?;

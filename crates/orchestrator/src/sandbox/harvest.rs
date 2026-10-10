@@ -69,7 +69,7 @@ impl HarvestRun {
         }
     }
 
-    pub fn record_metrics(&self, seal_wait: Duration) {
+    pub fn record_metrics(&self, team_id: &str, seal_wait: Duration) {
         telemetry::HarvestRun {
             result: self.outcome.as_str().to_owned(),
             path: telemetry::PATH_PAUSE,
@@ -77,6 +77,7 @@ impl HarvestRun {
             slot_hold: self.slot_hold,
             persist_wait: self.persist_attempted.then_some(self.persist_wait),
             pages: matches!(self.outcome, HarvestOutcome::Success).then_some(self.pages as u64),
+            team_id: team_id.to_owned(),
         }
         .record();
     }

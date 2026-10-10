@@ -24,8 +24,12 @@ static SNAPSHOT_UPLOAD_FAILED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
-pub fn count_failed_snapshot_upload(filesystem_only: bool) {
-    SNAPSHOT_UPLOAD_FAILED.add(1, &[KeyValue::new("fs_only", filesystem_only)]);
+pub fn count_failed_snapshot_upload(team_id: &str, filesystem_only: bool) {
+    SNAPSHOT_UPLOAD_FAILED.add(1, &[KeyValue::new("fs_only", filesystem_only), team(team_id)]);
+}
+
+pub(crate) fn team(team_id: &str) -> KeyValue {
+    KeyValue::new("team.id", team_id.to_owned())
 }
 
 pub(crate) fn millis(duration: Duration) -> u64 {

@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{counter, millis, milliseconds};
+use super::{counter, millis, milliseconds, team};
 
 static ATTEMPTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     counter(
@@ -49,6 +49,7 @@ pub struct UpgradeAttempt {
     pub result: String,
     pub from_version: String,
     pub to_version: String,
+    pub team_id: String,
 }
 
 impl UpgradeAttempt {
@@ -61,16 +62,20 @@ impl UpgradeAttempt {
                 KeyValue::new("to_version", self.to_version.clone()),
             ],
         );
-        DURATION.record(millis(took), &[KeyValue::new("result", self.result.clone())]);
+        DURATION.record(
+            millis(took),
+            &[KeyValue::new("result", self.result.clone()), team(&self.team_id)],
+        );
     }
 }
 
-pub fn record_phase(phase: &str, result: &str, took: Duration) {
+pub fn record_phase(team_id: &str, phase: &str, result: &str, took: Duration) {
     PHASE_DURATION.record(
         millis(took),
         &[
             KeyValue::new("phase", phase.to_owned()),
             KeyValue::new("result", result.to_owned()),
+            team(team_id),
         ],
     );
 }

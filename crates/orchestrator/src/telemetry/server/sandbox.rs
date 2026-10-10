@@ -4,7 +4,7 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 
-use super::{counter, millis, milliseconds};
+use super::{counter, millis, milliseconds, team};
 
 static CREATE_DURATION: LazyLock<Histogram<u64>> =
     LazyLock::new(|| milliseconds("orchestrator.sandbox.create.duration", "Time taken to create a sandbox"));
@@ -79,6 +79,7 @@ pub struct CreateOutcome {
     pub success: bool,
     pub envd_upgraded: bool,
     pub fs_recovery: String,
+    pub team_id: String,
 }
 
 impl CreateOutcome {
@@ -86,7 +87,7 @@ impl CreateOutcome {
         CREATE_DURATION.record(millis(took), &self.attributes());
     }
 
-    fn attributes(&self) -> [KeyValue; 6] {
+    fn attributes(&self) -> [KeyValue; 7] {
         [
             KeyValue::new("sandbox.resume", self.resume),
             KeyValue::new("fs_only", self.fs_only),
@@ -94,6 +95,7 @@ impl CreateOutcome {
             KeyValue::new("success", self.success),
             KeyValue::new("envd.upgraded", self.envd_upgraded),
             KeyValue::new("fs_recovery", self.fs_recovery.clone()),
+            team(&self.team_id),
         ]
     }
 }
@@ -102,6 +104,7 @@ impl CreateOutcome {
 pub struct PauseOutcome {
     pub fs_only: bool,
     pub success: bool,
+    pub team_id: String,
 }
 
 impl PauseOutcome {
@@ -111,6 +114,7 @@ impl PauseOutcome {
             &[
                 KeyValue::new("fs_only", self.fs_only),
                 KeyValue::new("success", self.success),
+                team(&self.team_id),
             ],
         );
     }
@@ -124,6 +128,7 @@ pub struct CheckpointOutcome {
     pub balloon_mode: String,
     pub deferred: bool,
     pub success: bool,
+    pub team_id: String,
 }
 
 impl CheckpointOutcome {
@@ -133,7 +138,7 @@ impl CheckpointOutcome {
         CHECKPOINT.add(1, &attributes);
     }
 
-    fn attributes(&self) -> [KeyValue; 6] {
+    fn attributes(&self) -> [KeyValue; 7] {
         [
             KeyValue::new("in_place", self.in_place),
             KeyValue::new("fs_only", self.fs_only),
@@ -141,12 +146,19 @@ impl CheckpointOutcome {
             KeyValue::new("balloon_mode", self.balloon_mode.clone()),
             KeyValue::new("deferred", self.deferred),
             KeyValue::new("success", self.success),
+            team(&self.team_id),
         ]
     }
 }
 
-pub fn record_kill(kill_reason: &str) {
-    KILLED.add(1, &[KeyValue::new("kill_reason", kill_reason_or_unknown(kill_reason))]);
+pub fn record_kill(team_id: &str, kill_reason: &str) {
+    KILLED.add(
+        1,
+        &[
+            KeyValue::new("kill_reason", kill_reason_or_unknown(kill_reason)),
+            team(team_id),
+        ],
+    );
 }
 
 fn kill_reason_or_unknown(kill_reason: &str) -> String {
@@ -156,15 +168,18 @@ fn kill_reason_or_unknown(kill_reason: &str) -> String {
     }
 }
 
-pub fn record_execution(took: Duration, stop_reason: &str) {
-    EXECUTION_DURATION.record(millis(took), &[KeyValue::new("stop_reason", stop_reason.to_owned())]);
+pub fn record_execution(team_id: &str, took: Duration, stop_reason: &str) {
+    EXECUTION_DURATION.record(
+        millis(took),
+        &[KeyValue::new("stop_reason", stop_reason.to_owned()), team(team_id)],
+    );
 }
 
-pub fn record_crash(cause: &str) {
-    CRASHED.add(1, &[KeyValue::new("cause", cause.to_owned())]);
+pub fn record_crash(team_id: &str, cause: &str) {
+    CRASHED.add(1, &[KeyValue::new("cause", cause.to_owned()), team(team_id)]);
 }
 
-pub fn record_pause_admission(rpc: &str, outcome: &str, waited: Duration) {
+pub fn record_pause_admission(team_id: &str, rpc: &str, outcome: &str, waited: Duration) {
     if outcome.is_empty() {
         return;
     }
@@ -173,10 +188,14 @@ pub fn record_pause_admission(rpc: &str, outcome: &str, waited: Duration) {
         &[
             KeyValue::new("outcome", outcome.to_owned()),
             KeyValue::new("rpc", rpc.to_owned()),
+            team(team_id),
         ],
     );
     if matches!(outcome, "ready_after_wait" | "refused") {
-        PAUSE_ADMISSION_WAIT_DURATION.record(millis(waited), &[KeyValue::new("outcome", outcome.to_owned())]);
+        PAUSE_ADMISSION_WAIT_DURATION.record(
+            millis(waited),
+            &[KeyValue::new("outcome", outcome.to_owned()), team(team_id)],
+        );
     }
 }
 
@@ -199,6 +218,7 @@ mod tests {
             success: true,
             envd_upgraded: false,
             fs_recovery: "none".to_owned(),
+            team_id: "team-1".to_owned(),
         };
 
         let keys: Vec<_> = outcome
@@ -215,7 +235,8 @@ mod tests {
                 "fs_boot_requested",
                 "success",
                 "envd.upgraded",
-                "fs_recovery"
+                "fs_recovery",
+                "team.id"
             ]
         );
     }
@@ -229,6 +250,7 @@ mod tests {
             balloon_mode: "none".to_owned(),
             deferred: false,
             success: true,
+            team_id: "team-1".to_owned(),
         };
 
         let keys: Vec<_> = outcome
@@ -239,7 +261,15 @@ mod tests {
 
         assert_eq!(
             keys,
-            ["in_place", "fs_only", "route", "balloon_mode", "deferred", "success"]
+            [
+                "in_place",
+                "fs_only",
+                "route",
+                "balloon_mode",
+                "deferred",
+                "success",
+                "team.id"
+            ]
         );
     }
 }

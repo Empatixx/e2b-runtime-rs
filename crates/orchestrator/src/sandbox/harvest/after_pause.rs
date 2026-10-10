@@ -75,12 +75,13 @@ async fn harvest(
     let _work = pause.work.take();
     let deadline = Instant::now() + settings.timeout;
     let sandbox_id = pause.config.sandbox_id.clone();
+    let team_id = pause.config.team_id.clone();
     let build_id = pause.build_id;
     let report = match job_of(pause, settings.consume, deadline).await {
         Ok(job) => harvester.run(&job).await,
         Err(e) => HarvestReport::failed(HarvestRun::failed(HarvestOutcome::Skipped, Duration::ZERO), e),
     };
-    report.run.record_metrics(Duration::ZERO);
+    report.run.record_metrics(&team_id, Duration::ZERO);
     log_failure(&sandbox_id, build_id, &report);
     report
 }
