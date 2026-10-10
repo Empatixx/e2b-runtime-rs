@@ -135,6 +135,7 @@ impl SandboxServer {
             scheduling_metadata: Some(scheduling_metadata),
             filesystem_boot_applied: false,
             resolved_firecracker_version,
+            network_placement: None,
         }))
     }
 
