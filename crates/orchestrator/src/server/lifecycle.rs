@@ -251,9 +251,11 @@ impl Running {
         let parent = self.info.lock().clone();
         let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
         if snapshotted.is_ok() {
-            self.node
-                .events
-                .publish(SandboxEvent::new(PAUSED, &event_sandbox(&parent)).with_execution(&execution(&parent)));
+            self.node.events.publish(
+                SandboxEvent::new(PAUSED, &event_sandbox(&parent))
+                    .with_execution(&execution(&parent))
+                    .with_pause_mode(false),
+            );
         }
         if let Ok(local) = &snapshotted {
             let object_metadata = ObjectMetadata::default()

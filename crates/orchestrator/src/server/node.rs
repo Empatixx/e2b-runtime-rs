@@ -485,8 +485,11 @@ impl Node {
                 .await
                 .map_err(|e| Status::internal(format!("failed to register sandbox: {e}")))
                 .map(|info| {
-                    let kind = if info.config.snapshot { RESUMED } else { CREATED };
-                    self.events.publish(SandboxEvent::new(kind, &event_sandbox(&info)));
+                    let event = match info.config.snapshot {
+                        true => SandboxEvent::new(RESUMED, &event_sandbox(&info)).with_resume_mode(false),
+                        false => SandboxEvent::new(CREATED, &event_sandbox(&info)),
+                    };
+                    self.events.publish(event);
                     info.scheduling
                 }),
             Err(status) => {

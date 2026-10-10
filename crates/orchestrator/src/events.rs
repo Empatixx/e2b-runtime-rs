@@ -17,6 +17,11 @@ pub const UPDATED: &str = "sandbox.lifecycle.updated";
 pub const CHECKPOINTED: &str = "sandbox.lifecycle.checkpointed";
 pub const STREAM: &str = "sandbox.events.stream";
 
+const PAUSE_MODE_FULL: &str = "full";
+const PAUSE_MODE_FILESYSTEM: &str = "filesystem";
+const RESUME_MODE_RESTORE: &str = "restore";
+const RESUME_MODE_REBOOT: &str = "reboot";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SandboxEvent {
     pub id: Uuid,
@@ -89,6 +94,22 @@ impl SandboxEvent {
     pub fn with(mut self, key: &str, value: Value) -> Self {
         self.event_data.insert(key.to_owned(), value);
         self
+    }
+
+    pub fn with_pause_mode(self, filesystem_only: bool) -> Self {
+        let mode = match filesystem_only {
+            true => PAUSE_MODE_FILESYSTEM,
+            false => PAUSE_MODE_FULL,
+        };
+        self.with("pause_mode", json!(mode))
+    }
+
+    pub fn with_resume_mode(self, filesystem_booted: bool) -> Self {
+        let mode = match filesystem_booted {
+            true => RESUME_MODE_REBOOT,
+            false => RESUME_MODE_RESTORE,
+        };
+        self.with("resume_mode", json!(mode))
     }
 
     pub fn with_execution(self, execution: &Execution) -> Self {
@@ -221,5 +242,26 @@ mod tests {
             (Some(2), Some(1024))
         );
         assert_eq!(data["started_at"], "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn the_pause_mode_names_what_the_snapshot_holds() {
+        for (filesystem_only, want) in [(false, "full"), (true, "filesystem")] {
+            let event = SandboxEvent::new(PAUSED, &sandbox("x"))
+                .with("execution", json!({}))
+                .with_pause_mode(filesystem_only);
+
+            assert_eq!(event.event_data["pause_mode"], want);
+            assert!(event.event_data.contains_key("execution"), "existing keys are kept");
+        }
+    }
+
+    #[test]
+    fn the_resume_mode_names_the_boot_path_that_ran() {
+        for (filesystem_booted, want) in [(false, "restore"), (true, "reboot")] {
+            let event = SandboxEvent::new(RESUMED, &sandbox("x")).with_resume_mode(filesystem_booted);
+
+            assert_eq!(event.event_data["resume_mode"], want);
+        }
     }
 }
