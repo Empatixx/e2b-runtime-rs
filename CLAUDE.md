@@ -16,6 +16,10 @@ Hide low-level details such as `unsafe`, syscalls, ioctls and byte layouts behin
 
 Write code as method chains. Transform `Option`, `Result` and iterators with combinators like `map`, `and_then`, `filter`, `map_or`, `is_none_or` and `try_for_each`, the way `keepalive_interval` reads a header in one chain. Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`, give a struct its own `builder()` when it is created in several places, and use library builders like `OpenOptions` and `Response::builder`. Builders are always generated with `bon`, never written by hand; prefer well-known crates over hand-rolled code.
 
+## Platform
+
+Target Linux only, like upstream. Use Linux APIs (`clone3`, pidfd, userfaultfd, NBD, netlink, cgroup v2) directly. Do not write macOS or other fallbacks, and do not add `cfg(not(target_os = "linux"))` stubs to new code.
+
 ## Project layout
 
 Follow the crates.io style: `foo.rs` lists its submodules and they live in the `foo/` folder. The `project-structure` skill says where each kind of code belongs. Update that skill when the layout grows.
