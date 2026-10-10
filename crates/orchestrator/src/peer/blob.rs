@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
@@ -10,6 +11,7 @@ use super::handle::{PeerHandle, PeerReply};
 use super::stream::{PeerChunks, status_text};
 use crate::proto::{GetBuildBlobRequest, GetBuildFileExistsRequest};
 use crate::storage::backend::Storage;
+use crate::telemetry::reads::{Outcome, Source, reads};
 
 pub struct PeerBlob {
     pub handle: PeerHandle,
@@ -22,10 +24,23 @@ impl PeerBlob {
     }
 
     pub async fn bytes(&self) -> PeerReply<Bytes> {
+        let started = Instant::now();
         match self.chunks().await? {
-            Some(chunks) => collect(chunks).await.map(Some).map_err(|e| self.stream_error(&e)),
+            Some(chunks) => {
+                let collected = collect(chunks).await.map_err(|e| self.stream_error(&e));
+                self.record(started, collected.as_ref().map(|bytes| bytes.len() as i64));
+                collected.map(Some)
+            }
             None => Ok(None),
         }
+    }
+
+    fn record(&self, started: Instant, transferred: Result<i64, &String>) {
+        let (bytes, outcome) = match transferred {
+            Ok(bytes) => (bytes, Outcome::Ok),
+            Err(error) => (0, Outcome::of_error(error)),
+        };
+        reads().record_blob(started.elapsed(), bytes, &self.handle.name, Source::Peer, outcome);
     }
 
     fn stream_error(&self, error: &str) -> String {
@@ -50,8 +65,13 @@ impl PeerBlob {
     }
 
     pub async fn write_to(&self, destination: &Path) -> Result<(), String> {
+        let started = Instant::now();
         match self.chunks().await? {
-            Some(chunks) => self.copy_to(chunks, destination).await,
+            Some(chunks) => {
+                let copied = self.copy_to(chunks, destination).await;
+                self.record(started, copied.as_ref().map(|written| *written as i64));
+                copied.map(|_| ())
+            }
             None => self.base.write_to_direct(&self.base_path(), destination).await,
         }
     }
@@ -118,7 +138,8 @@ impl PeerBlob {
         &self,
         mut chunks: BoxStream<'static, Result<Bytes, String>>,
         destination: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
+        let mut written = 0u64;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .open(destination)
@@ -129,9 +150,11 @@ impl PeerBlob {
             file.write_all(&chunk)
                 .await
                 .map_err(|e| crate::go_os::path_error("write", destination, &e))?;
+            written += chunk.len() as u64;
         }
         file.flush()
             .await
+            .map(|()| written)
             .map_err(|e| crate::go_os::path_error("write", destination, &e))
     }
 }

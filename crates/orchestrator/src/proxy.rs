@@ -4,6 +4,7 @@ pub mod content_type;
 pub mod cors;
 pub mod destination;
 pub mod forward;
+pub mod go_replies;
 pub mod handler;
 pub mod host;
 pub mod limit;

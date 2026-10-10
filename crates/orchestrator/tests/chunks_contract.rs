@@ -189,7 +189,10 @@ async fn a_second_node_loads_a_snapshot_from_the_first_before_it_is_uploaded_the
     memfile.read_at(4096, &mut page).await.unwrap();
 
     assert_eq!(std::fs::read(snapfile).unwrap(), snapshot.snapfile);
-    assert_eq!(build, snapshot.build);
+    assert_eq!(build.memfile.mappings, snapshot.build.memfile.mappings);
+    assert_eq!(build.rootfs.mappings, snapshot.build.rootfs.mappings);
+    assert_eq!(build.memfile.metadata.size, snapshot.build.memfile.metadata.size);
+    assert!(build.memfile.incomplete_pending_upload && build.rootfs.incomplete_pending_upload);
     assert_eq!(metadata, snapshot.metadata);
     assert_eq!(memfile.size(), 8192);
     assert_eq!(page, snapshot.memfile[4096..]);

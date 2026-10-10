@@ -2,7 +2,9 @@ use roaring::RoaringBitmap;
 use uuid::Uuid;
 
 use super::mapping::{from_blocks, merge, normalize, validate};
-use super::{Header, Metadata, PAGE_SIZE};
+use std::collections::BTreeMap;
+
+use super::{BuildData, BuildMapping, Header, Metadata, PAGE_SIZE};
 
 #[derive(Debug, Clone, Default)]
 pub struct DiffMetadata {
@@ -23,7 +25,12 @@ impl DiffMetadata {
         let empty = from_blocks(Uuid::nil(), &self.empty, self.block_size);
         let mappings = normalize(&merge(&parent.mappings, &merge(&dirty, &empty)));
 
-        let header = Header::new(parent.metadata.next_generation(build_id), mappings)?;
+        let mut header = Header::new(parent.metadata.next_generation(build_id), mappings)?;
+        header.builds = parent
+            .builds
+            .as_ref()
+            .map(|builds| inherited_builds(builds, &header.mappings));
+        header.incomplete_pending_upload = true;
         validate(&header.mappings, header.metadata.size, PAGE_SIZE)?;
         Ok(header)
     }
@@ -34,13 +41,24 @@ impl DiffMetadata {
                 size: new_size,
                 ..parent.metadata
             },
-            mappings: parent.mappings.clone(),
+            ..parent.clone()
         };
         let header = self.to_diff_header(&resized_parent, build_id)?;
         validate(&header.mappings, header.metadata.size, PAGE_SIZE)
             .map_err(|e| format!("invalid resized header mappings: {e}"))?;
         Ok(header)
     }
+}
+
+fn inherited_builds(parent: &BTreeMap<Uuid, BuildData>, mappings: &[BuildMapping]) -> BTreeMap<Uuid, BuildData> {
+    mappings
+        .iter()
+        .filter_map(|mapping| {
+            parent
+                .get(&mapping.build_id)
+                .map(|data| (mapping.build_id, data.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

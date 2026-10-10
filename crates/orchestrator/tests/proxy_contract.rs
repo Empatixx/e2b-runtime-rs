@@ -16,6 +16,7 @@ use orchestrator::proxy::body::{BoxError, full_body};
 use orchestrator::proxy::limit::ConnectionLimit;
 use orchestrator::proxy::limiter::ConnectionLimiter;
 use orchestrator::proxy::refusal::Refusal;
+use orchestrator::proxy::server::ShutdownError;
 use serde_json::Value;
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -760,10 +761,10 @@ async fn shutdown_deadline_falls_back_to_closing_upgraded_connections() {
 
     assert_eq!(
         proxy.server.shutdown(Duration::from_millis(100)).await,
-        Err("context deadline exceeded".to_owned())
+        Err(ShutdownError::DeadlineExceeded)
     );
     echo(&mut client).await;
-    proxy.server.close();
+    proxy.server.close().unwrap();
 
     assert_tunnel_closed(finished).await;
     assert_eq!(proxy.server.current_server_connections(), 0);
@@ -776,7 +777,7 @@ async fn forced_close_ends_upgraded_connections() {
     let mut client = open_tunnel(&proxy).await;
     echo(&mut client).await;
 
-    proxy.server.close();
+    proxy.server.close().unwrap();
 
     assert_tunnel_closed(finished).await;
     assert_eq!(proxy.server.current_server_connections(), 0);
@@ -1002,7 +1003,12 @@ async fn shutdown_releases_failed_h2c_prefaces() {
         match keep_open {
             true => {
                 assert_eq!(proxy.server.current_server_connections(), 1, "{name}");
-                assert_eq!(proxy.server.shutdown(Duration::from_secs(1)).await, Ok(()), "{name}");
+                assert_eq!(
+                    proxy.server.shutdown(Duration::from_millis(100)).await,
+                    Err(ShutdownError::DeadlineExceeded),
+                    "{name}"
+                );
+                proxy.server.close().unwrap();
                 let mut byte = [0u8; 1];
                 let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut byte))
                     .await
@@ -1081,7 +1087,7 @@ async fn upload_stalled_by_the_backend(complete_upload: bool, forced: bool) {
     let graceful = proxy.server.shutdown(grace).await;
     if !complete_upload {
         assert!(graceful.is_err());
-        proxy.server.close();
+        proxy.server.close().unwrap();
         tokio::time::timeout(Duration::from_secs(5), released.notified())
             .await
             .expect("shutdown left the upload handler blocked");
@@ -1234,4 +1240,203 @@ async fn keeps_declared_content_types_and_empty_bodies_untyped() {
         Some("application/json")
     );
     assert_eq!(content_type_through_the_proxy(None, b"").await, None);
+}
+
+async fn serve_with_failing_close(message: &'static str) -> (TestProxy, tokio::task::JoinHandle<()>) {
+    let server = orchestrator::proxy::server::ProxyServer::new(
+        proxy_settings(),
+        refusing(Refusal::Unexpected {
+            message: "unused".to_owned(),
+        }),
+        None,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let serving = server.clone();
+    let task = tokio::spawn(async move {
+        serving.serve(FailingClose { listener, message }).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (TestProxy { server, port }, task)
+}
+
+#[tokio::test]
+async fn closing_reports_a_listener_that_fails_to_close() {
+    let (proxy, task) = serve_with_failing_close("listener close failed").await;
+
+    assert_eq!(proxy.server.close(), Err("listener close failed".to_owned()));
+
+    task.await.unwrap();
+    assert_eq!(proxy.server.close(), Ok(()), "the listener is forgotten once closed");
+}
+
+#[tokio::test]
+async fn shutdown_reports_a_listener_that_fails_to_close_after_draining() {
+    let (proxy, task) = serve_with_failing_close("listener shutdown failed").await;
+
+    assert_eq!(
+        proxy.server.shutdown(Duration::from_secs(1)).await,
+        Err(ShutdownError::Listener {
+            message: "listener shutdown failed".to_owned()
+        })
+    );
+
+    task.await.unwrap();
+    assert_eq!(proxy.server.close(), Ok(()));
+}
+
+async fn stalled_h2c_upload(forced: bool) {
+    let (started_tx, started) = tokio::sync::oneshot::channel::<()>();
+    let started_tx = Arc::new(parking_lot::Mutex::new(Some(started_tx)));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _backend = serve_handle(
+        listener,
+        Arc::new(move |request| {
+            let started_tx = started_tx.clone();
+            Box::pin(async move {
+                let mut body = request.into_body();
+                body.frame().await;
+                if let Some(sender) = started_tx.lock().take() {
+                    sender.send(()).ok();
+                }
+                while body.frame().await.is_some() {}
+                status_only(StatusCode::OK)
+            })
+        }),
+    );
+    let released = Arc::new(tokio::sync::Notify::new());
+    let notifying = released.clone();
+    let limit = ConnectionLimit::builder()
+        .limiter(Arc::new(ConnectionLimiter::default()))
+        .max_limit(Arc::new(|| 10))
+        .on_released(Arc::new(move |_| notifying.notify_one()))
+        .build();
+    let proxy = start_proxy_with(
+        orchestrator::proxy::server::ProxySettings {
+            idle_timeout: Duration::from_secs(60),
+            ..proxy_settings()
+        },
+        fixed(destination(address, "upload-lifecycle")),
+        Some(limit),
+    )
+    .await;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Result<Frame<Bytes>, BoxError>>();
+    sender.send(Ok(Frame::data(Bytes::from(vec![b'x'; 8192])))).unwrap();
+    let stream = connect(&proxy).await;
+    let (mut h2, connection) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://127.0.0.1:{}/upload", proxy.port))
+        .header("content-length", "8193")
+        .body(StreamBody::new(tokio_stream::wrappers::UnboundedReceiverStream::new(
+            receiver,
+        )))
+        .unwrap();
+    let client = tokio::spawn(async move { h2.send_request(request).await });
+    tokio::time::timeout(Duration::from_secs(5), started)
+        .await
+        .expect("backend did not receive the upload")
+        .unwrap();
+
+    let grace = if forced {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(100)
+    };
+    assert!(proxy.server.shutdown(grace).await.is_err());
+    proxy.server.close().unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), released.notified())
+        .await
+        .expect("shutdown left the upload handler blocked");
+    assert_eq!(proxy.server.current_server_connections(), 0);
+    drop(sender);
+    client.abort();
+}
+
+#[tokio::test]
+async fn closing_interrupts_a_stalled_h2c_upload_after_the_deadline() {
+    stalled_h2c_upload(false).await;
+}
+
+#[tokio::test]
+async fn forced_close_interrupts_a_stalled_h2c_upload() {
+    stalled_h2c_upload(true).await;
+}
+
+#[tokio::test]
+async fn an_idle_h2c_connection_is_closed_after_the_idle_timeout_even_before_any_request() {
+    let backend = spawn_backend("backend-h2c-idle").await;
+    let proxy = start_proxy_with(
+        short_idle_settings(),
+        fixed(destination(backend.address, &backend.id)),
+        None,
+    )
+    .await;
+    let stream = connect(&proxy).await;
+    let (_sender, connection) = hyper::client::conn::http2::handshake::<_, _, http_body_util::Empty<Bytes>>(
+        TokioExecutor::new(),
+        TokioIo::new(stream),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(20), connection)
+        .await
+        .expect("the idle h2c connection must be closed")
+        .ok();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(proxy.server.current_server_connections(), 0);
+}
+
+async fn raw_exchange(proxy: &TestProxy, request: Vec<u8>) -> String {
+    let mut client = connect(proxy).await;
+    client.write_all(&request).await.ok();
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .ok();
+    String::from_utf8_lossy(&reply).into_owned()
+}
+
+#[tokio::test]
+async fn malformed_requests_get_the_go_server_replies() {
+    let backend = spawn_backend("backend-malformed").await;
+    let proxy = start_proxy(fixed(destination(backend.address, &backend.id)), None).await;
+
+    assert_eq!(
+        raw_exchange(&proxy, b"GARBAGE\r\n\r\n".to_vec()).await,
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n400 Bad Request"
+    );
+    let large = format!("GET / HTTP/1.1\r\nHost: x\r\nX: {}\r\n\r\n", "a".repeat(2_000_000));
+    assert_eq!(
+        raw_exchange(&proxy, large.into_bytes()).await,
+        "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n431 Request Header Fields Too Large"
+    );
+    let missing_host = raw_exchange(&proxy, b"GET / HTTP/1.1\r\n\r\n".to_vec()).await;
+    assert!(
+        missing_host.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+        "{missing_host}"
+    );
+    assert!(
+        missing_host.ends_with("400 Bad Request: missing required Host header"),
+        "{missing_host}"
+    );
+    assert_eq!(backend.request_count(), 0);
+}
+
+#[tokio::test]
+async fn http_one_zero_requests_need_no_host() {
+    let backend = spawn_backend("backend-http10").await;
+    let proxy = start_proxy(fixed(destination(backend.address, &backend.id)), None).await;
+
+    let reply = raw_exchange(&proxy, b"GET / HTTP/1.0\r\n\r\n".to_vec()).await;
+
+    assert!(reply.starts_with("HTTP/1.0 200 OK"), "{reply}");
 }

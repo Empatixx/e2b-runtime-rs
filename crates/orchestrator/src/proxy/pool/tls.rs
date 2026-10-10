@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -21,9 +21,12 @@ pub fn connector(insecure_skip_verify: bool) -> TlsConnector {
 }
 
 fn web_roots() -> RootCertStore {
-    RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    }
+    static SYSTEM_ROOTS: LazyLock<RootCertStore> = LazyLock::new(|| {
+        let mut roots = RootCertStore::empty();
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        roots
+    });
+    SYSTEM_ROOTS.clone()
 }
 
 #[derive(Debug)]

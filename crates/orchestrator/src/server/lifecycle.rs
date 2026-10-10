@@ -17,18 +17,19 @@ use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
 use super::status::Work;
-use crate::network::pool::Release;
 use crate::events::{PAUSED, SandboxEvent};
 use crate::firecracker::exit::{CrashCause, ExitInfo};
 use crate::memory::trace::Trace;
+use crate::network::pool::Release;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
+use crate::sandbox::snapshot::in_place::{FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure};
 use crate::sandbox::snapshot::{LocalSnapshot, Snapshot};
 use crate::sandbox::{Death, Sandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::server::sandbox::{record_crash, record_execution};
-use crate::template::Template;
 use crate::telemetry::server::spans;
+use crate::template::Template;
 use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
@@ -64,6 +65,10 @@ pub enum Command {
     Trace {
         reply: oneshot::Sender<Option<Trace>>,
     },
+    CheckpointInPlace {
+        request: FilesystemCheckpointRequest,
+        reply: oneshot::Sender<Result<FilesystemCheckpoint, InPlaceFailure>>,
+    },
     Extend,
 }
 
@@ -73,9 +78,29 @@ pub struct SandboxHandle {
     pub commands: mpsc::Sender<Command>,
     pub updates: Arc<tokio::sync::Mutex<()>>,
     cleanup: Arc<AtomicBool>,
+    checkpointing: Arc<AtomicBool>,
+}
+
+pub struct InPlaceCheckpointGuard {
+    checkpointing: Arc<AtomicBool>,
+}
+
+impl Drop for InPlaceCheckpointGuard {
+    fn drop(&mut self) {
+        self.checkpointing.store(false, Ordering::SeqCst);
+    }
 }
 
 impl SandboxHandle {
+    pub fn begin_in_place_checkpoint(&self) -> Option<InPlaceCheckpointGuard> {
+        self.checkpointing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then(|| InPlaceCheckpointGuard {
+                checkpointing: self.checkpointing.clone(),
+            })
+    }
+
     pub fn lifecycle(&self) -> Lifecycle {
         self.info.lock().lifecycle.clone()
     }
@@ -156,6 +181,19 @@ struct Running {
     _execution: Span,
 }
 
+#[cfg(test)]
+pub fn detached_handle(info: SandboxInfo) -> (SandboxHandle, mpsc::Receiver<Command>) {
+    let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
+    let handle = SandboxHandle {
+        info: Arc::new(Mutex::new(info)),
+        commands,
+        updates: Arc::default(),
+        cleanup: Arc::default(),
+        checkpointing: Arc::default(),
+    };
+    (handle, receiver)
+}
+
 pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, throwaway: bool) -> SandboxHandle {
     let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
     let handle = SandboxHandle {
@@ -163,6 +201,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         commands,
         updates: Arc::default(),
         cleanup: Arc::default(),
+        checkpointing: Arc::default(),
     };
     let host_stats = node
         .host_stats
@@ -184,7 +223,10 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
     });
     let execution = {
         let info = handle.info.lock();
-        let init_origin = info.metadata.as_ref().map_or("none", TemplateMetadata::prefetch_init_origin);
+        let init_origin = info
+            .metadata
+            .as_ref()
+            .map_or("none", TemplateMetadata::prefetch_init_origin);
         spans::execution(&info.config, sandbox.prefetch_summary().as_ref(), init_origin)
     };
     let running = Running {
@@ -284,7 +326,8 @@ impl Running {
                 .with("template_id", template_id)
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
-            self.node.mark_written_when_ready(disk.clone(), local.memfile_ready.clone());
+            self.node
+                .mark_written_when_ready(disk.clone(), local.memfile_ready.clone());
             span.in_scope(|| self.node.upload(local.clone(), object_metadata.clone(), disk));
             self.node.harvest_after_pause(PausedBuild {
                 parent: parent.clone(),
@@ -307,6 +350,14 @@ impl Running {
                 command = self.commands.recv() => match command {
                     Some(Command::Extend) => continue,
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
+                    Some(Command::CheckpointInPlace { request, reply }) => {
+                        let checkpointed = self.sandbox.checkpoint_filesystem_in_place(&request).await;
+                        let lost = checkpointed.as_ref().err().is_some_and(|failure| failure.lost.is_some());
+                        drop(reply.send(checkpointed));
+                        if lost {
+                            return Ending::Stop { reason: "lost during an in-place checkpoint".to_owned() };
+                        }
+                    }
                     Some(Command::Checkpoint { build_id, reply }) => return Ending::Checkpoint { build_id, reply },
                     Some(Command::Pause { build_id, template_id, span, reply, disk }) => return Ending::Pause { build_id, template_id, span, reply, disk },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
@@ -333,7 +384,10 @@ impl Running {
 
 fn network_release(node: Arc<Node>, lifecycle_id: String) -> Release {
     Box::new(move || {
-        node.proxy.get().iter().for_each(|proxy| proxy.on_network_release(&lifecycle_id));
+        node.proxy
+            .get()
+            .iter()
+            .for_each(|proxy| proxy.on_network_release(&lifecycle_id));
         std::future::ready(Ok(())).boxed()
     })
 }

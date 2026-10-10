@@ -1,10 +1,11 @@
+pub mod binary_cache;
 pub mod body;
 pub mod cpus;
 pub mod files;
 pub mod process;
-pub mod version;
 pub mod quiesce;
 pub mod upgrade;
+pub mod version;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

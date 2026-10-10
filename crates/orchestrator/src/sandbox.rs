@@ -47,6 +47,7 @@ pub struct Sandbox {
     prefetch_stats: Arc<PrefetchStats>,
     prefetch_summary: Option<PrefetchSummary>,
     resolved_vm_vcpus: i64,
+    reinit: parking_lot::Mutex<Option<tokio_util::sync::DropGuard>>,
 }
 
 impl<S: sandbox_builder::IsComplete> SandboxBuilder<S> {
@@ -140,6 +141,7 @@ impl Sandbox {
             phases: PhaseTimer::start(),
             prefetch_stats: Arc::default(),
             prefetch_summary: None,
+            reinit: parking_lot::Mutex::default(),
         }
     }
 

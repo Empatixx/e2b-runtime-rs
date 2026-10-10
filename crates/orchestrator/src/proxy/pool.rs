@@ -1,6 +1,8 @@
 pub mod client;
 pub mod connector;
+pub mod proxy_env;
 pub mod tls;
+pub mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,12 +16,13 @@ use client::ProxyClient;
 
 const HOST_CONNECTION_SPLIT: usize = 4;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PoolSettings {
     pub max_client_conns: usize,
     pub max_connection_attempts: usize,
     pub idle_timeout: Duration,
     pub disable_keep_alives: bool,
+    pub proxy_env: Arc<proxy_env::ProxyEnv>,
 }
 
 impl PoolSettings {
@@ -93,6 +96,7 @@ mod tests {
             max_connection_attempts: 1,
             idle_timeout: Duration::from_secs(1),
             disable_keep_alives: false,
+            proxy_env: Arc::default(),
         })
     }
 
@@ -136,6 +140,7 @@ mod tests {
                 max_connection_attempts: 1,
                 idle_timeout: Duration::from_secs(1),
                 disable_keep_alives: false,
+                proxy_env: Arc::default(),
             }
             .max_host_idle_conns()
         };

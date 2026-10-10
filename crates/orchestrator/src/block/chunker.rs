@@ -3,7 +3,7 @@ use std::ops::{Deref, Range};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -12,7 +12,9 @@ use tokio::sync::watch;
 
 use super::cache::BlockCache;
 use crate::storage::backend::Storage;
+use crate::storage::frame_table::CompressionType;
 use crate::storage::header::PAGE_SIZE;
+use crate::telemetry::reads::{Outcome, SeekableObjectType, Source as ReadSource, read_attributes, reads};
 
 pub const CHUNK_SIZE: u64 = 4 << 20;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -238,16 +240,30 @@ impl Drop for FetchSession {
 impl Source {
     async fn fetch(&self, range: Range<u64>, state: &watch::Sender<FetchState>) -> Result<(), String> {
         self.attempts.fetch_add(1, Ordering::Relaxed);
-        tokio::time::timeout(self.timeout, self.stream(range.clone(), state))
+        let started = Instant::now();
+        let mut timings = FetchTimings::default();
+        let fetched = tokio::time::timeout(self.timeout, self.stream(range.clone(), state, &mut timings))
             .await
-            .map_err(|_| format!("fetch {} {range:?}: timed out after {:?}", self.object, self.timeout))??;
+            .map_err(|_| format!("fetch {} {range:?}: timed out after {:?}", self.object, self.timeout))
+            .and_then(|streamed| streamed);
+        timings.record(&self.object, started.elapsed(), &fetched);
+        fetched?;
         self.fetches.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn stream(&self, range: Range<u64>, state: &watch::Sender<FetchState>) -> Result<(), String> {
-        let stream = self.storage.get_stream(&self.object, range.clone()).await?;
-        self.stream_from(range, stream, state).await
+    async fn stream(
+        &self,
+        range: Range<u64>,
+        state: &watch::Sender<FetchState>,
+        timings: &mut FetchTimings,
+    ) -> Result<(), String> {
+        let opening = Instant::now();
+        let opened = self.storage.open_range(&self.object, range.clone()).await;
+        timings.open = opening.elapsed();
+        let opened = opened?;
+        timings.source = opened.source;
+        self.stream_from(range, opened.chunks, state, timings).await
     }
 
     async fn stream_from(
@@ -255,12 +271,19 @@ impl Source {
         range: Range<u64>,
         mut stream: impl futures::Stream<Item = Result<Bytes, String>> + Unpin,
         state: &watch::Sender<FetchState>,
+        timings: &mut FetchTimings,
     ) -> Result<(), String> {
         let batch = self.read_batch();
         let mut pending = BytesMut::new();
         let mut filled = range.start;
-        while let Some(bytes) = stream.next().await {
-            pending.extend_from_slice(&bytes?);
+        loop {
+            let reading = Instant::now();
+            let next = stream.next().await;
+            timings.read += reading.elapsed();
+            let Some(bytes) = next else { break };
+            let bytes = bytes?;
+            timings.bytes += bytes.len() as u64;
+            pending.extend_from_slice(&bytes);
             if pending.len() >= batch {
                 let aligned = pending.len() - pending.len() % PAGE_SIZE as usize;
                 filled = self.fill(filled, pending.split_to(aligned).freeze()).await?;
@@ -306,6 +329,43 @@ impl Source {
 
     fn is_cached(&self, range: &Range<u64>) -> bool {
         self.cache.is_present(range.start, range.end - range.start)
+    }
+}
+
+struct FetchTimings {
+    source: ReadSource,
+    open: Duration,
+    read: Duration,
+    bytes: u64,
+}
+
+impl Default for FetchTimings {
+    fn default() -> Self {
+        Self {
+            source: ReadSource::Unknown,
+            open: Duration::ZERO,
+            read: Duration::ZERO,
+            bytes: 0,
+        }
+    }
+}
+
+impl FetchTimings {
+    fn record(&self, object: &str, fetch: Duration, fetched: &Result<(), String>) {
+        let outcome = fetched.as_ref().err().map_or(Outcome::Ok, |e| Outcome::of_error(e));
+        let attributes = read_attributes(
+            SeekableObjectType::of_path(object),
+            self.source,
+            CompressionType::None,
+            outcome,
+        );
+        let metrics = reads();
+        metrics.record_read(self.read, self.bytes as i64, &attributes);
+        metrics.record_fetch(fetch, self.bytes as i64, &attributes);
+        let work = self.open + self.read;
+        if fetched.is_ok() && !work.is_zero() {
+            metrics.record_pipeline_efficiency(fetch.as_secs_f64() / work.as_secs_f64(), &attributes);
+        }
     }
 }
 
@@ -498,7 +558,11 @@ mod tests {
         let stream = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
         let (state, _progress) = watch::channel(FetchState::Running);
         let source = chunker.source.clone();
-        let streaming = tokio::spawn(async move { source.stream_from(0..4 * MIB, stream, &state).await });
+        let streaming = tokio::spawn(async move {
+            source
+                .stream_from(0..4 * MIB, stream, &state, &mut FetchTimings::default())
+                .await
+        });
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while !chunker.source.is_cached(&(0..4096)) && tokio::time::Instant::now() < deadline {
@@ -520,7 +584,12 @@ mod tests {
 
         let streamed = chunker
             .source
-            .stream_from(0..4 * MIB, futures::stream::iter([Ok(short)]), &state)
+            .stream_from(
+                0..4 * MIB,
+                futures::stream::iter([Ok(short)]),
+                &state,
+                &mut FetchTimings::default(),
+            )
             .await;
 
         assert!(streamed.unwrap_err().contains("got 4196 of 4194304 bytes"));

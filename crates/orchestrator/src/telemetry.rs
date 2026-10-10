@@ -4,6 +4,7 @@ pub mod grpc;
 pub mod identity;
 pub mod logs;
 pub mod metrics;
+pub mod reads;
 pub mod report;
 pub mod server;
 pub mod traces;
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use opentelemetry::global;
+use opentelemetry::metrics::{Meter, MeterProvider};
 use opentelemetry::propagation::TextMapCompositePropagator;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -33,12 +35,14 @@ use logs::BaseFields;
 
 const COLLECTOR_ENDPOINT_VARIABLE: &str = "OTEL_COLLECTOR_GRPC_ENDPOINT";
 const TRACER_NAME: &str = "orchestrator";
+const SANDBOX_METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics";
 const DEBUG_VARIABLE: &str = "E2B_DEBUG";
 const OWN_TARGET: &str = "orchestrator";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Providers {
     meters: SdkMeterProvider,
+    sandbox_meters: SdkMeterProvider,
     traces: SdkTracerProvider,
     logs: SdkLoggerProvider,
 }
@@ -60,6 +64,13 @@ impl Telemetry {
                     stopped: AtomicBool::new(false),
                 }
             })
+    }
+
+    pub fn sandbox_meter(&self) -> Meter {
+        match &self.providers {
+            Some(providers) => providers.sandbox_meters.meter(SANDBOX_METER_NAME),
+            None => global::meter(SANDBOX_METER_NAME),
+        }
     }
 
     pub fn install_subscriber(&self) {
@@ -101,6 +112,7 @@ impl Drop for Telemetry {
 fn shut_down(providers: &Providers) -> Result<(), String> {
     [
         providers.meters.shutdown_with_timeout(SHUTDOWN_TIMEOUT),
+        providers.sandbox_meters.shutdown_with_timeout(SHUTDOWN_TIMEOUT),
         providers.traces.shutdown_with_timeout(SHUTDOWN_TIMEOUT),
         providers.logs.shutdown_with_timeout(SHUTDOWN_TIMEOUT),
     ]
@@ -113,6 +125,7 @@ fn providers(endpoint: &Endpoint, identity: &Identity) -> Result<Providers, Stri
     let resource = identity.resource();
     Ok(Providers {
         meters: metrics::meter_provider(endpoint, resource.clone())?,
+        sandbox_meters: metrics::sandbox_meter_provider(endpoint, resource.clone())?,
         traces: traces::tracer_provider(endpoint, resource.clone())?,
         logs: logs::logger_provider(endpoint, resource, BaseFields::current(&identity.service_name))?,
     })

@@ -1,6 +1,7 @@
 mod client;
 mod contexts;
 mod flags;
+mod log_routing;
 mod prefetch;
 #[cfg(test)]
 mod testing;
@@ -17,10 +18,15 @@ pub use flags::{
     MAX_STARTING_INSTANCES_PER_NODE, MEMORY_PREFETCH_COALESCE_MAX_MB, MEMORY_PREFETCH_MAX_COPY_WORKERS,
     MEMORY_PREFETCH_MAX_FETCH_WORKERS, PAUSE_RESUME_PREFETCH_CONSUME, PAUSE_RESUME_PREFETCH_HARVEST,
     PAUSE_RESUME_PREFETCH_HARVEST_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT, PEER_TO_PEER_CHUNK_TRANSFER,
-    REBOOT_CPU_TEMPLATE_OVERRIDE, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, SANDBOX_MAX_INCOMING_CONNECTIONS, STORAGE_CONCURRENT_UPLOAD_LIMIT,
-    STORAGE_MAX_UPLOAD_TASKS, USE_MEMFD, build_envd_version, build_firecracker_version, build_io_engine,
-    build_kernel_cmdline_args, build_kernel_version, envd_binary_cache, envd_offline_upgrade_target,
-    envd_timeout_milliseconds, envd_upgrade_target, memfile_diff_dedup, pause_admission_disk_headroom_mib, resume_prefetch_source,
+    REBOOT_CPU_TEMPLATE_OVERRIDE, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, SANDBOX_MAX_INCOMING_CONNECTIONS,
+    STORAGE_CONCURRENT_UPLOAD_LIMIT, STORAGE_MAX_UPLOAD_TASKS, USE_MEMFD, build_envd_version,
+    build_firecracker_version, build_io_engine, build_kernel_cmdline_args, build_kernel_version, envd_binary_cache,
+    envd_offline_upgrade_target, envd_timeout_milliseconds, envd_upgrade_target, memfile_diff_dedup,
+    pause_admission_disk_headroom_mib, resume_prefetch_source,
 };
 pub use flags::{BoolFlag, Flag, IntFlag, JsonFlag, StringFlag};
+pub use log_routing::{
+    LogWriteConfig, LogWriteConfigResolver, LogWriteDefaults, MODE_PRIMARY_AND_SHADOW, MODE_PRIMARY_ONLY,
+    logs_write_config, resolve_log_write_config,
+};
 pub use prefetch::ScopedPrefetchFlags;

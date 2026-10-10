@@ -29,21 +29,20 @@ use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
 use super::pause_disk::{BuildDisk, PauseDiskReservation};
-use crate::storage::upload_limit::UploadLimiter;
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::scheduling::from_headers;
 use super::services::Services;
 use super::status::NodeStatus;
-use super::vcpus::{filesystem_boot, validate_cold_boot_vcpus};
 use super::uploads::{Outcome, Uploads};
+use super::vcpus::{filesystem_boot, validate_cold_boot_vcpus};
 use crate::block::build_file::{Artifact, BuildFile, DiffStore};
 use crate::block::overlay::Overlay;
 use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
-use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::featureflags::{FeatureFlags, FlagContext, memfile_diff_dedup};
+use crate::firecracker::vcpus::is_exceeds_snapshot;
 use crate::firecracker::version::{supports_huge_pages, supports_memfd};
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
@@ -67,6 +66,7 @@ use crate::sandbox::config::sandbox_builder::{
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
+use crate::storage::upload_limit::UploadLimiter;
 use crate::tcpfirewall::proxy::FirewallSandbox;
 use crate::telemetry::server::gauges::Allocated;
 use crate::template::cache::TemplateCache;
@@ -105,6 +105,7 @@ pub struct Node {
     pub build_disk: Arc<BuildDisk>,
     upload_limiter: Arc<UploadLimiter>,
     pub feature_flags: FeatureFlags,
+    pub volume_mounts: VolumeMounts,
     store: Arc<DiffStore>,
     binaries: Binaries,
     build_kernel_version: String,
@@ -113,7 +114,6 @@ pub struct Node {
     runtime_flags: RuntimeFlags,
     orchestrator_ip: String,
 }
-    pub volume_mounts: VolumeMounts,
 
 struct ResumeRequest<'a> {
     config: &'a SandboxConfig,
@@ -236,7 +236,6 @@ impl Node {
             runtime_flags: config.runtime_flags.clone(),
             orchestrator_ip: config.orchestrator_ip.clone(),
         })
-            volume_mounts: config.volume_mounts.clone(),
     }
 
     pub(super) fn with_init_request_timeout(&self, init: EnvdInit) -> EnvdInit {
@@ -629,10 +628,8 @@ impl Node {
             throwaway,
         } = request;
         let files = async {
-            let (build, snapfile) = tokio::join!(
-                template.build(),
-                snapfile_unless(&template, filesystem_boot_requested)
-            );
+            let (build, snapfile) =
+                tokio::join!(template.build(), snapfile_unless(&template, filesystem_boot_requested));
             build.map(|build| (build, snapfile))
         };
         let egress = egress_rules(config.network.as_ref().and_then(|network| network.egress.as_ref()))

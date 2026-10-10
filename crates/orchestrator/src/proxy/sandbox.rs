@@ -11,15 +11,15 @@ use axum::http::request::Parts;
 use axum::http::uri::{Authority, Scheme};
 use percent_encoding::percent_decode_str;
 use subtle::ConstantTimeEq;
-use tokio::net::TcpListener;
 
 use super::destination::{Destination, MASK_REQUEST_HOST_PORT_PLACEHOLDER};
 use super::handler::Resolver;
 use super::host::target_from_request;
 use super::limit::ConnectionLimit;
 use super::limiter::ConnectionLimiter;
+use super::pool::proxy_env::ProxyEnv;
 use super::refusal::Refusal;
-use super::server::{ProxyServer, ProxySettings};
+use super::server::{Acceptor, ProxyServer, ProxySettings, ShutdownError};
 use crate::envd::ENVD_PORT;
 use crate::proto::SandboxNetworkIngressConfig;
 use metrics::ProxyMetrics;
@@ -147,6 +147,7 @@ impl SandboxProxy {
                 max_connection_attempts: SANDBOX_PROXY_RETRIES,
                 idle_timeout: IDLE_TIMEOUT,
                 disable_keep_alives: true,
+                proxy_env: Arc::new(ProxyEnv::from_process()),
             },
             destination_resolver(lookup),
             Some(limit),
@@ -158,20 +159,33 @@ impl SandboxProxy {
         }
     }
 
-    pub async fn serve(&self, listener: TcpListener) -> Result<(), String> {
-        self.server.serve(listener).await.map_err(|e| e.to_string())
+    pub async fn serve(&self, acceptor: impl Acceptor) -> Result<(), String> {
+        self.server.serve(acceptor).await.map_err(|e| e.to_string())
     }
 
-    pub async fn close(&self, forced: bool) {
-        let graceful = match forced {
-            true => Err("forced".to_owned()),
-            false => self.server.shutdown(SHUTDOWN_TIMEOUT).await,
-        };
-        if let Err(error) = &graceful {
-            tracing::warn!(%error, "sandbox proxy graceful shutdown interrupted");
-            self.server.close();
+    pub async fn close(&self, forced: bool) -> Result<(), String> {
+        let mut errors = Vec::new();
+        let mut forced = forced;
+        if !forced {
+            match self.server.shutdown(SHUTDOWN_TIMEOUT).await {
+                Ok(()) => {}
+                Err(error) => {
+                    forced = true;
+                    tracing::warn!(?error, "sandbox proxy graceful shutdown interrupted");
+                    if let ShutdownError::Listener { message } = error {
+                        errors.push(message);
+                    }
+                }
+            }
         }
-        tracing::info!(forced = graceful.is_err(), "sandbox proxy shutdown complete");
+        if forced {
+            errors.extend(self.server.close().err());
+        }
+        tracing::info!(forced, error = ?errors, "sandbox proxy shutdown complete");
+        match errors.is_empty() {
+            true => Ok(()),
+            false => Err(format!("failed to shutdown proxy server: {}", errors.join("\n"))),
+        }
     }
 
     pub fn remove_from_pool(&self, connection_key: &str) {

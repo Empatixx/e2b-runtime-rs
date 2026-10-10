@@ -7,6 +7,7 @@ use tokio_util::io::ReaderStream;
 
 use super::chunk::{SEND_CHUNK_SIZE, chunked, rechunked};
 use super::source::{Chunks, SourceError};
+use crate::storage::header::{Header, Metadata, VERSION_V5};
 use crate::template::Template;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +93,15 @@ async fn stream_header(template: &Template, file: HeaderFile) -> Result<Chunks, 
     if header.metadata.size == 0 {
         return Err(SourceError::NotAvailable);
     }
-    let serialized = header
+    let wire = Header {
+        metadata: Metadata {
+            version: VERSION_V5,
+            ..header.metadata
+        },
+        incomplete_pending_upload: true,
+        ..header
+    };
+    let serialized = wire
         .serialize()
         .map_err(|e| SourceError::Failed(format!("serialize header: {e}")))?;
     Ok(chunked(Bytes::from(serialized)))
@@ -250,7 +259,9 @@ mod tests {
         let chunks = source(&fixture, build_id, "memfile.header").stream().await.unwrap();
 
         let decoded = Header::decode(&joined(&collected(chunks).await)).unwrap();
-        assert_eq!(decoded, header(build_id, 4096));
+        assert_eq!(decoded.metadata.version, VERSION_V5);
+        assert!(decoded.incomplete_pending_upload);
+        assert_eq!(decoded.mappings, header(build_id, 4096).mappings);
     }
 
     #[tokio::test]
@@ -260,7 +271,8 @@ mod tests {
         let chunks = source(&fixture, build_id, "rootfs.ext4.header").stream().await.unwrap();
 
         let decoded = Header::decode(&joined(&collected(chunks).await)).unwrap();
-        assert_eq!(decoded, header(build_id, 4096));
+        assert_eq!(decoded.metadata.version, VERSION_V5);
+        assert_eq!(decoded.mappings, header(build_id, 4096).mappings);
     }
 
     #[tokio::test]
@@ -279,7 +291,7 @@ mod tests {
     async fn a_header_larger_than_the_bound_reaches_the_peer_as_bounded_messages_that_reassemble() {
         let fixture = cache_fixture();
         let build_id = Uuid::new_v4();
-        let entries = 40_000u64;
+        let entries = 65_535u64;
         let mappings = (0..entries)
             .map(|index| BuildMapping {
                 offset: index * 4096,
@@ -300,6 +312,8 @@ mod tests {
         );
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|chunk| chunk.len() <= SEND_CHUNK_SIZE));
-        assert_eq!(Header::decode(&joined(&chunks)).unwrap(), big);
+        let got = Header::decode(&joined(&chunks)).unwrap();
+        assert_eq!(got.mappings.len(), big.mappings.len());
+        assert_eq!(got.metadata.size, big.metadata.size);
     }
 }

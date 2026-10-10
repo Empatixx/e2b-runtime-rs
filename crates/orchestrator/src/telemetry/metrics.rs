@@ -10,6 +10,7 @@ use super::endpoint::Endpoint;
 use super::server::network::{EGRESS_RETIREMENT_DURATION, SLOT_RETURN_DURATION};
 
 const METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(15);
+const SANDBOX_METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(5);
 const HISTOGRAM_MAX_BUCKETS: u32 = 160;
 const HISTOGRAM_MAX_SCALE: i8 = 20;
 const EXPLICIT_HISTOGRAMS: [&str; 2] = [SLOT_RETURN_DURATION, EGRESS_RETIREMENT_DURATION];
@@ -32,6 +33,27 @@ pub fn meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMete
         .with_resource(resource)
         .with_view(exponential_histograms)
         .build())
+}
+
+pub fn sandbox_meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMeterProvider, String> {
+    let exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_temporality(Temporality::Delta)
+        .with_endpoint(endpoint.url())
+        .build()
+        .map_err(|e| format!("failed to create sandbox metrics exporter: {e}"))?;
+    let reader = PeriodicReader::builder(exporter, Tokio)
+        .with_interval(SANDBOX_METRIC_EXPORT_PERIOD)
+        .build();
+    Ok(SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(resource)
+        .with_view(unlimited_cardinality)
+        .build())
+}
+
+fn unlimited_cardinality(_: &Instrument) -> Option<Stream> {
+    Stream::builder().with_cardinality_limit(usize::MAX).build().ok()
 }
 
 fn exponential_histograms(instrument: &Instrument) -> Option<Stream> {

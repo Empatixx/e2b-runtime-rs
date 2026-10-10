@@ -21,7 +21,7 @@ impl FilesystemSnapshot {
 
     pub async fn upload(&self, storage: &Storage, metadata: &ObjectMetadata) -> Result<(), String> {
         let paths = self.build.paths();
-        let header = Bytes::from(self.build.rootfs.serialize()?);
+        let header = Bytes::from(self.build.rootfs.finalized().serialize()?);
         let rootfs_metadata = data_metadata(metadata, &self.build.rootfs, self.rootfs_bytes);
         let (rootfs, rootfs_header, metadata_object) = (paths.rootfs(), paths.rootfs_header(), paths.metadata());
         tokio::try_join!(
@@ -99,7 +99,11 @@ mod tests {
             Some(&b"{}"[..])
         );
         assert_eq!(
-            fixture.storage.load_header(&paths.rootfs_header()).await.unwrap(),
+            fixture
+                .storage
+                .load_stored_header(&paths.rootfs_header())
+                .await
+                .unwrap(),
             fixture.build.rootfs
         );
     }

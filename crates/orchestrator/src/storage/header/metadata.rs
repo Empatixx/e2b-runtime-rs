@@ -2,6 +2,8 @@ use uuid::Uuid;
 
 pub const METADATA_SIZE: usize = 64;
 pub const TEMPLATE_VERSION: u64 = 3;
+pub const VERSION_V4: u64 = 4;
+pub const VERSION_V5: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Metadata {
@@ -58,7 +60,7 @@ impl Metadata {
     }
 
     pub fn supported_version(&self) -> bool {
-        (1..=3).contains(&self.format_version())
+        (1..=VERSION_V5).contains(&self.format_version())
     }
 }
 

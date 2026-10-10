@@ -27,6 +27,13 @@ impl Activity {
         Engaged { activity: self.clone() }
     }
 
+    pub fn start_idle(&self) {
+        if self.in_flight.load(Ordering::SeqCst) == 0 {
+            self.idle_since
+                .send_if_modified(|since| since.replace(Instant::now()).is_none());
+        }
+    }
+
     pub async fn idle_for(&self, timeout: Duration) {
         let mut idle_since = self.idle_since.subscribe();
         loop {

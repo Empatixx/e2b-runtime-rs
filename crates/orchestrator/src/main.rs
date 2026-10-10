@@ -19,6 +19,8 @@ mod serve {
     use orchestrator::featureflags::SANDBOX_MAX_INCOMING_CONNECTIONS;
     use orchestrator::proxy::sandbox::SandboxProxy;
     use orchestrator::routing::redis::Redis;
+    use orchestrator::sandbox_observer::SandboxObserver;
+    use orchestrator::sandbox_observer::sandboxes::running;
     use orchestrator::server::app::{App, TemplateManagerSetup};
     use orchestrator::server::config::NodeConfig;
     use orchestrator::server::info::service_instance_id;
@@ -51,9 +53,9 @@ mod serve {
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }
+        orchestrator::volumes::check_support().map_err(|e| format!("volume confinement prerequisites not met: {e}"))?;
         let node = Arc::new(Node::new(&config)?);
         let _gauges = NodeGauges::register(NodeSource {
-        orchestrator::volumes::check_support().map_err(|e| format!("volume confinement prerequisites not met: {e}"))?;
             sandboxes: {
                 let node = node.clone();
                 Arc::new(move || node.registry.len())
@@ -66,6 +68,10 @@ mod serve {
             status: node.status.clone(),
             version: orchestrator::version().to_owned(),
             commit: orchestrator::server::app::COMMIT.to_owned(),
+        });
+        let _sandbox_observer = SandboxObserver::start(&telemetry.sandbox_meter(), {
+            let node = node.clone();
+            Arc::new(move || running(&node))
         });
         let mut event_sinks: Vec<Arc<dyn EventSink>> = Vec::new();
         match &config.redis {
@@ -113,6 +119,7 @@ mod serve {
         let lookup_node = node.clone();
         let hyperloop = orchestrator::hyperloop::server::router(
             Arc::new(move |ip| lookup_node.source_of(ip)),
+            feature_flags.clone(),
             config.logs_collector.clone(),
         );
         let hyperloop_address = SocketAddr::from(([0, 0, 0, 0], config.hyperloop_port));
@@ -170,7 +177,9 @@ mod serve {
         }
         let _ = stop.send(());
         let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
-        sandbox_proxy.close(config.force_stop).await;
+        if let Err(error) = sandbox_proxy.close(config.force_stop).await {
+            tracing::error!(%error, "sandbox proxy shutdown failed");
+        }
         match config.force_stop {
             true => node.close_forced().await,
             false => node.close().await,

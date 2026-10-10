@@ -174,7 +174,7 @@ impl TestProxy {
 
 impl Drop for TestProxy {
     fn drop(&mut self) {
-        self.server.close();
+        drop(self.server.close());
     }
 }
 
@@ -183,6 +183,7 @@ pub fn proxy_settings() -> ProxySettings {
         max_connection_attempts: 5,
         idle_timeout: Duration::from_secs(20),
         disable_keep_alives: false,
+        proxy_env: Arc::default(),
     }
 }
 
@@ -273,4 +274,19 @@ pub fn echo_handle() -> Handle {
 pub async fn spawn_echo_backend() -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     (listener.local_addr().unwrap(), serve_handle(listener, echo_handle()))
+}
+
+pub struct FailingClose {
+    pub listener: TcpListener,
+    pub message: &'static str,
+}
+
+impl orchestrator::proxy::server::Acceptor for FailingClose {
+    fn accept(&self) -> BoxFuture<'_, std::io::Result<TcpStream>> {
+        Box::pin(async move { self.listener.accept().await.map(|(stream, _)| stream) })
+    }
+
+    fn close(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(self.message))
+    }
 }

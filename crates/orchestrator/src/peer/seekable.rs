@@ -1,5 +1,6 @@
 use std::fmt;
 use std::ops::Range;
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -8,7 +9,9 @@ use super::availability::served_by_peer;
 use super::handle::{PeerHandle, PeerReply};
 use super::stream::{PeerChunks, status_text};
 use crate::proto::{GetBuildFileSizeRequest, ReadAtBuildSeekableRequest};
-use crate::storage::backend::Storage;
+use crate::storage::backend::{OpenedRange, Storage};
+use crate::storage::frame_table::CompressionType;
+use crate::telemetry::reads::{Outcome, SeekableObjectType, Source, reads};
 
 const TRANSITIONED: &str = "peer upload completed, reload header from storage";
 
@@ -38,6 +41,7 @@ impl PeerSeekable {
     }
 
     pub async fn size(&self) -> Result<u64, SeekableError> {
+        let started = Instant::now();
         let size = self
             .handle
             .try_peer("size peer-seekable", || async {
@@ -63,21 +67,42 @@ impl PeerSeekable {
             })
             .await
             .map_err(SeekableError::Failed)?;
-        size.ok_or(SeekableError::Transitioned)
+        let sized = size.ok_or(SeekableError::Transitioned);
+        let outcome = sized.as_ref().err().map_or(Outcome::Ok, |_| Outcome::Transitioned);
+        reads().record_size(started.elapsed(), SeekableObjectType::Unknown, Source::Peer, outcome);
+        sized
     }
 
-    pub async fn open_range_reader(
-        &self,
-        range: Range<u64>,
-    ) -> Result<BoxStream<'static, Result<Bytes, String>>, SeekableError> {
+    pub async fn open_range_reader(&self, range: Range<u64>) -> Result<OpenedRange, SeekableError> {
+        let started = Instant::now();
+        let record = |outcome| {
+            reads().record_open(
+                started.elapsed(),
+                SeekableObjectType::Unknown,
+                Source::Peer,
+                CompressionType::None,
+                outcome,
+            )
+        };
         match self.peer_range(&range).await.map_err(SeekableError::Failed)? {
-            Some(chunks) => Ok(chunks),
-            None if self.handle.switched_to_storage() => Err(SeekableError::Transitioned),
-            None => self
-                .base
-                .get_stream_direct(&self.base_path(), range)
-                .await
-                .map_err(SeekableError::Failed),
+            Some(chunks) => {
+                record(Outcome::Ok);
+                Ok(OpenedRange {
+                    chunks,
+                    source: Source::Peer,
+                })
+            }
+            None if self.handle.switched_to_storage() => {
+                record(Outcome::Transitioned);
+                Err(SeekableError::Transitioned)
+            }
+            None => {
+                record(Outcome::NotFound);
+                self.base
+                    .open_range_direct(&self.base_path(), range)
+                    .await
+                    .map_err(SeekableError::Failed)
+            }
         }
     }
 
@@ -131,8 +156,9 @@ mod tests {
     }
 
     async fn read(seekable: &PeerSeekable, range: Range<u64>) -> Result<Vec<u8>, SeekableError> {
-        let chunks = seekable.open_range_reader(range).await?;
-        chunks
+        let opened = seekable.open_range_reader(range).await?;
+        opened
+            .chunks
             .try_fold(Vec::new(), |mut all, chunk| async move {
                 all.extend_from_slice(&chunk);
                 Ok(all)

@@ -75,13 +75,13 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Team ID labels are missing on the metrics Rust does not record yet (envd init duration, rootfs and memory seal durations, snapshot diff sizes, build durations) | later |
 | No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
 
-## Orchestrator: vCPU hotplug
+## Orchestrator: vCPU hotplug and filesystem boot
 
 | Item | Target |
 |---|---|
-| No sandbox metrics observer: the `e2b.sandbox.cpu.possible`, `cpu.target`, `cpu.target_attempts` and `cpu.write_pending` gauges and the "CPU hotplug write stuck" warning from envd `/metrics` are missing | API |
-| A filesystem boot (reboot) keeps no `max_vcpus` inheritance (`rebootMaxVcpus`) and no `validateColdBootVcpus`, because the Rust node has no filesystem boot path | API |
-| `Cgroup::remove` consumes the cgroup, so a failed removal cannot be retried, and it does not `cgroup.kill` stray threads of the vcpu child | later |
+| The sandbox metrics observer polls only sandboxes in the node registry; upstream also observes template build sandboxes, and logs the envd OOM kills from the same poll (here `oom_monitor.rs` does that per sandbox) | later |
+| The reboot path has no pre-boot filesystem recovery (`fsRecoverPreBoot`, e2fsck journal replay and the `fs_recovery` create label) | API |
+| The reboot path has no offline envd upgrade before the cold boot (`envdOfflineUpgradePreBoot`) | API |
 | The `resume-build` dev tool (`defaultRunVcpu`) has no Rust counterpart | later |
 
 ## Orchestrator: peer chunk sharing
@@ -111,3 +111,15 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The upstream dialer ignores `HTTP_PROXY` and `NO_PROXY`; Go's transport reads them with `ProxyFromEnvironment` | later |
 | A chunked response without a content type is never sniffed; Go sniffs it only when the body write wins a race against the header flush | later |
 | Upstream TLS without skip-verify trusts the bundled web roots; Go trusts the system roots (the sandbox proxy only dials TLS with skip-verify) | later |
+
+## Orchestrator: in-place checkpoint
+
+| Item | Target |
+|---|---|
+| The memory in-place checkpoint is not ported: it needs `use_sync_wp` in the uffd serve loop, the CoW window and deferred memory export, the balloon device read and the deferred rootfs seal; every memory checkpoint reports route `sync_wp_off` and resumes fresh | perf |
+| The filesystem-only checkpoint exports the rootfs synchronously from the live overlay; upstream can swap in a fresh COW cache and seal in the background (`defer-rootfs-export`) | perf |
+| Pause and checkpoint skip the cgroup freeze and unfreeze, the pre-pause reclaim, the hinting drain and the snapshot admission grace (`pause-admission-grace-milliseconds`) | perf |
+| The filesystem-only `Pause` RPC does not quiesce the guest yet; `GuestQuiesce` is ready for it | API |
+| A snapshot has no lineage (`AbandonsPredecessor`) in the template cache | later |
+| No end-to-end test of the filesystem-only in-place checkpoint over gRPC (needs KVM and a cluster with `filesystem-only-checkpoint` on) | API |
+

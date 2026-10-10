@@ -9,6 +9,9 @@ use hyper_util::client::legacy::connect::{Connected, Connection};
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
+
+use super::go_replies::Replacement;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 #[derive(Clone, Default)]
@@ -36,11 +39,19 @@ impl Connections {
             aborted: Box::pin(token.cancelled_owned()),
             reset_on_abort,
             was_aborted: false,
+            probe: None,
+            replacement: None,
             _membership: Membership {
                 id,
                 connections: self.clone(),
             },
         }
+    }
+
+    pub fn track_probed<Io: Abortable>(&self, io: Io, probe: Arc<Probe>) -> Tracked<Io> {
+        let mut tracked = self.track(io, false);
+        tracked.probe = Some(probe);
+        tracked
     }
 
     pub fn abort_all(&self) {
@@ -54,8 +65,75 @@ impl Connections {
     }
 }
 
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const H2_PREFACE_REQUEST_LINE: usize = 18;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Unknown,
+    Http1,
+    H2c,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeState {
+    pub protocol: Protocol,
+    pub preface_pending: bool,
+}
+
+pub struct Probe {
+    seen: Mutex<Vec<u8>>,
+    state: watch::Sender<ProbeState>,
+}
+
+impl Probe {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            seen: Mutex::new(Vec::new()),
+            state: watch::channel(ProbeState {
+                protocol: Protocol::Unknown,
+                preface_pending: false,
+            })
+            .0,
+        })
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<ProbeState> {
+        self.state.subscribe()
+    }
+
+    fn record(&self, data: &[u8]) {
+        let mut seen = self.seen.lock();
+        if self.state.borrow().protocol != Protocol::Unknown {
+            return;
+        }
+        let room = H2_PREFACE.len() - seen.len();
+        seen.extend_from_slice(&data[..data.len().min(room)]);
+        let matches = seen.iter().zip(H2_PREFACE).all(|(seen, expected)| seen == expected);
+        let state = match (matches, seen.len() == H2_PREFACE.len()) {
+            (false, _) => ProbeState {
+                protocol: Protocol::Http1,
+                preface_pending: false,
+            },
+            (true, true) => ProbeState {
+                protocol: Protocol::H2c,
+                preface_pending: false,
+            },
+            (true, false) => ProbeState {
+                protocol: Protocol::Unknown,
+                preface_pending: seen.len() >= H2_PREFACE_REQUEST_LINE,
+            },
+        };
+        self.state.send_replace(state);
+    }
+}
+
 pub trait Abortable {
     fn reset_on_close(&self);
+
+    fn proxied(&self) -> bool {
+        false
+    }
 }
 
 impl Abortable for TcpStream {
@@ -82,6 +160,8 @@ pub struct Tracked<Io> {
     aborted: Pin<Box<WaitForCancellationFutureOwned>>,
     reset_on_abort: bool,
     was_aborted: bool,
+    probe: Option<Arc<Probe>>,
+    replacement: Option<Replacement>,
     _membership: Membership,
 }
 
@@ -101,7 +181,35 @@ impl<Io: AsyncRead + Abortable + Unpin> AsyncRead for Tracked<Io> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         match self.poll_aborted(cx) {
             Poll::Ready(error) => Poll::Ready(Err(error)),
-            Poll::Pending => Pin::new(&mut self.io).poll_read(cx, buf),
+            Poll::Pending => {
+                let before = buf.filled().len();
+                let polled = Pin::new(&mut self.io).poll_read(cx, buf);
+                if let (Poll::Ready(Ok(())), Some(probe)) = (&polled, &self.probe) {
+                    probe.record(&buf.filled()[before..]);
+                }
+                polled
+            }
+        }
+    }
+}
+
+impl<Io: AsyncWrite + Abortable + Unpin> Tracked<Io> {
+    fn write_through(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        if self.probe.is_some() && self.replacement.is_none() {
+            self.replacement = Replacement::of(buf);
+        }
+        let Some(replacement) = self.replacement.as_mut() else {
+            return Pin::new(&mut self.io).poll_write(cx, buf);
+        };
+        loop {
+            let written = match Pin::new(&mut self.io).poll_write(cx, replacement.remaining()) {
+                Poll::Ready(Ok(written)) => written,
+                other => return other,
+            };
+            if let Some(consumed) = replacement.advance(written) {
+                self.replacement = None;
+                return Poll::Ready(Ok(consumed));
+            }
         }
     }
 }
@@ -110,7 +218,7 @@ impl<Io: AsyncWrite + Abortable + Unpin> AsyncWrite for Tracked<Io> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         match self.poll_aborted(cx) {
             Poll::Ready(error) => Poll::Ready(Err(error)),
-            Poll::Pending => Pin::new(&mut self.io).poll_write(cx, buf),
+            Poll::Pending => self.write_through(cx, buf),
         }
     }
 
@@ -126,9 +234,9 @@ impl<Io: AsyncWrite + Abortable + Unpin> AsyncWrite for Tracked<Io> {
     }
 }
 
-impl<Io> Connection for Tracked<Io> {
+impl<Io: Abortable> Connection for Tracked<Io> {
     fn connected(&self) -> Connected {
-        Connected::new()
+        Connected::new().proxy(self.io.proxied())
     }
 }
 
@@ -144,6 +252,39 @@ mod tests {
         let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
         let (server, _) = listener.accept().await.unwrap();
         (connections.track(client, true), server)
+    }
+
+    fn state_after(chunks: &[&[u8]]) -> ProbeState {
+        let probe = Probe::new();
+        chunks.iter().for_each(|chunk| probe.record(chunk));
+        *probe.subscribe().borrow()
+    }
+
+    #[test]
+    fn the_probe_tells_h2c_from_http1() {
+        let preface = |protocol, preface_pending| ProbeState {
+            protocol,
+            preface_pending,
+        };
+        assert_eq!(state_after(&[b"GET / HTTP/1.1\r\n"]), preface(Protocol::Http1, false));
+        assert_eq!(
+            state_after(&[b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"]),
+            preface(Protocol::H2c, false)
+        );
+        assert_eq!(
+            state_after(&[b"PRI * HTTP/2.0", b"\r\n\r\n"]),
+            preface(Protocol::Unknown, true)
+        );
+        assert_eq!(state_after(&[b"PRI * HT"]), preface(Protocol::Unknown, false));
+        assert_eq!(
+            state_after(&[b"PRI * HTTP/2.0\r\n\r\nS"]),
+            preface(Protocol::Unknown, true)
+        );
+        assert_eq!(
+            state_after(&[b"PRI * HTTP/2.0\r\n\r\nBADBAD"]),
+            preface(Protocol::Http1, false)
+        );
+        assert_eq!(state_after(&[]), preface(Protocol::Unknown, false));
     }
 
     #[tokio::test]

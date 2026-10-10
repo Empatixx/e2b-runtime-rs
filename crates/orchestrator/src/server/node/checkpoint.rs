@@ -1,3 +1,4 @@
+mod in_place;
 mod route;
 
 use std::collections::HashMap;
@@ -14,7 +15,8 @@ use super::prefetch::pause_contexts as flag_contexts;
 use super::{Lifetime, Node, StartRequest, event_sandbox, routed_sandbox};
 use crate::events::{CHECKPOINTED, SandboxEvent};
 use crate::featureflags::{
-    DEFER_MEMORY_EXPORT, IN_PLACE_CHECKPOINT, IN_PLACE_CHECKPOINT_REPORTING, PEER_TO_PEER_ASYNC_CHECKPOINT,
+    DEFER_MEMORY_EXPORT, FILESYSTEM_ONLY_CHECKPOINT, IN_PLACE_CHECKPOINT, IN_PLACE_CHECKPOINT_REPORTING,
+    PEER_TO_PEER_ASYNC_CHECKPOINT,
 };
 use crate::firecracker::version::supports_in_place_checkpoint;
 use crate::memory::trace::Trace;
@@ -53,16 +55,17 @@ impl Node {
         let lifecycle = handle.lifecycle();
         let id = lifecycle.sandbox_id.clone();
         let fs_only = request.filesystem_only;
-        if fs_only {
-            return Err(filesystem_only_checkpoint_disabled(&id));
-        }
+        let (route, balloon_mode) = self.route_of(&handle.info.lock(), &id, fs_only)?;
         let started = Instant::now();
         let team_id = handle.info.lock().config.team_id.clone();
-        let (route, balloon_mode) = self.checkpoint_route(&handle.info.lock());
         spans::record_checkpoint_route(route, balloon_mode.as_str());
-        let checkpointed = self.checkpoint_routed(handle, request, lifecycle).await;
+        let in_place = route == route::IN_PLACE;
+        let checkpointed = match in_place {
+            true => self.checkpoint_in_place(handle, request, balloon_mode).await,
+            false => self.checkpoint_routed(handle, request, lifecycle).await,
+        };
         CheckpointOutcome {
-            in_place: false,
+            in_place,
             fs_only,
             route: route.to_owned(),
             balloon_mode: balloon_mode.as_str().to_owned(),
@@ -74,6 +77,17 @@ impl Node {
         checkpointed
     }
 
+    fn route_of(&self, info: &SandboxInfo, id: &str, fs_only: bool) -> Result<(&'static str, BalloonMode), Status> {
+        match fs_only {
+            true => self
+                .feature_flags
+                .get(&FILESYSTEM_ONLY_CHECKPOINT, &flag_contexts(&info.config))
+                .then(|| (route::IN_PLACE, stamped_balloon(info)))
+                .ok_or_else(|| filesystem_only_checkpoint_disabled(id)),
+            false => Ok(self.checkpoint_route(info)),
+        }
+    }
+
     fn checkpoint_route(&self, info: &SandboxInfo) -> (&'static str, BalloonMode) {
         let flags = &self.feature_flags;
         let contexts = flag_contexts(&info.config);
@@ -81,7 +95,7 @@ impl Node {
         let early = early_route(RESUMED_WITH_SYNC_WP, flags.get(&IN_PLACE_CHECKPOINT, &contexts), || {
             supports_in_place_checkpoint(firecracker_version)
         });
-        let stamped = BalloonMode::stamped(info.metadata.as_ref().and_then(|metadata| metadata.balloon));
+        let stamped = stamped_balloon(info);
         match early {
             Some(route) => (route, stamped),
             None => (
@@ -275,6 +289,10 @@ impl Node {
     }
 }
 
+fn stamped_balloon(info: &SandboxInfo) -> BalloonMode {
+    BalloonMode::stamped(info.metadata.as_ref().and_then(|metadata| metadata.balloon))
+}
+
 async fn snapshot(handle: &SandboxHandle, build_id: Uuid) -> Result<LocalSnapshot, String> {
     let (reply, snapshot) = oneshot::channel();
     handle
@@ -315,5 +333,272 @@ fn stop_reserved_status(stopped: StopReserved, id: &str) -> Status {
             Status::failed_precondition(format!("an operation is already in progress for sandbox '{id}'"))
         }
         StopReserved::NotLive => Status::internal(format!("failed to checkpoint sandbox '{id}'")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::SystemTime;
+
+    use tonic::Code;
+
+    use super::*;
+    use crate::featureflags::FeatureFlags;
+    use crate::network::slot::Slot;
+    use crate::proto::SandboxConfig;
+    use crate::server::config::NodeConfig;
+    use crate::server::lifecycle::detached_handle;
+    use crate::server::user_error::user_error_of;
+    use crate::storage::backend::Storage;
+    use crate::storage::build::Build;
+    use crate::storage::header::{Header, Metadata};
+    use crate::template::Template;
+    use crate::template::metadata::{Balloon, TemplateMetadata};
+
+    struct Fixture {
+        node: Arc<Node>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn node(flags: &[(&str, bool)]) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let vars = [
+            ("STORAGE_PROVIDER", "Local".to_owned()),
+            ("LOCAL_TEMPLATE_STORAGE_BASE_PATH", path("store")),
+            ("E2B_CACHE_DIR", path("cache")),
+            ("E2B_WORK_DIR", path("sandboxes")),
+            ("E2B_FIRECRACKER", "/unused".to_owned()),
+            ("E2B_KERNEL", "/unused".to_owned()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect();
+        let builder = flags.iter().fold(FeatureFlags::builder(), |builder, (key, value)| {
+            builder.override_flag(key, *value)
+        });
+        let config = NodeConfig::from_vars(&vars)
+            .unwrap()
+            .with_feature_flags(builder.offline());
+        Fixture {
+            node: Arc::new(Node::new(&config).unwrap()),
+            _dir: dir,
+        }
+    }
+
+    fn info(balloon: Option<Balloon>, firecracker_version: &str) -> SandboxInfo {
+        let dir = tempfile::tempdir().unwrap();
+        let build_id = Uuid::new_v4();
+        let rootfs = Header::new(Metadata::template(build_id, 4096, 4096), Vec::new()).unwrap();
+        let metadata = TemplateMetadata {
+            balloon,
+            ..TemplateMetadata::default()
+        };
+        SandboxInfo {
+            config: SandboxConfig {
+                sandbox_id: "ckpt".to_owned(),
+                team_id: "team-1".to_owned(),
+                firecracker_version: firecracker_version.to_owned(),
+                envd_version: "9.9.9".to_owned(),
+                ..SandboxConfig::default()
+            },
+            start: SystemTime::now(),
+            end: SystemTime::now(),
+            metadata: Some(metadata.clone()),
+            lifecycle: Lifecycle {
+                sandbox_id: "ckpt".to_owned(),
+                lifecycle_id: "lifecycle-1".to_owned(),
+                execution_id: "execution-1".to_owned(),
+            },
+            host_ip: Ipv4Addr::LOCALHOST,
+            slot: Slot::new(41).unwrap(),
+            scheduling: SchedulingMetadata::default(),
+            template: Arc::new(Template::filesystem_layer(
+                Storage::local(dir.path()).unwrap(),
+                Build::filesystem_only(build_id, rootfs),
+                metadata,
+                dir.path().to_path_buf(),
+            )),
+            started_at: SystemTime::now(),
+            oom_watermark: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_memory_checkpoint_never_goes_in_place_without_sync_wp_and_carries_the_stamp_as_its_label() {
+        let fixture = node(&[("in-place-checkpoint", true), ("filesystem-only-checkpoint", true)]);
+        let reporting = Balloon {
+            reporting: true,
+            hinting: false,
+        };
+
+        let (route, mode) = fixture
+            .node
+            .route_of(&info(Some(reporting), "v1.14-0.2.1"), "ckpt", false)
+            .unwrap();
+
+        assert_eq!((route, mode.as_str()), (route::SYNC_WP_OFF, "reporting"));
+    }
+
+    #[tokio::test]
+    async fn a_filesystem_only_checkpoint_goes_in_place_on_its_own_flag() {
+        let fixture = node(&[("in-place-checkpoint", false), ("filesystem-only-checkpoint", true)]);
+
+        let (route, mode) = fixture.node.route_of(&info(None, "unparsable"), "ckpt", true).unwrap();
+
+        assert_eq!((route, mode.as_str()), (route::IN_PLACE, "unknown"));
+    }
+
+    #[tokio::test]
+    async fn a_filesystem_only_checkpoint_is_refused_while_its_flag_is_off() {
+        let fixture = node(&[("in-place-checkpoint", true), ("filesystem-only-checkpoint", false)]);
+
+        let refused = fixture
+            .node
+            .route_of(&info(None, "v1.14-0.2.1"), "ckpt", true)
+            .unwrap_err();
+
+        assert_eq!(refused.code(), Code::FailedPrecondition);
+        assert_eq!(
+            refused.message(),
+            "filesystem-only checkpoint of sandbox 'ckpt' is disabled"
+        );
+        assert!(user_error_of(&refused).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_second_in_place_checkpoint_is_refused_while_one_is_in_flight() {
+        let fixture = node(&[("filesystem-only-checkpoint", true)]);
+        let (handle, _commands) = detached_handle(info(None, "v1.14-0.2.1"));
+        let _held = handle.begin_in_place_checkpoint().expect("the first checkpoint starts");
+
+        let refused = fixture
+            .node
+            .clone()
+            .checkpoint(
+                handle,
+                CheckpointRequest {
+                    build_id: Uuid::new_v4().to_string(),
+                    provenance: HashMap::new(),
+                    filesystem_only: true,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(refused.code(), Code::FailedPrecondition);
+        assert!(
+            refused.message().contains("already in progress"),
+            "{}",
+            refused.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_in_place_guard_is_released_when_the_checkpoint_ends() {
+        let (handle, _commands) = detached_handle(info(None, "v1.14-0.2.1"));
+
+        let first = handle.begin_in_place_checkpoint();
+        assert!(handle.begin_in_place_checkpoint().is_none());
+        drop(first);
+
+        assert!(handle.begin_in_place_checkpoint().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_in_place_checkpoint_of_a_stopped_sandbox_reports_that_it_stopped() {
+        let fixture = node(&[("filesystem-only-checkpoint", true)]);
+        let (handle, commands) = detached_handle(info(None, "v1.14-0.2.1"));
+        drop(commands);
+
+        let failed = fixture
+            .node
+            .clone()
+            .checkpoint(
+                handle,
+                CheckpointRequest {
+                    build_id: Uuid::new_v4().to_string(),
+                    provenance: HashMap::new(),
+                    filesystem_only: true,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(failed.code(), Code::FailedPrecondition);
+        assert!(
+            failed.message().ends_with("the sandbox stopped"),
+            "{}",
+            failed.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_build_id_is_refused_before_the_sandbox_is_touched() {
+        let fixture = node(&[("filesystem-only-checkpoint", true)]);
+        let (handle, mut commands) = detached_handle(info(None, "v1.14-0.2.1"));
+
+        let refused = fixture
+            .node
+            .clone()
+            .checkpoint(
+                handle,
+                CheckpointRequest {
+                    build_id: "not-a-uuid".to_owned(),
+                    provenance: HashMap::new(),
+                    filesystem_only: true,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(refused.code(), Code::FailedPrecondition);
+        assert!(
+            refused
+                .message()
+                .starts_with("error snapshotting sandbox 'ckpt': error snapshotting sandbox: failed to parse build id")
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    fn vanished_layer() -> crate::sandbox::snapshot::filesystem::FilesystemSnapshot {
+        let build_id = Uuid::new_v4();
+        let rootfs = Header::new(Metadata::template(build_id, 4096, 4096), Vec::new()).unwrap();
+        crate::sandbox::snapshot::filesystem::FilesystemSnapshot {
+            build: Build::filesystem_only(build_id, rootfs),
+            rootfs_diff: Some("/definitely/not/here/rootfs.diff".into()),
+            rootfs_bytes: 4096,
+            metadata_file: "/definitely/not/here/metadata.json".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkpoint_upload_leaves_the_sandbox_alive_for_the_api() {
+        let fixture = node(&[]);
+
+        let failed = fixture
+            .node
+            .persist_filesystem_checkpoint(vanished_layer(), ObjectMetadata::default(), "ckpt", &[])
+            .await
+            .unwrap_err();
+
+        assert_eq!(failed.code(), Code::FailedPrecondition);
+        assert_eq!(
+            failed.message(),
+            "error uploading snapshot for checkpoint 'ckpt': snapshot files are gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_async_checkpoint_upload_answers_before_it_lands() {
+        let fixture = node(&[("peer-to-peer-async-checkpoint", true)]);
+
+        let answered = fixture
+            .node
+            .persist_filesystem_checkpoint(vanished_layer(), ObjectMetadata::default(), "ckpt", &[])
+            .await;
+
+        assert!(answered.is_ok());
     }
 }

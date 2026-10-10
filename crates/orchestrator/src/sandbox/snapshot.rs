@@ -1,4 +1,5 @@
 pub mod filesystem;
+pub mod in_place;
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -403,7 +404,10 @@ impl LocalSnapshot {
         let paths = build.paths();
         let (snapfile, memfile, rootfs) = (paths.snapfile(), paths.memfile(), paths.rootfs());
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
-        let (memfile_bytes, rootfs_bytes) = (build.memfile.serialize()?, build.rootfs.serialize()?);
+        let (memfile_bytes, rootfs_bytes) = (
+            build.memfile.finalized().serialize()?,
+            build.rootfs.finalized().serialize()?,
+        );
         let memfile_metadata = data_metadata(metadata, &build.memfile, self.snapshot.memfile_bytes);
         let rootfs_metadata = data_metadata(metadata, &build.rootfs, self.snapshot.rootfs_bytes);
         tokio::try_join!(

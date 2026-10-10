@@ -284,7 +284,7 @@ async fn closing_without_connections_is_immediate() {
     let running = start(None, -1).await;
 
     let started = std::time::Instant::now();
-    running.proxy.close(false).await;
+    running.proxy.close(false).await.unwrap();
 
     assert!(started.elapsed() < Duration::from_secs(1));
 }
@@ -301,4 +301,31 @@ async fn a_released_network_forgets_the_lifecycle_limit() {
 
     let second = running.request(u64::from(backend.port())).send().await.unwrap();
     assert_eq!(second.status(), 200);
+}
+
+async fn failing_proxy(message: &'static str) -> Arc<SandboxProxy> {
+    let proxy = Arc::new(SandboxProxy::new(Arc::new(|_| None), Arc::new(|| -1)));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let serving = proxy.clone();
+    tokio::spawn(async move { serving.serve(FailingClose { listener, message }).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    proxy
+}
+
+#[tokio::test]
+async fn a_forced_close_returns_the_listener_error() {
+    let proxy = failing_proxy("listener close failed").await;
+
+    let error = proxy.close(true).await.unwrap_err();
+
+    assert_eq!(error, "failed to shutdown proxy server: listener close failed");
+}
+
+#[tokio::test]
+async fn a_failed_graceful_shutdown_falls_back_to_a_forced_close_and_reports_the_listener() {
+    let proxy = failing_proxy("listener shutdown failed").await;
+
+    let error = proxy.close(false).await.unwrap_err();
+
+    assert_eq!(error, "failed to shutdown proxy server: listener shutdown failed");
 }

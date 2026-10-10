@@ -3,7 +3,10 @@ pub mod azure;
 mod blocking;
 mod credential_cache;
 pub mod gcs;
+mod metered;
 mod peered;
+
+pub use metered::OpenedRange;
 pub(crate) mod pem;
 mod providers;
 
@@ -11,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -28,12 +31,14 @@ use object_store::{
 
 use tokio::io::AsyncWriteExt;
 
-use super::header::Header;
+use super::frame_table::CompressionType;
+use super::header::{Header, VERSION_V4, VERSION_V5};
 use super::local_upload::UploadSigner;
 use super::object_path::validate_object_path;
 use super::spec::{Provider, StorageSpec};
 use super::upload_limit::{UploadLimiter, UploadTarget, acquire_upload_slot, max_upload_tasks};
 use crate::peer::switch::PeerSwitch;
+use crate::telemetry::reads::{Outcome, reads};
 use aws::sse::ServerSideEncryption;
 use azure::{AzureBackend, AzureEnv, AzureSigner};
 use gcs::ServiceAccountSigner;
@@ -284,7 +289,7 @@ impl Storage {
         }
     }
 
-    pub(crate) async fn get_direct(&self, path: &str) -> Result<Bytes, String> {
+    async fn get_raw(&self, path: &str) -> Result<Bytes, String> {
         validate_object_path(path)?;
         let object = self
             .store
@@ -294,7 +299,7 @@ impl Storage {
         object.bytes().await.map_err(|e| format!("read {path}: {e}"))
     }
 
-    pub(crate) async fn find_direct(&self, path: &str) -> Result<Option<Bytes>, String> {
+    async fn find_raw(&self, path: &str) -> Result<Option<Bytes>, String> {
         validate_object_path(path)?;
         match self.store.get(&ObjectPath::from(path)).await {
             Ok(object) => object.bytes().await.map(Some).map_err(|e| format!("read {path}: {e}")),
@@ -303,7 +308,7 @@ impl Storage {
         }
     }
 
-    pub(crate) async fn get_stream_direct(
+    async fn get_stream_raw(
         &self,
         path: &str,
         range: Range<u64>,
@@ -325,7 +330,7 @@ impl Storage {
             .boxed())
     }
 
-    pub(crate) async fn write_to_direct(&self, path: &str, destination: &Path) -> Result<(), String> {
+    async fn write_to_raw(&self, path: &str, destination: &Path) -> Result<(), String> {
         validate_object_path(path)?;
         let mut chunks = self.blob_stream(path).await?;
         let mut file = tokio::fs::OpenOptions::new()
@@ -392,7 +397,7 @@ impl Storage {
         Ok(bytes)
     }
 
-    pub(crate) async fn size_direct(&self, path: &str) -> Result<u64, String> {
+    async fn size_raw(&self, path: &str) -> Result<u64, String> {
         validate_object_path(path)?;
         self.store
             .head(&ObjectPath::from(path))
@@ -468,11 +473,29 @@ impl Storage {
     }
 
     pub async fn load_header(&self, path: &str) -> Result<Header, String> {
-        Header::decode(&self.get(path).await?)
+        let mut header = self.load_stored_header(path).await?;
+        if !header.incomplete_pending_upload {
+            header.backfill_missing_v3_uncompressed_builds();
+        }
+        Ok(header)
+    }
+
+    pub async fn load_stored_header(&self, path: &str) -> Result<Header, String> {
+        let data = self.get(path).await?;
+        let started = Instant::now();
+        let header = Header::decode(&data);
+        let codec = match header.as_ref().map(|header| header.metadata.format_version()) {
+            Ok(VERSION_V4 | VERSION_V5) => CompressionType::Lz4,
+            _ => CompressionType::None,
+        };
+        let outcome = header.as_ref().err().map_or(Outcome::Ok, |e| Outcome::of_error(e));
+        reads().record_blob_decompress(started.elapsed(), data.len() as i64, path, codec, outcome);
+        header
     }
 
     pub async fn store_header(&self, path: &str, header: &Header) -> Result<(), String> {
-        self.put(path, Bytes::from(header.serialize()?)).await
+        let serialized = header.serialize_for_storage(path)?;
+        self.put(path, Bytes::from(serialized.bytes)).await
     }
 }
 
@@ -551,7 +574,7 @@ mod tests {
         let header = Header::new(Metadata::template(Uuid::from_u128(7), 4096, 8192), Vec::new()).unwrap();
         let header_path = format!("{prefix}/memfile.header");
         storage.store_header(&header_path, &header).await.unwrap();
-        assert_eq!(storage.load_header(&header_path).await.unwrap(), header);
+        assert_eq!(storage.load_stored_header(&header_path).await.unwrap(), header);
 
         storage.delete_prefix(prefix).await.unwrap();
         assert!(storage.get(&path).await.is_err());

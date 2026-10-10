@@ -68,6 +68,9 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        rows.rs (sandbox_events, sandbox_host_stats), sinks.rs
   src/hoststats.rs     per-sandbox host stats sampler (StatsIdentity, cgroup CPU/memory)
   src/oom.rs           OOM kill watermark from envd /metrics
+  src/sandbox_observer.rs  per-sandbox envd /metrics poll every 5 s: metrics.rs (SandboxMetrics), poll.rs (clock drift,
+                       thresholds, CPU hotplug stuck warning), gauges.rs (e2b.sandbox.* gauges on the 5 s sandbox meter),
+                       sandboxes.rs (registry adapter)
   src/volumes.rs       VolumeService (upstream pkg/volumes): service.rs (VolumeServer, volume and path confinement, gRPC
                        trait), one file per RPC (volume.rs, dir_create.rs, dir_list.rs, file_create.rs FileUpload,
                        file_get.rs FileDownload, path_delete.rs, path_stat.rs, path_update.rs), parents.rs (ensure_dirs),
@@ -91,17 +94,10 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        (metadata.json with upstream keys, V1 fallback), optimize.rs (collect_prefetch: 2-run trace)
   src/phases.rs        PhaseTimer: resume phase durations and notes
   src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset;
-                       cgroup/cpu_limit.rs (cpu.max quota, threaded vcpu child holding the fc_vcpu threads)
+                       cgroup/cpu_limit.rs (cpu.max quota, threaded vcpu child holding the fc_vcpu threads), removal.rs
+                       (rmdir, cgroup.kill fallback and retry)
   src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (FC output to tracing with a
                        2000-byte tail and the FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
-  src/volumes.rs       VolumeService (upstream pkg/volumes): service.rs (VolumeServer, volume and path confinement, gRPC
-                       trait), one file per RPC (volume.rs, dir_create.rs, dir_list.rs, file_create.rs FileUpload,
-                       file_get.rs FileDownload, path_delete.rs, path_stat.rs, path_update.rs), parents.rs (ensure_dirs),
-                       entry.rs (EntryInfo, symlinks resolved inside the volume), failure.rs (processError mapping),
-                       api_error.rs (UserError status details), spans.rs, test_support.rs;
-                       chrooted.rs + chrooted/ (upstream pkg/chrooted: Chrooted confined by openat2 RESOLVE_IN_ROOT
-                       through rustix; resolve.rs symlink walk, remove.rs, names.rs, info.rs, file.rs, metrics.rs);
-                       the PERSISTENT_VOLUME_MOUNTS config is server/config/volume_mounts.rs
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, vcpus.rs (MAX_VCPUS, machine sizes, fc_vcpu
                        thread count, snapshot capacity refusal), process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
@@ -111,18 +107,25 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        last_cycle.rs, plan.rs, flags.rs worker settings)
   src/envd.rs          envd POST /init client (upstream retry semantics); envd/version.rs (Go semver, snapshot >= 0.5.0);
                        envd/process.rs (Connect process.Start client, bash -l -c as a user), body.rs (bounded reads of
-                       guest responses), cpus.rs (X-Envd-Cpus check)
+                       guest responses), cpus.rs (X-Envd-Cpus check),
+                       quiesce.rs + quiesce/guest.rs (GuestQuiesce: fsfreeze, fsthaw, exec fallback, guest sync before a
+                       filesystem-only snapshot; GuestEnvd posts and shell commands)
   src/storage/build.rs Build: memfile + rootfs headers of a snapshot
   src/sandbox.rs       Sandbox lifecycle: cold_boot, stop; sandbox/config.rs builder, resources.rs (teardown, Drop),
-                       vcpu_limit.rs (resume VM size, boot quota, confine vCPU threads),
+                       vcpu_limit.rs (resume VM size, boot quota, confine vCPU threads), reboot.rs (filesystem boot gate,
+                       CPU template pick and check, VM size),
                        snapshot.rs (Snapshot, LocalSnapshot, snapshot_into/pause_into/pause: dirty pages via /memory/dirty or resident-empty, rootfs diff, upload;
-                       snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff),
+                       snapshot/filesystem.rs: FilesystemSnapshot, a VM-less layer of header, metadata and optional rootfs diff;
+                       snapshot/in_place.rs: filesystem-only checkpoint of the running VM: quiesce, pause, snapshot,
+                       rootfs export, resume in place, thaw, with rollback and the lost-sandbox failures),
                        resume.rs (snapshot load over uffd),
                        harvest.rs + harvest/ (pause harvest: throwaway deny-egress resume recording a fresh trace)
   src/server/          gRPC node: config.rs (env; config/storage.rs: TEMPLATE_/BUILD_CACHE_ storage resolution,
-                       config/binaries.rs: kernel and Firecracker per version), vcpus.rs (Create vcpu validation),
+                       config/binaries.rs: kernel and Firecracker per version), vcpus.rs (Create vcpu validation, cold boot
+                       size, filesystem boot dispatch), node/reboot.rs (Node::reboot, the filesystem boot),
                        upload.rs (local HMAC PUT /upload), node.rs (Node: storage, store, registry, network pool, template cache),
-                       node/checkpoint.rs (Checkpoint resume-fresh), lifecycle.rs (task per sandbox: commands, end_time
+                       node/checkpoint.rs (Checkpoint: route decision, resume-fresh; checkpoint/route.rs gates and balloon mode,
+                       checkpoint/in_place.rs filesystem-only in-place checkpoint, cache, upload, killed event), lifecycle.rs (task per sandbox: commands, end_time
                        expiry, death watch), service.rs (SandboxService), registry.rs (Go map semantics: reserve,
                        lifecycle-aware stop, stop_reserved), services.rs (ORCHESTRATOR_SERVICES roles),
                        scheduling.rs (SchedulingMetadata from headers), user_error.rs (UserError status details),

@@ -16,6 +16,6 @@ done
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 docker build -q -t envd-rs-test -f docker/test.Dockerfile docker >/dev/null
-docker run --rm --privileged --tmpfs /tmp:exec \
+docker run --rm --privileged --tmpfs /tmp:exec -e CARGO_INCREMENTAL=0 \
   -v "$PWD":/src -v envd-rs-target:/src/target -v envd-rs-cargo:/usr/local/cargo/registry \
   -w /src envd-rs-test "$@"

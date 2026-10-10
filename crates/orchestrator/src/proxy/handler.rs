@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use axum::http::header::{HOST, HeaderMap};
+use axum::http::header::{CONNECTION, HOST, HeaderMap, HeaderValue};
 use axum::http::request::Parts;
-use axum::http::{Method, Request, Response, StatusCode};
+use axum::http::{Method, Request, Response, StatusCode, Version};
 use hyper::body::Incoming;
 
 use super::body::ProxyBody;
@@ -41,6 +41,9 @@ impl Handler {
 
     pub async fn handle(&self, request: Request<Incoming>) -> Response<ProxyBody> {
         let (parts, body) = request.into_parts();
+        if lacks_required_host(&parts) {
+            return missing_host_response();
+        }
         let inbound = Inbound::of(&parts);
         let destination = match (self.resolve)(&parts) {
             Ok(destination) => destination,
@@ -70,6 +73,21 @@ impl Handler {
             .map(|limit| limit.acquire(&destination.connection_key))
             .transpose()
     }
+}
+
+fn lacks_required_host(parts: &Parts) -> bool {
+    parts.version == Version::HTTP_11 && parts.method != Method::CONNECT && !parts.headers.contains_key(HOST)
+}
+
+fn missing_host_response() -> Response<ProxyBody> {
+    let mut response = cors::text_response(
+        StatusCode::BAD_REQUEST,
+        "400 Bad Request: missing required Host header".to_owned(),
+    );
+    response
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
+    response
 }
 
 struct Inbound {

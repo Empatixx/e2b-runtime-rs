@@ -18,6 +18,8 @@ impl Build {
             memfile: Header {
                 metadata: Metadata::template(build_id, PAGE_SIZE, 0),
                 mappings: Vec::new(),
+                builds: None,
+                incomplete_pending_upload: false,
             },
             rootfs,
         }
@@ -27,8 +29,8 @@ impl Build {
         let paths = BuildPaths::new(build_id);
         let (memfile_header, rootfs_header) = (paths.memfile_header(), paths.rootfs_header());
         let (memfile, rootfs) = tokio::try_join!(
-            storage.load_header(&memfile_header),
-            storage.load_header(&rootfs_header)
+            storage.load_stored_header(&memfile_header),
+            storage.load_stored_header(&rootfs_header)
         )?;
         Ok(Self {
             build_id,

@@ -1,5 +1,6 @@
 pub mod envd_upgrade;
 pub mod gauges;
+pub mod in_place;
 pub mod network;
 pub mod prefetch;
 pub mod sandbox;

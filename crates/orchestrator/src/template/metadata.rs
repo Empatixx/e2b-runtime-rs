@@ -118,7 +118,10 @@ impl Prefetch {
             Some(Prefetch {
                 memory: Some(memory),
                 origin,
-            }) if !memory.indices.is_empty() => origin.as_deref().filter(|origin| !origin.is_empty()).unwrap_or("unknown"),
+            }) if !memory.indices.is_empty() => origin
+                .as_deref()
+                .filter(|origin| !origin.is_empty())
+                .unwrap_or("unknown"),
             _ => "none",
         }
     }
@@ -205,9 +208,6 @@ impl TemplateMetadata {
         }
     }
 
-    pub fn with_vcpu_count(&self, vcpus: i64) -> Self {
-        Self {
-            vcpu_count: vcpus,
     pub fn mark_filesystem_only(&self, filesystem_only: bool, quiesced: bool) -> Self {
         Self {
             version: match filesystem_only {
@@ -220,6 +220,9 @@ impl TemplateMetadata {
         }
     }
 
+    pub fn with_vcpu_count(&self, vcpus: i64) -> Self {
+        Self {
+            vcpu_count: vcpus,
             ..self.clone()
         }
     }
@@ -297,8 +300,15 @@ mod tests {
         let json = stamped.to_json();
         let read = TemplateMetadata::from_json(&json).unwrap();
 
-        assert!(String::from_utf8(json).unwrap().ends_with(r#""block_size":4096},"origin":"harvest"}}"#));
-        assert_eq!(read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()), Some("harvest"));
+        assert!(
+            String::from_utf8(json)
+                .unwrap()
+                .ends_with(r#""block_size":4096},"origin":"harvest"}}"#)
+        );
+        assert_eq!(
+            read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()),
+            Some("harvest")
+        );
         assert_eq!(read.prefetch_init_origin(), "harvest");
     }
 
@@ -308,10 +318,18 @@ mod tests {
 
         let read = TemplateMetadata::from_json(&legacy.to_json()).unwrap();
 
-        assert_eq!(read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()), None);
+        assert_eq!(
+            read.prefetch.as_ref().and_then(|prefetch| prefetch.origin.as_deref()),
+            None
+        );
         assert_eq!(read.prefetch_init_origin(), "unknown");
         assert_eq!(Prefetch::init_origin(None), "none");
-        assert_eq!(paused().with_prefetch(None, PREFETCH_ORIGIN_BUILD).prefetch_init_origin(), "none");
+        assert_eq!(
+            paused()
+                .with_prefetch(None, PREFETCH_ORIGIN_BUILD)
+                .prefetch_init_origin(),
+            "none"
+        );
     }
 
     #[test]
@@ -547,7 +565,6 @@ mod tests {
         assert_eq!(decoded.version, DEPRECATED_VERSION);
         assert_eq!(decoded.vcpu_count, 0);
     }
-}
 
     #[test]
     fn a_filesystem_only_snapshot_of_a_v1_template_survives_a_round_trip() {
@@ -581,3 +598,4 @@ mod tests {
         let filesystem = TemplateMetadata::from_json(&memory.mark_filesystem_only(true, false).to_json()).unwrap();
         assert!(filesystem.filesystem_only && !filesystem.fs_quiesced);
     }
+}

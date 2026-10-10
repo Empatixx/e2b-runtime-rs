@@ -1,5 +1,6 @@
 pub mod availability;
 pub mod blob;
+pub mod channel;
 pub mod handle;
 pub mod parents;
 pub mod registry;

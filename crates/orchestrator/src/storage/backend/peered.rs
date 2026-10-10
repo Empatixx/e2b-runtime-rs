@@ -7,7 +7,7 @@ use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use tracing::Instrument;
 
-use super::Storage;
+use super::{OpenedRange, Storage};
 use crate::peer::blob::PeerBlob;
 use crate::peer::handle::PeerHandle;
 use crate::peer::resolver::{PeerRoute, Resolution};
@@ -93,14 +93,18 @@ impl Storage {
         path: &str,
         range: Range<u64>,
     ) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
+        self.open_range(path, range).await.map(|opened| opened.chunks)
+    }
+
+    pub async fn open_range(&self, path: &str, range: Range<u64>) -> Result<OpenedRange, String> {
         validate_object_path(path)?;
         match self.peer_seekable(path).await {
             Some(seekable) => match seekable.open_range_reader(range.clone()).await {
-                Ok(chunks) => Ok(chunks),
-                Err(SeekableError::Transitioned) => self.get_stream_direct(path, range).await,
+                Ok(opened) => Ok(opened),
+                Err(SeekableError::Transitioned) => self.open_range_direct(path, range).await,
                 Err(SeekableError::Failed(e)) => Err(e),
             },
-            None => self.get_stream_direct(path, range).await,
+            None => self.open_range_direct(path, range).await,
         }
     }
 

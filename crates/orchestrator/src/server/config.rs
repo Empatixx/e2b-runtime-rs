@@ -73,9 +73,9 @@ pub struct NodeConfig {
     pub redis: Option<RedisSettings>,
     pub clickhouse: Option<String>,
     pub clickhouse_additional: Vec<String>,
+    pub volume_mounts: VolumeMounts,
 }
 
-    pub volume_mounts: VolumeMounts,
 impl NodeConfig {
     pub fn from_env() -> Result<Self, String> {
         Self::from_vars(&std::env::vars().collect())
@@ -151,10 +151,10 @@ impl NodeConfig {
             redis: RedisSettings::from_vars(vars)?,
             clickhouse: clickhouse.0,
             clickhouse_additional: clickhouse.1,
+            volume_mounts: VolumeMounts::from_vars(vars)?,
         })
     }
 
-            volume_mounts: VolumeMounts::from_vars(vars)?,
     pub fn feature_flags_builder(
         &self,
         commit: &str,

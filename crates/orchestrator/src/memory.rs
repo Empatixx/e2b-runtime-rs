@@ -1,6 +1,6 @@
+pub mod dedup;
 #[cfg(target_os = "linux")]
 pub mod handshake;
-pub mod dedup;
 pub mod prefetch;
 pub mod region;
 #[cfg(target_os = "linux")]

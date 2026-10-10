@@ -16,6 +16,8 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tower_service::Service;
 
+use super::proxy_env::{ProxyEnv, ProxyScheme, ProxyTarget};
+use super::tunnel::{Stream, http_connect, socks5_connect};
 use crate::proxy::tracking::{Abortable, Connections, Tracked};
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,9 +25,16 @@ const KEEP_ALIVE: Duration = Duration::from_secs(20);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_BACKOFF_STEP: Duration = Duration::from_millis(100);
 
+pub struct Tunneled {
+    stream: Stream,
+    socket: std::net::TcpStream,
+    proxied: bool,
+}
+
 pub enum Upstream {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+    Tunneled(Box<Tunneled>),
 }
 
 impl Abortable for Upstream {
@@ -33,7 +42,12 @@ impl Abortable for Upstream {
         match self {
             Upstream::Plain(stream) => stream.reset_on_close(),
             Upstream::Tls(stream) => stream.get_ref().0.reset_on_close(),
+            Upstream::Tunneled(tunnel) => drop(SockRef::from(&tunnel.socket).set_linger(Some(Duration::ZERO))),
         }
+    }
+
+    fn proxied(&self) -> bool {
+        matches!(self, Upstream::Tunneled(tunnel) if tunnel.proxied)
     }
 }
 
@@ -42,6 +56,7 @@ impl AsyncRead for Upstream {
         match self.get_mut() {
             Upstream::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
             Upstream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Upstream::Tunneled(tunnel) => tunnel.stream.as_mut().poll_read(cx, buf),
         }
     }
 }
@@ -51,6 +66,7 @@ impl AsyncWrite for Upstream {
         match self.get_mut() {
             Upstream::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
             Upstream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            Upstream::Tunneled(tunnel) => tunnel.stream.as_mut().poll_write(cx, buf),
         }
     }
 
@@ -58,6 +74,7 @@ impl AsyncWrite for Upstream {
         match self.get_mut() {
             Upstream::Plain(stream) => Pin::new(stream).poll_flush(cx),
             Upstream::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            Upstream::Tunneled(tunnel) => tunnel.stream.as_mut().poll_flush(cx),
         }
     }
 
@@ -65,6 +82,7 @@ impl AsyncWrite for Upstream {
         match self.get_mut() {
             Upstream::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             Upstream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            Upstream::Tunneled(tunnel) => tunnel.stream.as_mut().poll_shutdown(cx),
         }
     }
 }
@@ -73,6 +91,8 @@ impl AsyncWrite for Upstream {
 pub struct Connector {
     pub max_attempts: usize,
     pub tls: TlsConnector,
+    pub proxy_tls: TlsConnector,
+    pub proxy_env: Arc<ProxyEnv>,
     pub connections: Connections,
     pub total_connections: Arc<AtomicU64>,
 }
@@ -94,17 +114,60 @@ impl Service<Uri> for Connector {
 
 impl Connector {
     async fn connect(&self, uri: &Uri) -> io::Result<TokioIo<Tracked<Upstream>>> {
+        let https = uri.scheme_str() == Some("https");
+        let host = uri.host().unwrap_or_default().trim_matches(['[', ']']).to_owned();
+        let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
+        let upstream = match self
+            .proxy_env
+            .for_target(https, &host, port)
+            .map_err(io::Error::other)?
+        {
+            Some(proxy) => self.connect_via(proxy, &host, port, https).await?,
+            None => self.connect_direct(uri, https).await?,
+        };
+        self.total_connections.fetch_add(1, Ordering::SeqCst);
+        Ok(TokioIo::new(self.connections.track(upstream, true)))
+    }
+
+    async fn connect_direct(&self, uri: &Uri, https: bool) -> io::Result<Upstream> {
         let address = uri
             .authority()
             .map(|authority| authority.as_str().to_owned())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing upstream authority"))?;
         let stream = self.dial_with_retries(&address).await?;
-        let upstream = match uri.scheme_str() == Some("https") {
-            true => self.handshake(stream, uri).await?,
-            false => Upstream::Plain(stream),
+        match https {
+            true => self.handshake(stream, uri).await,
+            false => Ok(Upstream::Plain(stream)),
+        }
+    }
+
+    async fn connect_via(&self, proxy: &ProxyTarget, host: &str, port: u16, https: bool) -> io::Result<Upstream> {
+        let tcp = self.dial_with_retries(&proxy.address()).await?;
+        let std_stream = tcp.into_std()?;
+        let socket = std_stream.try_clone()?;
+        let mut stream: Stream = Box::pin(TcpStream::from_std(std_stream)?);
+        if proxy.scheme == ProxyScheme::Https {
+            stream = Box::pin(handshake_with(&self.proxy_tls, stream, &proxy.host).await?);
+        }
+        let proxied = match (proxy.scheme, https) {
+            (ProxyScheme::Socks5, _) => {
+                socks5_connect(&mut stream, proxy, host, port).await?;
+                false
+            }
+            (_, true) => {
+                http_connect(&mut stream, proxy, host, port).await?;
+                false
+            }
+            (_, false) => true,
         };
-        self.total_connections.fetch_add(1, Ordering::SeqCst);
-        Ok(TokioIo::new(self.connections.track(upstream, true)))
+        if https {
+            stream = Box::pin(handshake_with(&self.tls, stream, host).await?);
+        }
+        Ok(Upstream::Tunneled(Box::new(Tunneled {
+            stream,
+            socket,
+            proxied,
+        })))
     }
 
     async fn dial_with_retries(&self, address: &str) -> io::Result<TcpStream> {
@@ -123,13 +186,22 @@ impl Connector {
     }
 
     async fn handshake(&self, stream: TcpStream, uri: &Uri) -> io::Result<Upstream> {
-        let server_name = ServerName::try_from(uri.host().unwrap_or_default().trim_matches(['[', ']']).to_owned())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, self.tls.connect(server_name, stream))
+        let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
+        handshake_with(&self.tls, stream, host)
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timeout"))?
             .map(|tls| Upstream::Tls(Box::new(tls)))
     }
+}
+
+async fn handshake_with<Io>(tls: &TlsConnector, stream: Io, host: &str) -> io::Result<TlsStream<Io>>
+where
+    Io: AsyncRead + AsyncWrite + Unpin,
+{
+    let server_name =
+        ServerName::try_from(host.to_owned()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tls.connect(server_name, stream))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timeout"))?
 }
 
 async fn dial(address: &str) -> io::Result<TcpStream> {
