@@ -31,8 +31,10 @@ use crate::sandbox::config::sandbox_builder::{
     SetMemoryMib, SetSkipEnvd, SetSlot, SetVcpus, SetWithoutMmds, State,
 };
 use crate::sandbox::config::{PreBoot, SandboxBuilder};
+use crate::sandbox::hinting::USE_CASE_BUILD;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::server::node::layers::{LayerSandbox, LayerSource};
+use crate::server::node::reclaim::PausePreparation;
 use crate::server::node::{BUILD_SANDBOX_TYPE, BuildNetwork, BuildSandbox};
 use crate::storage::backend::ObjectMetadata;
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
@@ -326,9 +328,18 @@ impl LayerExecutor<'_> {
         let build_id =
             Uuid::parse_str(&metadata.template.build_id).map_err(|e| paused(format!("error processing vm: {e}")))?;
         let dir = self.env.node.layer_dir(build_id);
+        let contexts = self.reclaim_contexts(&sandbox);
         self.env
             .node
-            .reclaim_before_pause(&sandbox, &self.reclaim_contexts(&sandbox), false)
+            .prepare_for_pause(
+                &sandbox,
+                PausePreparation {
+                    contexts: &contexts,
+                    filesystem_only: false,
+                    use_case: USE_CASE_BUILD,
+                    firecracker_version: &self.settings.firecracker_version,
+                },
+            )
             .await;
         let local = sandbox
             .pause_into(&dir, build_id)

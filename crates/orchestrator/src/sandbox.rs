@@ -1,6 +1,7 @@
 pub mod balloon;
 pub mod config;
 pub mod harvest;
+pub mod hinting;
 pub mod reboot;
 pub mod resources;
 pub mod resume;
@@ -58,6 +59,7 @@ pub struct Sandbox {
     envd_report: parking_lot::Mutex<EnvdReport>,
     memory_export: self::snapshot::in_place::memory::MemoryExport,
     balloon: Arc<balloon::BalloonProbe>,
+    hinting: hinting::HintingState,
     startup_recorded: std::sync::atomic::AtomicBool,
 }
 
@@ -156,6 +158,7 @@ impl Sandbox {
             envd_report: parking_lot::Mutex::default(),
             memory_export: Default::default(),
             balloon: Default::default(),
+            hinting: Default::default(),
             startup_recorded: Default::default(),
         }
     }

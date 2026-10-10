@@ -88,7 +88,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | The memory in-place checkpoint is tested only with the synchronous copy. The deferred export needs a template built with `free-page-reporting` on, and no test builds one yet | perf |
 | The filesystem-only checkpoint exports the rootfs synchronously from the live overlay; upstream can swap in a fresh COW cache and seal in the background (`defer-rootfs-export`) | perf |
-| Pause and checkpoint skip the pre-pause free-page-hinting drain | perf |
+| The node reads no Firecracker metrics, so hinting drains record no freed bytes (`orchestrator.sandbox.fph.freed`), and the periodic hinting loop (`free-page-hinting-config` `periodic`) is not ported | perf |
 | A snapshot has no lineage (`AbandonsPredecessor`) in the template cache | later |
 | No end-to-end test of the filesystem-only in-place checkpoint over gRPC (needs KVM and a cluster with `filesystem-only-checkpoint` on) | API |
 

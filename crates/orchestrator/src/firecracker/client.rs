@@ -196,6 +196,78 @@ impl FirecrackerClient {
             .ok_or_else(|| "balloon free-page reporting status carried no paused field".to_owned())
     }
 
+    pub async fn start_balloon_hinting(&self) -> Result<HintingStart, HintingCallError> {
+        let call = "PATCH /balloon/hinting/start";
+        let (status, body) = self
+            .exchange_timed(
+                Method::PATCH,
+                "/balloon/hinting/start",
+                Some(json!({ "acknowledge_on_stop": true })),
+            )
+            .await?;
+        match status {
+            StatusCode::BAD_REQUEST => Ok(HintingStart::Refused(format!(
+                "error starting balloon hinting: {call}: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+            status if status.is_success() => Ok(HintingStart::Started),
+            status => Err(HintingCallError::failed(format!(
+                "error starting balloon hinting: {call}: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+        }
+    }
+
+    pub async fn stop_balloon_hinting(&self) -> Result<HintingStop, HintingCallError> {
+        let call = "PATCH /balloon/hinting/stop";
+        let (status, body) = self
+            .exchange_timed(Method::PATCH, "/balloon/hinting/stop", None)
+            .await?;
+        match status {
+            StatusCode::BAD_REQUEST => Ok(HintingStop::Refused),
+            status if status.is_success() => Ok(HintingStop::Stopped),
+            status => Err(HintingCallError::failed(format!(
+                "error stopping balloon hinting: {call}: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+        }
+    }
+
+    pub async fn balloon_hinting_status(&self) -> Result<HintingStatus, HintingCallError> {
+        let call = "GET /balloon/hinting/status";
+        let (status, body) = self
+            .exchange_timed(Method::GET, "/balloon/hinting/status", None)
+            .await?;
+        match status.is_success() {
+            true => serde_json::from_slice::<HintingStatusBody>(&body)
+                .map(|status| HintingStatus {
+                    host_cmd: status.host_cmd.unwrap_or_default(),
+                    guest_cmd: status.guest_cmd.unwrap_or_default(),
+                })
+                .map_err(|e| HintingCallError::failed(format!("{call}: {e}"))),
+            false => Err(HintingCallError::failed(format!(
+                "{call}: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+        }
+    }
+
+    async fn exchange_timed(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Bytes), HintingCallError> {
+        let call = format!("{method} {path}");
+        match tokio::time::timeout(self.timeout, self.send(&call, method, path, body)).await {
+            Ok(exchanged) => exchanged.map_err(HintingCallError::failed),
+            Err(_) => Err(HintingCallError {
+                message: format!("{call}: timed out after {:?}", self.timeout),
+                timed_out: true,
+            }),
+        }
+    }
+
     pub async fn put(&self, path: &str, body: Value) -> Result<(), String> {
         self.request(Method::PUT, path, Some(body)).await.map(|_| ())
     }
@@ -273,6 +345,45 @@ struct BalloonDevice {
     free_page_reporting: bool,
     #[serde(default)]
     free_page_hinting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HintingStart {
+    Started,
+    Refused(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintingStop {
+    Stopped,
+    Refused,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HintingStatus {
+    pub host_cmd: i64,
+    pub guest_cmd: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HintingCallError {
+    pub message: String,
+    pub timed_out: bool,
+}
+
+impl HintingCallError {
+    fn failed(message: String) -> Self {
+        Self {
+            message,
+            timed_out: false,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct HintingStatusBody {
+    host_cmd: Option<i64>,
+    guest_cmd: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]

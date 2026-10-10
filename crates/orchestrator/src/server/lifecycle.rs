@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::host_stats::HostStatsCollector;
 use super::node::prefetch::PausedBuild;
-use super::node::reclaim::reclaim_contexts;
+use super::node::reclaim::{PausePreparation, reclaim_contexts};
 use super::node::{Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::pause_disk::PauseDiskReservation;
@@ -25,6 +25,7 @@ use crate::memory::trace::Trace;
 use crate::network::pool::Release;
 use crate::network::slot::Slot;
 use crate::proto::{SandboxConfig, SchedulingMetadata};
+use crate::sandbox::hinting::USE_CASE_PAUSE;
 use crate::sandbox::snapshot::in_place::QuiesceFlags;
 use crate::sandbox::snapshot::in_place::memory::{MemoryCheckpoint, MemoryCheckpointRequest};
 use crate::sandbox::snapshot::in_place::{FilesystemCheckpoint, FilesystemCheckpointRequest, InPlaceFailure};
@@ -400,8 +401,17 @@ impl Running {
     }
 
     async fn reclaim(&self, parent: &SandboxInfo, filesystem_only: bool) {
+        let contexts = reclaim_contexts(&parent.config);
         self.node
-            .reclaim_before_pause(&self.sandbox, &reclaim_contexts(&parent.config), filesystem_only)
+            .prepare_for_pause(
+                &self.sandbox,
+                PausePreparation {
+                    contexts: &contexts,
+                    filesystem_only,
+                    use_case: USE_CASE_PAUSE,
+                    firecracker_version: &parent.config.firecracker_version,
+                },
+            )
             .await;
     }
 
