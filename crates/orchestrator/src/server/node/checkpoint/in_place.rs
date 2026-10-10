@@ -28,6 +28,7 @@ use crate::server::scheduling::from_headers;
 use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::report::ReportStatus;
 use crate::telemetry::server::sandbox::record_kill;
+use crate::template::lineage::{Origin, SnapshotLineage};
 use crate::template::metadata::{TemplateMetadata, TemplateVersions};
 
 const KILL_REASON_RESUME_FAILED: &str = "resume_failed";
@@ -67,7 +68,7 @@ impl Node {
             .map_err(|failure| self.checkpoint_failure(&parent, failure))
             .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
         let layer = self
-            .cache_checkpoint(&parent, &checkpoint, &dir)
+            .cache_checkpoint(&parent, &checkpoint, &dir, checkpoint_lineage(&parent))
             .await
             .inspect_err(|_| discard(&dir))
             .map_err(|e| snapshot_error(&format!("error snapshotting sandbox: {e}")))
@@ -110,7 +111,13 @@ impl Node {
             .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
         let deferred = checkpoint.deferred;
         let local = self
-            .adopt_snapshot(checkpoint.snapshot, parent, build_id, dir.clone())
+            .adopt_snapshot(
+                checkpoint.snapshot,
+                parent,
+                build_id,
+                dir.clone(),
+                checkpoint_lineage(parent),
+            )
             .await
             .map_err(|e| snapshot_error(&e))
             .report_critical("error snapshotting sandbox for checkpoint", &attributes)?;
@@ -188,7 +195,12 @@ impl Node {
             .map_err(|failure| format!("error snapshotting sandbox: {}", failure.message))
             .inspect_err(|_| discard(&dir))?;
         let layer = self
-            .cache_checkpoint(parent, &checkpoint, &dir)
+            .cache_checkpoint(
+                parent,
+                &checkpoint,
+                &dir,
+                SnapshotLineage::of_running_build(Origin::Pause, &parent.config.build_id, false),
+            )
             .await
             .inspect_err(|_| discard(&dir))
             .map_err(|e| format!("error snapshotting sandbox: {e}"))?;
@@ -265,6 +277,7 @@ impl Node {
         parent: &SandboxInfo,
         checkpoint: &FilesystemCheckpoint,
         dir: &Path,
+        lineage: SnapshotLineage,
     ) -> Result<FilesystemSnapshot, String> {
         let build = &checkpoint.build;
         let metadata = self.checkpoint_metadata(parent, checkpoint).await;
@@ -278,7 +291,7 @@ impl Node {
             metadata_file,
             rootfs_sealed: checkpoint.rootfs_sealed.clone(),
         };
-        self.cache_filesystem_layer(&layer, &metadata, dir.to_path_buf())
+        self.cache_filesystem_layer(&layer, &metadata, dir.to_path_buf(), lineage)
             .map_err(|e| format!("error adding snapshot to template cache: {e}"))?;
         self.peers.register(build.build_id).await;
         Ok(layer)
@@ -329,6 +342,10 @@ impl Node {
                 .report_critical("error uploading snapshot for checkpoint", attributes),
         }
     }
+}
+
+fn checkpoint_lineage(parent: &SandboxInfo) -> SnapshotLineage {
+    SnapshotLineage::of_running_build(Origin::Checkpoint, &parent.config.build_id, true)
 }
 
 fn discard(dir: &Path) {

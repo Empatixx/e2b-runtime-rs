@@ -54,6 +54,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Delta counters and histograms keep up to 20 000 series per export interval; upstream lifts the cap entirely, but the Rust SDK preallocates its maps by the limit and rejects an unbounded one | later |
+| The template cache has no residency gauges (`orchestrator.templates.cache.entries`, pinned refs, oldest pin age, mapping bytes, layer entries by kind and generation band, unlanded layers) and no `evictions` counter by reason | later |
 | No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
 
 ## Orchestrator: vCPU hotplug and filesystem boot
@@ -80,6 +81,5 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | The memory in-place checkpoint is tested only with the synchronous copy. The deferred export needs a template built with `free-page-reporting` on, and no test builds one yet | perf |
-| A snapshot has no lineage (`AbandonsPredecessor`) in the template cache | later |
 | No end-to-end test of the filesystem-only in-place checkpoint over gRPC (needs KVM and a cluster with `filesystem-only-checkpoint` on) | API |
 

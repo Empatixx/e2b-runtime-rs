@@ -44,6 +44,8 @@ Reads go through a local **chunk cache**. Data is fetched from storage in 4 MiB 
 
 The **template cache** keeps a `Template` per build id: its headers, snapfile and metadata, fetched once and shared by every sandbox that resumes the build. Entries live 25 hours after their last use and are pinned while a sandbox uses them. A pause adds its snapshot here before the upload starts, which is why a same-node resume is instant.
 
+Each snapshot records its lineage, like upstream. A pause or a checkpoint that starts a new sandbox leaves the build it ran on behind, so that pause layer is marked superseded. No resume asks for it again. With `snapshot-cache-release-superseded` and `snapshot-cache-ancestor-storage-fallback` both on, the cache deletes a superseded layer once its own upload has landed and no sandbox holds it. An in-place checkpoint keeps its sandbox on the old build and supersedes nothing. A lookup of a released build is counted as a `released_layer` miss.
+
 ## Build cache for diffs
 
 Local diff files are kept for 25 hours, pinned until their upload finishes, and evicted earlier when the cache disk is fuller than `build-cache-max-usage-percentage`.

@@ -78,6 +78,7 @@ use crate::tcpfirewall::proxy::FirewallSandbox;
 use crate::telemetry::resume::record_wp_mode;
 use crate::telemetry::server::gauges::Allocated;
 use crate::template::cache::TemplateCache;
+use crate::template::lineage::{SnapshotLineage, UploadOutcome};
 use crate::template::metadata::{MemoryPrefetch, TemplateMetadata, TemplateVersions};
 use crate::template::{Template, TemplateError};
 
@@ -246,7 +247,10 @@ impl Node {
             build_disk: BuildDisk::on_directory(config.cache_dir.clone(), config.template_storage.clone()),
             feature_flags: config.feature_flags.clone(),
             volume_mounts: config.volume_mounts.clone(),
-            templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
+            templates: Arc::new(
+                TemplateCache::new(storage.clone(), config.template_cache_dir.clone())
+                    .with_flags(config.feature_flags.clone()),
+            ),
             storage,
             peers,
             registry: Registry::new(),
@@ -307,6 +311,7 @@ impl Node {
         parent: &SandboxInfo,
         build_id: Uuid,
         defer_rootfs: bool,
+        lineage: SnapshotLineage,
     ) -> Result<LocalSnapshot, String> {
         let dir = self.templates.instance_dir(build_id);
         let options = SnapshotOptions {
@@ -318,7 +323,7 @@ impl Node {
             .await
             .map_err(|e| format!("error snapshotting sandbox: {e}"))
             .inspect_err(|_| discard_snapshot_dir(&dir))?;
-        self.adopt_snapshot(local, parent, build_id, dir).await
+        self.adopt_snapshot(local, parent, build_id, dir, lineage).await
     }
 
     pub(super) async fn adopt_snapshot(
@@ -327,6 +332,7 @@ impl Node {
         parent: &SandboxInfo,
         build_id: Uuid,
         dir: PathBuf,
+        lineage: SnapshotLineage,
     ) -> Result<LocalSnapshot, String> {
         let metadata = match &parent.metadata {
             Some(metadata) => metadata.clone(),
@@ -337,7 +343,7 @@ impl Node {
             kernel_version: parent.config.kernel_version.clone(),
             firecracker_version: parent.config.firecracker_version.clone(),
         });
-        if let Err(e) = self.cache_snapshot(&local, metadata, dir.clone()) {
+        if let Err(e) = self.cache_snapshot(&local, metadata, dir.clone(), lineage) {
             let _ = local.written().await;
             discard_snapshot_dir(&dir);
             return Err(format!("error adding snapshot to template cache: {e}"));
@@ -366,6 +372,7 @@ impl Node {
         let storage = self.storage.clone();
         let store = self.store.clone();
         let peers = self.peers.clone();
+        let templates = self.templates.clone();
         let filesystem_only = build.memfile.metadata.size == 0;
         let team_id = object_metadata.entries.get("team_id").cloned().unwrap_or_default();
         let attempt = move || upload_attempt(local.clone(), storage.clone(), object_metadata.clone());
@@ -375,6 +382,7 @@ impl Node {
                 if outcome == Outcome::Failed {
                     count_failed_snapshot_upload(&team_id, filesystem_only);
                 }
+                templates.finish_upload(build.build_id, upload_outcome(outcome));
                 store.unpin(build.build_id);
                 drop(disk);
                 tokio::spawn(async move { peers.finish(build.build_id, outcome == Outcome::Landed).await });
@@ -395,8 +403,10 @@ impl Node {
         let uploads = self.uploads.clone();
         let store = self.store.clone();
         let peers = self.peers.clone();
+        let templates = self.templates.clone();
         let task = tokio::spawn(async move {
             let uploaded = uploads.run(build.build_id, parents(&build), attempt).await;
+            templates.finish_upload(build.build_id, landed_or_failed(uploaded.is_ok()));
             store.unpin(build.build_id);
             peers.finish(build.build_id, uploaded.is_ok()).await;
             uploaded
@@ -422,10 +432,16 @@ impl Node {
     }
 
     pub fn cache_layer(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
-        self.cache_snapshot(local, metadata, dir)
+        self.cache_snapshot(local, metadata, dir, SnapshotLineage::build())
     }
 
-    fn cache_snapshot(&self, local: &LocalSnapshot, metadata: TemplateMetadata, dir: PathBuf) -> Result<(), String> {
+    fn cache_snapshot(
+        &self,
+        local: &LocalSnapshot,
+        metadata: TemplateMetadata,
+        dir: PathBuf,
+        lineage: SnapshotLineage,
+    ) -> Result<(), String> {
         let metadata = match local.snapshot.vm_vcpus {
             0 => metadata,
             vcpus => metadata.with_vcpu_count(vcpus),
@@ -439,6 +455,7 @@ impl Node {
             local.files.snapfile.clone(),
             metadata,
             dir,
+            lineage,
         );
         Ok(())
     }
@@ -1038,6 +1055,17 @@ async fn upload_attempt(
 
 fn metadata_path(local: &LocalSnapshot) -> PathBuf {
     local.files.snapfile.with_file_name("metadata.json")
+}
+
+pub(crate) fn upload_outcome(outcome: Outcome) -> UploadOutcome {
+    landed_or_failed(outcome == Outcome::Landed)
+}
+
+pub(crate) fn landed_or_failed(landed: bool) -> UploadOutcome {
+    match landed {
+        true => UploadOutcome::Landed,
+        false => UploadOutcome::Failed,
+    }
 }
 
 fn parents(build: &Build) -> Vec<Uuid> {

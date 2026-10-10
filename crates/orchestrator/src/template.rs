@@ -1,6 +1,7 @@
 pub mod atomic_write;
 pub mod cache;
 pub mod durable;
+pub mod lineage;
 pub mod metadata;
 pub mod optimize;
 
@@ -12,6 +13,7 @@ use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
+use self::lineage::{LayerKind, LayerMark};
 use self::metadata::TemplateMetadata;
 use crate::storage::backend::Storage;
 use crate::storage::build::Build;
@@ -42,6 +44,8 @@ pub struct Template {
     metadata: OnceCell<Result<TemplateMetadata, TemplateError>>,
     updated_metadata: Mutex<Option<TemplateMetadata>>,
     memfile_headers: durable::MemfileHeaders,
+    kind: LayerKind,
+    mark: Mutex<LayerMark>,
 }
 
 impl fmt::Debug for Template {
@@ -61,6 +65,8 @@ impl Template {
             metadata: OnceCell::new(),
             updated_metadata: Mutex::new(None),
             memfile_headers: durable::MemfileHeaders::default(),
+            kind: LayerKind::Fetched,
+            mark: Mutex::default(),
         }
     }
 
@@ -74,6 +80,8 @@ impl Template {
             metadata: OnceCell::new_with(Some(Ok(metadata))),
             updated_metadata: Mutex::new(None),
             memfile_headers: durable::MemfileHeaders::default(),
+            kind: LayerKind::Fetched,
+            mark: Mutex::default(),
         }
     }
 
@@ -88,6 +96,8 @@ impl Template {
             metadata: OnceCell::new_with(Some(Ok(metadata))),
             updated_metadata: Mutex::new(None),
             memfile_headers: durable::MemfileHeaders::default(),
+            kind: LayerKind::Fetched,
+            mark: Mutex::default(),
         }
     }
 
@@ -97,6 +107,22 @@ impl Template {
             .and_then(|build| build.as_ref().ok())
             .cloned()
             .map(|build| self.memfile_headers.apply(build))
+    }
+
+    pub fn with_kind(self, kind: LayerKind) -> Self {
+        Self { kind, ..self }
+    }
+
+    pub fn kind(&self) -> LayerKind {
+        self.kind
+    }
+
+    pub fn mark(&self) -> parking_lot::MutexGuard<'_, LayerMark> {
+        self.mark.lock()
+    }
+
+    pub fn devices_resolved(&self) -> bool {
+        self.snapfile.initialized() && self.build.initialized() && self.metadata.initialized()
     }
 
     pub fn build_id(&self) -> Uuid {

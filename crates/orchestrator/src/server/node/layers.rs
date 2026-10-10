@@ -24,6 +24,7 @@ use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::Header;
 use crate::template::Template;
+use crate::template::lineage::SnapshotLineage;
 use crate::template::metadata::TemplateMetadata;
 
 pub struct LayerSource {
@@ -75,6 +76,7 @@ impl Node {
         layer: &FilesystemSnapshot,
         metadata: &TemplateMetadata,
         dir: PathBuf,
+        lineage: SnapshotLineage,
     ) -> Result<(), String> {
         let build_id = layer.build.build_id;
         if let Some(diff) = &layer.rootfs_diff {
@@ -86,7 +88,7 @@ impl Node {
             }
         }
         self.templates
-            .add_filesystem_layer(layer.build.clone(), metadata.clone(), dir);
+            .add_filesystem_layer(layer.build.clone(), metadata.clone(), dir, lineage);
         Ok(())
     }
 
@@ -100,6 +102,7 @@ impl Node {
         let storage = self.storage.clone();
         let store = self.store.clone();
         let peers = self.peers.clone();
+        let templates = self.templates.clone();
         let team_id = object_metadata.entries.get("team_id").cloned().unwrap_or_default();
         let attempt = move || filesystem_upload_attempt(layer.clone(), storage.clone(), object_metadata.clone());
         self.uploads
@@ -108,6 +111,7 @@ impl Node {
                 if outcome == super::Outcome::Failed {
                     super::count_failed_snapshot_upload(&team_id, true);
                 }
+                templates.finish_upload(build.build_id, super::upload_outcome(outcome));
                 store.unpin(build.build_id);
                 drop(disk);
                 tokio::spawn(async move { peers.finish(build.build_id, outcome == super::Outcome::Landed).await });
@@ -123,8 +127,10 @@ impl Node {
         let attempt = filesystem_upload_attempt(layer, self.storage.clone(), object_metadata);
         let uploads = self.uploads.clone();
         let store = self.store.clone();
+        let templates = self.templates.clone();
         let task = tokio::spawn(async move {
             let uploaded = uploads.run(build.build_id, parents(&build), attempt).await;
+            templates.finish_upload(build.build_id, super::landed_or_failed(uploaded.is_ok()));
             store.unpin(build.build_id);
             uploaded
         });

@@ -44,6 +44,8 @@ Rozdílový build ukládá jen své vlastní bloky, naskládané za sebou, a jeh
 
 **Cache šablon** drží pro každé ID buildu jednu `Template`: její hlavičky, snapfile a metadata, stažené jednou a sdílené všemi sandboxy, které ten build probouzejí. Záznam žije 25 hodin od posledního použití a je připíchnutý, dokud ho nějaký sandbox používá. Pause sem přidá svůj snapshot dřív, než začne upload, proto je probuzení na stejném nodu okamžité.
 
+Každý snapshot si pamatuje svůj původ, stejně jako v Go. Pause nebo checkpoint, který spustí nový sandbox, opustí build, na kterém sandbox běžel, takže ta vrstva z pauzy je označená jako nahrazená. Žádné probuzení už ji nebude chtít. Když jsou zapnuté oba flagy `snapshot-cache-release-superseded` a `snapshot-cache-ancestor-storage-fallback`, cache nahrazenou vrstvu smaže, jakmile dokončila vlastní upload a žádný sandbox ji nedrží. Checkpoint na místě nechává sandbox na starém buildu a nic nenahrazuje. Vyhledání uvolněného buildu se počítá jako miss `released_layer`.
+
 ## Build cache pro rozdíly
 
 Lokální rozdílové soubory se drží 25 hodin, jsou připíchnuté, dokud nedoběhne jejich upload, a mažou se dřív, když je disk cache plnější než `build-cache-max-usage-percentage`.

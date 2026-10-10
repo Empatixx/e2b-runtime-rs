@@ -16,6 +16,7 @@ pub mod report;
 pub mod resume;
 pub mod server;
 pub mod snapshot_diff;
+pub mod template_cache;
 pub mod traces;
 pub mod uffd;
 

@@ -36,6 +36,9 @@ pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-inc
 pub const USE_SYNC_WP: BoolFlag = Flag::new("use-sync-wp", false);
 pub const PREBOOT_FS_RECOVERY: BoolFlag = Flag::new("preboot-fs-recovery", false);
 pub const DEFER_ROOTFS_EXPORT: BoolFlag = Flag::new("defer-rootfs-export", false);
+pub const SNAPSHOT_CACHE_RELEASE_SUPERSEDED: BoolFlag = Flag::new("snapshot-cache-release-superseded", false);
+pub const SNAPSHOT_CACHE_ANCESTOR_STORAGE_FALLBACK: BoolFlag =
+    Flag::new("snapshot-cache-ancestor-storage-fallback", false);
 pub const FREEZE_USER_CGROUP_TIMEOUT_MS: IntFlag = Flag::new("freeze-user-cgroup-timeout-ms", 2000);
 pub const FREEZE_GUEST_HIERARCHY: BoolFlag = Flag::new("freeze-guest-hierarchy", false);
 pub const FREEZE_GUEST_HIERARCHY_MAX_CGROUPS: IntFlag = Flag::new("freeze-guest-hierarchy-max-cgroups", 512);

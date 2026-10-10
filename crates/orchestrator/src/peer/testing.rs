@@ -222,6 +222,7 @@ impl CacheFixture {
             snapfile.to_path_buf(),
             metadata,
             self.dir.path().join(format!("dir-{build_id}")),
+            crate::template::lineage::SnapshotLineage::build(),
         )
     }
 

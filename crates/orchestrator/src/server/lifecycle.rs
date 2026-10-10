@@ -41,6 +41,7 @@ use crate::storage::backend::ObjectMetadata;
 use crate::telemetry::server::sandbox::{record_crash, record_execution};
 use crate::telemetry::server::spans;
 use crate::template::Template;
+use crate::template::lineage::{Origin, SnapshotLineage};
 use crate::template::metadata::TemplateMetadata;
 
 const COMMAND_QUEUE: usize = 8;
@@ -387,7 +388,13 @@ impl Running {
         let defer_rootfs = self.defers_rootfs(&parent);
         let snapshotted = self
             .node
-            .snapshot_locally(&self.sandbox, &parent, build_id, defer_rootfs)
+            .snapshot_locally(
+                &self.sandbox,
+                &parent,
+                build_id,
+                defer_rootfs,
+                SnapshotLineage::of_running_build(Origin::Pause, &parent.config.build_id, false),
+            )
             .await;
         if snapshotted.is_ok() {
             self.node.events.publish(
@@ -417,7 +424,13 @@ impl Running {
         self.reclaim(&parent, false).await;
         let _ = reply.send(
             self.node
-                .snapshot_locally(&self.sandbox, &parent, build_id, false)
+                .snapshot_locally(
+                    &self.sandbox,
+                    &parent,
+                    build_id,
+                    false,
+                    SnapshotLineage::of_running_build(Origin::Checkpoint, &parent.config.build_id, false),
+                )
                 .await,
         );
     }

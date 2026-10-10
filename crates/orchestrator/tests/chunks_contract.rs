@@ -145,6 +145,7 @@ async fn serve_snapshot(
         snapfile,
         snapshot.metadata.clone(),
         dir.join("instance"),
+        orchestrator::template::lineage::SnapshotLineage::build(),
     );
     diffs
         .add_local(build_id, Artifact::Memfile, &write("memfile", &snapshot.memfile))
