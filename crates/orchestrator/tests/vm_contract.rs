@@ -118,7 +118,7 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
         cgroup: "vm-contract".to_owned(),
     };
     slot.create().await.unwrap();
-    let cgroup = Cgroup::create("vm-contract").unwrap();
+    let mut cgroup = Cgroup::create("vm-contract").unwrap();
 
     let socket = dir.path().join("fc.sock");
     let launch = Launch::builder()
@@ -165,7 +165,10 @@ async fn firecracker_boots_on_an_nbd_rootfs_inside_a_network_slot() {
 
     vm.kill().await.unwrap();
     disk.close().await.unwrap();
-    cgroup.remove().unwrap();
+    cgroup
+        .remove(&tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
     slot.destroy().await.unwrap();
 
     assert!(reachable, "guest did not answer ping; console:\n{console_log}");

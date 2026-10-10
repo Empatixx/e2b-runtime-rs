@@ -146,6 +146,7 @@ mod tests {
             peak: None,
             proc_root: proc_root.to_owned(),
             vcpu_threads_confined: false,
+            removed: false,
         }
     }
 
@@ -274,15 +275,5 @@ mod tests {
 
         assert!(error.ends_with("found 0 of 4"), "{error}");
         assert_eq!(file(dir.path(), "cpu.max"), "100000 100000");
-    }
-
-    #[test]
-    fn removing_deletes_the_vcpu_child_before_the_parent() {
-        let parent = tempfile::tempdir().unwrap().keep();
-        std::fs::create_dir(parent.join(VCPU_CGROUP_NAME)).unwrap();
-
-        cgroup_at(&parent, &parent).remove().unwrap();
-
-        assert!(!parent.exists());
     }
 }

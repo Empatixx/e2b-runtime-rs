@@ -1,4 +1,5 @@
 pub mod cpu_limit;
+pub mod removal;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -15,6 +16,7 @@ pub struct Cgroup {
     peak: Option<File>,
     proc_root: PathBuf,
     vcpu_threads_confined: bool,
+    removed: bool,
 }
 
 pub struct CgroupStats {
@@ -41,6 +43,7 @@ impl Cgroup {
             peak,
             proc_root: PathBuf::from(PROC_ROOT),
             vcpu_threads_confined: false,
+            removed: false,
         })
     }
 
@@ -62,12 +65,6 @@ impl Cgroup {
     pub fn pids(&self) -> io::Result<Vec<u32>> {
         let procs = std::fs::read_to_string(self.path.join("cgroup.procs"))?;
         Ok(procs.lines().filter_map(|line| line.trim().parse().ok()).collect())
-    }
-
-    pub fn remove(mut self) -> io::Result<()> {
-        self.peak.take();
-        self.remove_vcpu_cgroup()?;
-        std::fs::remove_dir(&self.path)
     }
 }
 

@@ -1,5 +1,6 @@
 use futures::future::OptionFuture;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::cgroup::Cgroup;
 use crate::exposure::nbd::Exposure;
@@ -47,7 +48,7 @@ impl Resources {
         let killed = OptionFuture::from(vm.map(FirecrackerProcess::kill)).await;
         let served = OptionFuture::from(memory.map(MemoryServer::stop)).await;
         let closed = OptionFuture::from(disk.map(Exposure::close)).await;
-        let removed = cgroup.map(|cgroup| cgroup.remove().map_err(|e| format!("remove cgroup: {e}")));
+        let removed = OptionFuture::from(cgroup.map(remove_cgroup)).await;
         let destroyed = OptionFuture::from(slot.as_ref().map(Slot::destroy)).await;
         drop(held);
         all_ok([killed, served, closed, removed, destroyed].into_iter().flatten())
@@ -63,6 +64,13 @@ impl Resources {
             }
         }
     }
+}
+
+async fn remove_cgroup(mut cgroup: Cgroup) -> Result<(), String> {
+    cgroup
+        .remove(&CancellationToken::new())
+        .await
+        .map_err(|e| format!("remove cgroup: {e}"))
 }
 
 async fn log_failure(sandbox_id: String, released: impl Future<Output = Result<(), String>>) {

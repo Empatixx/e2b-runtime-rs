@@ -70,13 +70,13 @@ async fn destroy_finishes_a_slot_whose_namespace_is_already_gone() {
     slot.destroy().await.unwrap();
 }
 
-#[test]
-fn cgroup_holds_a_process_and_is_removed() {
+#[tokio::test]
+async fn cgroup_holds_a_process_and_is_removed() {
     if !root() {
         eprintln!("skipping: needs root");
         return;
     }
-    let cgroup = orchestrator::cgroup::Cgroup::create("contract-test").unwrap();
+    let mut cgroup = orchestrator::cgroup::Cgroup::create("contract-test").unwrap();
     let mut child = Command::new("sleep").arg("30").spawn().unwrap();
     cgroup.add(child.id()).unwrap();
     assert_eq!(cgroup.pids().unwrap(), vec![child.id()]);
@@ -84,7 +84,10 @@ fn cgroup_holds_a_process_and_is_removed() {
     child.kill().unwrap();
     child.wait().unwrap();
     let path = cgroup.path().to_path_buf();
-    cgroup.remove().unwrap();
+    cgroup
+        .remove(&tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
     assert!(!path.exists());
 }
 
