@@ -2,6 +2,8 @@ mod client;
 mod contexts;
 mod flags;
 mod prefetch;
+#[cfg(test)]
+mod testing;
 
 pub use client::feature_flags_builder;
 pub use client::{FeatureFlags, FeatureFlagsBuilder, FlagSettings, FlagValue, INIT_TIMEOUT, LAUNCH_DARKLY_API_KEY};

@@ -10,7 +10,9 @@ use super::services::Services;
 use super::upload::UploadHandler;
 use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
-use crate::featureflags::feature_flags_builder::{SetApiKey, SetDeploymentEnvironment};
+use crate::featureflags::feature_flags_builder::{
+    SetApiKey, SetDeploymentEnvironment, SetServiceName, SetServiceVersion,
+};
 use crate::featureflags::{FeatureFlags, FeatureFlagsBuilder, FlagContext, LAUNCH_DARKLY_API_KEY};
 use crate::go_strconv::env_bool;
 use crate::network::slot::MAX_SLOT;
@@ -18,6 +20,7 @@ use crate::routing::redis::RedisSettings;
 use crate::storage::backend::Storage;
 use crate::storage::local_upload::UploadSigner;
 use crate::storage::spec::{Provider, StorageSpec};
+use crate::telemetry::identity::service_name;
 use binaries::Binaries;
 use runtime::RuntimeFlags;
 use storage::StorageEnv;
@@ -145,10 +148,15 @@ impl NodeConfig {
         })
     }
 
-    pub fn feature_flags_builder(&self, commit: &str) -> FeatureFlagsBuilder<SetDeploymentEnvironment<SetApiKey>> {
+    pub fn feature_flags_builder(
+        &self,
+        commit: &str,
+    ) -> FeatureFlagsBuilder<SetServiceVersion<SetServiceName<SetDeploymentEnvironment<SetApiKey>>>> {
         FeatureFlags::builder()
             .api_key(std::env::var(LAUNCH_DARKLY_API_KEY).unwrap_or_default())
             .deployment_environment(self.deployment_environment.as_str())
+            .service_name(service_name(&self.services))
+            .service_version(crate::version())
             .context_provider(FlagContext::orchestrator(&self.node_id, commit))
             .context_provider(FlagContext::instance_group(self.instance_group_name.trim()))
     }

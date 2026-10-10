@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use launchdarkly_server_sdk::{Client, ConfigBuilder, Context, Detail, Reason};
+use launchdarkly_server_sdk::{
+    ApplicationInfo, Client, ConfigBuilder, Context, Detail, Reason, ServiceEndpointsBuilder,
+};
 use serde_json::Value;
+use tokio_rustls::rustls::crypto::ring;
 
 use super::contexts::{FlagContext, merge_contexts};
 use super::flags::Flag;
 
 pub const LAUNCH_DARKLY_API_KEY: &str = "LAUNCH_DARKLY_API_KEY";
+pub const LAUNCH_DARKLY_BASE_URL: &str = "LAUNCH_DARKLY_BASE_URL";
 const UNDEFINED_DEPLOYMENT_ENVIRONMENT: &str = "undefined";
 pub const INIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -81,6 +85,9 @@ pub struct FlagSettings {
     deployment_environment: String,
     #[builder(default)]
     service_name: String,
+    #[builder(default)]
+    service_version: String,
+    base_url: Option<String>,
 }
 
 impl<S: feature_flags_builder::State> FeatureFlagsBuilder<S> {
@@ -111,7 +118,7 @@ impl FlagSettings {
             "" => Ok(self.offline()),
             api_key => Ok(FeatureFlags {
                 connection: Arc::new(Connection {
-                    launch_darkly: Some(start(api_key).await?),
+                    launch_darkly: Some(start(api_key, self.base_url().as_deref(), self.application()).await?),
                     overrides: HashMap::new(),
                     extra_contexts: self.extra_contexts(),
                 }),
@@ -127,6 +134,17 @@ impl FlagSettings {
                 overrides: self.overrides,
             }),
         }
+    }
+
+    fn base_url(&self) -> Option<String> {
+        self.base_url
+            .clone()
+            .or_else(|| std::env::var(LAUNCH_DARKLY_BASE_URL).ok())
+            .filter(|url| !url.is_empty())
+    }
+
+    fn application(&self) -> Option<Application> {
+        Application::of(&self.deployment_environment, &self.service_name, &self.service_version)
     }
 
     fn extra_contexts(&self) -> Vec<FlagContext> {
@@ -145,8 +163,51 @@ impl FlagSettings {
     }
 }
 
-async fn start(api_key: &str) -> Result<Client, String> {
-    let config = ConfigBuilder::new(api_key).build().map_err(|e| e.to_string())?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Application {
+    id: String,
+    version: String,
+}
+
+impl Application {
+    fn of(deployment_environment: &str, service_name: &str, service_version: &str) -> Option<Self> {
+        Some(service_name).filter(|name| !name.is_empty()).map(|name| Self {
+            id: format!(
+                "{name}-{}",
+                Some(deployment_environment)
+                    .filter(|environment| !environment.is_empty())
+                    .unwrap_or(UNDEFINED_DEPLOYMENT_ENVIRONMENT)
+            ),
+            version: service_version.to_owned(),
+        })
+    }
+
+    fn info(&self) -> ApplicationInfo {
+        let mut info = ApplicationInfo::new();
+        info.application_identifier(self.id.as_str())
+            .application_version(self.version.as_str());
+        info
+    }
+}
+
+fn service_endpoints(base_url: Option<&str>) -> ServiceEndpointsBuilder {
+    let mut endpoints = ServiceEndpointsBuilder::new();
+    base_url.iter().for_each(|url| {
+        endpoints.relay_proxy(url);
+    });
+    endpoints
+}
+
+async fn start(api_key: &str, base_url: Option<&str>, application: Option<Application>) -> Result<Client, String> {
+    drop(ring::default_provider().install_default());
+    let config = application
+        .iter()
+        .fold(
+            ConfigBuilder::new(api_key).service_endpoints(&service_endpoints(base_url)),
+            |config, application| config.application_info(application.info()),
+        )
+        .build()
+        .map_err(|e| e.to_string())?;
     let client = Client::build(config).map_err(|e| e.to_string())?;
     client.start_with_default_executor();
     match client.wait_for_initialization(INIT_TIMEOUT).await {
@@ -196,9 +257,10 @@ impl FeatureFlags {
 
     fn context_for(&self, contexts: &[FlagContext]) -> Context {
         merge_contexts(
-            contexts
+            self.connection
+                .extra_contexts
                 .iter()
-                .chain(&self.connection.extra_contexts)
+                .chain(contexts)
                 .cloned()
                 .collect::<Vec<_>>(),
         )
@@ -287,6 +349,102 @@ mod tests {
             kinds,
             vec![("deployment_environment".to_owned(), "undefined".to_owned())]
         );
+    }
+
+    #[test]
+    fn the_application_id_carries_the_environment_next_to_the_service() {
+        assert_eq!(
+            Application::of("e2b-staging", "orchestration-api", "0.14.1"),
+            Some(Application {
+                id: "orchestration-api-e2b-staging".to_owned(),
+                version: "0.14.1".to_owned()
+            })
+        );
+        assert_eq!(
+            Application::of("", "orchestration-api", "0.14.1"),
+            Some(Application {
+                id: "orchestration-api-undefined".to_owned(),
+                version: "0.14.1".to_owned()
+            })
+        );
+        assert_eq!(Application::of("e2b-staging", "", "0.14.1"), None);
+    }
+
+    #[test]
+    fn a_caller_service_overrides_the_process_service() {
+        let flags = FeatureFlags::builder()
+            .deployment_environment("staging")
+            .service_name("orchestrator_template-manager")
+            .offline();
+
+        let merged = flags.context_for(&[FlagContext::service("orchestrator")]);
+
+        let keys: std::collections::BTreeMap<_, _> = merged
+            .context_keys()
+            .into_iter()
+            .map(|(kind, key)| (kind.to_string(), key.to_owned()))
+            .collect();
+        assert_eq!(keys["service"], "orchestrator");
+        assert_eq!(keys["deployment_environment"], "staging");
+    }
+
+    #[tokio::test]
+    async fn a_custom_base_url_serves_streaming_polling_and_events() {
+        let launch_darkly = crate::featureflags::testing::FakeLaunchDarkly::start().await;
+        let flags = FeatureFlags::builder()
+            .api_key("local-project")
+            .deployment_environment("local")
+            .service_name("test")
+            .service_version("1.0.0")
+            .base_url(launch_darkly.url.clone())
+            .connect()
+            .await
+            .unwrap();
+        assert!(flags.live());
+        let local_bool = Flag::<bool>::new("local-bool", false);
+        let local_json = Flag::<serde_json::Value>::new("local-json", serde_json::Value::Null);
+
+        assert!(flags.get(&local_bool, &[]));
+        assert_eq!(flags.get(&local_json, &[]), serde_json::json!({"enabled": true}));
+
+        launch_darkly.patch.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while flags.get(&local_bool, &[]) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the streamed patch reaches the client");
+        flags.connection.launch_darkly.as_ref().unwrap().flush();
+        tokio::time::timeout(Duration::from_secs(5), launch_darkly.event_batches.notified())
+            .await
+            .expect("the SDK sends events to the configured endpoint");
+        assert!(
+            launch_darkly
+                .authorizations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|authorization| authorization == "local-project")
+        );
+        flags.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_custom_base_url_without_a_key_stays_offline() {
+        let launch_darkly = crate::featureflags::testing::FakeLaunchDarkly::start().await;
+        let flags = FeatureFlags::builder()
+            .deployment_environment("local")
+            .service_name("test")
+            .base_url(launch_darkly.url.clone())
+            .connect()
+            .await
+            .unwrap();
+
+        assert!(!flags.live());
+        assert!(flags.get(&Flag::<bool>::new("absent-local-flag", true), &[]));
+        flags.close().await;
+        assert_eq!(launch_darkly.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
