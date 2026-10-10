@@ -4,6 +4,10 @@ pub fn supports_memfd(firecracker_version: &str) -> bool {
     release_line(firecracker_version).is_some_and(|release| (release.major, release.minor) >= (1, 14))
 }
 
+pub fn supports_huge_pages(firecracker_version: &str) -> bool {
+    release_line(firecracker_version).is_some_and(|release| (release.major, release.minor) >= (1, 7))
+}
+
 fn release_line(version: &str) -> Option<Version> {
     match version.split_once('_') {
         Some((release, _)) => strict_semver(release),
@@ -38,6 +42,19 @@ mod tests {
         assert!(!supports_memfd("v1.12.1_a41d3fb"));
         assert!(!supports_memfd("v1.10-0.3.0"));
         assert!(!supports_memfd("v1.13.9"));
+    }
+
+    #[test]
+    fn huge_pages_need_release_line_1_7_in_every_format() {
+        assert!(supports_huge_pages("v1.14.1_431f1fc"));
+        assert!(supports_huge_pages("v1.14-0.2.0"));
+        assert!(supports_huge_pages("v1.7.0"));
+        assert!(supports_huge_pages("v1.10-0.3.0"));
+        assert!(supports_huge_pages("2.0.0"));
+        assert!(!supports_huge_pages("v1.6.0"));
+        assert!(!supports_huge_pages("v1.5.1_abc"));
+        assert!(!supports_huge_pages(""));
+        assert!(!supports_huge_pages("latest"));
     }
 
     #[test]

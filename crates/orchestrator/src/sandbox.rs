@@ -231,6 +231,7 @@ impl Sandbox {
             .memory_mib(self.config.memory_mib)
             .boot_args(self.config.boot.kernel_args(host_arch()))
             .maybe_io_engine(self.config.io_engine.as_deref())
+            .huge_pages(self.config.huge_pages)
             .build();
         let metadata = self.config.mmds.then(|| self.mmds_metadata());
         client.boot(&vm_config, metadata.as_ref()).await

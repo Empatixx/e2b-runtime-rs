@@ -19,6 +19,7 @@ use roaring::RoaringBitmap;
 const ENTROPY_BYTES_SIZE: u64 = 1024;
 const ENTROPY_REFILL_TIME: u64 = 100;
 const ENTROPY_ONE_TIME_BURST: u64 = 0;
+const HUGE_PAGES_2M: &str = "2M";
 
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -182,12 +183,16 @@ impl FirecrackerClient {
 }
 
 fn machine_config(config: &VmConfig) -> serde_json::Value {
-    json!({
+    let mut machine = json!({
         "vcpu_count": config.vcpus,
         "mem_size_mib": config.memory_mib,
         "smt": std::env::consts::ARCH != "aarch64",
         "track_dirty_pages": false
-    })
+    });
+    if config.huge_pages {
+        machine["huge_pages"] = json!(HUGE_PAGES_2M);
+    }
+    machine
 }
 
 fn entropy_device() -> serde_json::Value {
@@ -393,6 +398,28 @@ mod tests {
             ]
         );
         assert_eq!(calls[1].body["io_engine"], json!("Sync"));
+    }
+
+    #[tokio::test]
+    async fn a_huge_pages_boot_asks_for_2m_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .memory_mib(512)
+            .huge_pages(true)
+            .build();
+
+        FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
+
+        let calls = calls.lock().clone();
+        let machine = calls.iter().find(|call| call.path == "/machine-config").unwrap();
+        assert_eq!(
+            machine.body,
+            json!({ "vcpu_count": 1, "mem_size_mib": 512, "smt": std::env::consts::ARCH != "aarch64", "track_dirty_pages": false, "huge_pages": "2M" })
+        );
     }
 
     #[tokio::test]

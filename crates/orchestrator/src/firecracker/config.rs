@@ -14,6 +14,8 @@ pub struct VmConfig {
     pub boot_args: String,
     #[builder(into)]
     pub io_engine: Option<String>,
+    #[builder(default)]
+    pub huge_pages: bool,
 }
 
 #[cfg(test)]
@@ -31,5 +33,6 @@ mod tests {
         assert_eq!(config.memory_mib, 256);
         assert_eq!(config.boot_args, "init=/sbin/init");
         assert_eq!(config.io_engine, None);
+        assert!(!config.huge_pages);
     }
 }

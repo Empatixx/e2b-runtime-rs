@@ -60,6 +60,7 @@ pub struct SandboxConfig {
     pub prefetch: Option<MemoryPrefetch>,
     pub prefetch_settings: PrefetchSettings,
     pub use_memfd: bool,
+    pub huge_pages: bool,
     pub hyperloop_ip: Option<String>,
     pub cgroup_name: String,
 }
@@ -103,6 +104,7 @@ impl SandboxConfig {
         prefetch: Option<MemoryPrefetch>,
         #[builder(default)] prefetch_settings: PrefetchSettings,
         #[builder(default = true)] use_memfd: bool,
+        #[builder(default)] huge_pages: bool,
         hyperloop_ip: Option<String>,
     ) -> Self {
         Self {
@@ -135,6 +137,7 @@ impl SandboxConfig {
             prefetch,
             prefetch_settings,
             use_memfd,
+            huge_pages,
             hyperloop_ip,
         }
     }

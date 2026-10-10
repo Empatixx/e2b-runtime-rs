@@ -35,7 +35,7 @@ use crate::clickhouse::sinks::ClickhouseHostStats;
 use crate::envd::{EnvdDefaults, EnvdInit, VolumeMount};
 use crate::events::{CREATED, EventSandbox, EventsService, Execution, RESUMED, SandboxEvent};
 use crate::featureflags::{FeatureFlags, FlagContext};
-use crate::firecracker::version::supports_memfd;
+use crate::firecracker::version::{supports_huge_pages, supports_memfd};
 use crate::hoststats::StatsIdentity;
 use crate::hyperloop::logs::SourceSandbox;
 use crate::memory::prefetch::source::PrefetchSettings;
@@ -47,7 +47,7 @@ use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::config::sandbox_builder::{
-    SetFirecracker, SetHyperloopIp, SetId, SetKernel, SetTemplateId, SetWorkDir,
+    SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetTemplateId, SetWorkDir,
 };
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
@@ -66,7 +66,7 @@ const SANDBOX_TYPE: &str = "sandbox";
 pub(super) const BUILD_SANDBOX_TYPE: &str = "build";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
-pub type BaseSandbox = SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>;
+pub type BaseSandbox = SetHugePages<SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>>;
 
 pub struct Node {
     pub node_id: String,
@@ -286,6 +286,7 @@ impl Node {
             .kernel(self.binaries.kernel_for(&self.build_kernel_version))
             .work_dir(self.work_dir.join(sandbox_id))
             .hyperloop_ip(&self.orchestrator_ip)
+            .huge_pages(supports_huge_pages(&self.build_firecracker_version))
             .envd(self.build_envd(EnvdDefaults::default()))
     }
 
