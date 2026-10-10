@@ -1,3 +1,5 @@
+mod route;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,9 +9,14 @@ use tokio::sync::oneshot;
 use tonic::Status;
 use uuid::Uuid;
 
+use self::route::{BalloonMode, balloon_route, early_route};
+use super::prefetch::pause_contexts as flag_contexts;
 use super::{Lifetime, Node, StartRequest, event_sandbox, routed_sandbox};
 use crate::events::{CHECKPOINTED, SandboxEvent};
-use crate::featureflags::PEER_TO_PEER_ASYNC_CHECKPOINT;
+use crate::featureflags::{
+    DEFER_MEMORY_EXPORT, IN_PLACE_CHECKPOINT, IN_PLACE_CHECKPOINT_REPORTING, PEER_TO_PEER_ASYNC_CHECKPOINT,
+};
+use crate::firecracker::version::supports_in_place_checkpoint;
 use crate::memory::trace::Trace;
 use crate::proto::SchedulingMetadata;
 use crate::sandbox::snapshot::LocalSnapshot;
@@ -27,8 +34,7 @@ use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
 
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 const BUILD_ORIGIN: &str = "snapshot_template";
-const ROUTE_FLAG_OFF: &str = "flag_off";
-const BALLOON_MODE_UNKNOWN: &str = "unknown";
+const RESUMED_WITH_SYNC_WP: bool = false;
 
 pub struct CheckpointRequest {
     pub build_id: String,
@@ -52,19 +58,41 @@ impl Node {
         }
         let started = Instant::now();
         let team_id = handle.info.lock().config.team_id.clone();
-        spans::record_checkpoint_route(ROUTE_FLAG_OFF, BALLOON_MODE_UNKNOWN);
+        let (route, balloon_mode) = self.checkpoint_route(&handle.info.lock());
+        spans::record_checkpoint_route(route, balloon_mode.as_str());
         let checkpointed = self.checkpoint_routed(handle, request, lifecycle).await;
         CheckpointOutcome {
             in_place: false,
             fs_only,
-            route: ROUTE_FLAG_OFF.to_owned(),
-            balloon_mode: BALLOON_MODE_UNKNOWN.to_owned(),
+            route: route.to_owned(),
+            balloon_mode: balloon_mode.as_str().to_owned(),
             deferred: false,
             success: checkpointed.is_ok(),
             team_id,
         }
         .record(started.elapsed());
         checkpointed
+    }
+
+    fn checkpoint_route(&self, info: &SandboxInfo) -> (&'static str, BalloonMode) {
+        let flags = &self.feature_flags;
+        let contexts = flag_contexts(&info.config);
+        let firecracker_version = info.config.firecracker_version.as_str();
+        let early = early_route(RESUMED_WITH_SYNC_WP, flags.get(&IN_PLACE_CHECKPOINT, &contexts), || {
+            supports_in_place_checkpoint(firecracker_version)
+        });
+        let stamped = BalloonMode::stamped(info.metadata.as_ref().and_then(|metadata| metadata.balloon));
+        match early {
+            Some(route) => (route, stamped),
+            None => (
+                balloon_route(
+                    BalloonMode::Unknown,
+                    || flags.get(&DEFER_MEMORY_EXPORT, &contexts),
+                    || flags.get(&IN_PLACE_CHECKPOINT_REPORTING, &contexts),
+                ),
+                BalloonMode::Unknown,
+            ),
+        }
     }
 
     async fn checkpoint_routed(

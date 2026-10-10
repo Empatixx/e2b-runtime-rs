@@ -41,6 +41,13 @@ pub const DEFER_MEMORY_EXPORT: BoolFlag = Flag::new("defer-memory-export", false
 pub const FS_FREEZE_VIA_EXEC: BoolFlag = Flag::new("fsfreeze-via-exec", false);
 pub const GUEST_SYNC_TIMEOUT_MS: IntFlag = Flag::new("guest-sync-timeout-milliseconds", 0);
 
+pub const IN_PLACE_CHECKPOINT: BoolFlag = Flag::new("in-place-checkpoint", false);
+pub const FILESYSTEM_ONLY_CHECKPOINT: BoolFlag = Flag::new("filesystem-only-checkpoint", false);
+pub const IN_PLACE_CHECKPOINT_REPORTING: BoolFlag = Flag::new("in-place-checkpoint-reporting", false);
+pub const DEFER_MEMORY_EXPORT: BoolFlag = Flag::new("defer-memory-export", false);
+pub const FS_FREEZE_VIA_EXEC: BoolFlag = Flag::new("fsfreeze-via-exec", false);
+pub const GUEST_SYNC_TIMEOUT_MS: IntFlag = Flag::new("guest-sync-timeout-milliseconds", 0);
+
 pub const PEER_TO_PEER_CHUNK_TRANSFER: BoolFlag = Flag::new("peer-to-peer-chunk-transfer", false);
 pub const PEER_TO_PEER_ASYNC_CHECKPOINT: BoolFlag = Flag::new("peer-to-peer-async-checkpoint", false);
 

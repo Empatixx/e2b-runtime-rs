@@ -59,6 +59,27 @@ fn strict_e2b(version: &str) -> Option<Version> {
     Version::parse(e2b).ok()
 }
 
+pub fn supports_in_place_checkpoint(firecracker_version: &str) -> bool {
+    e2b_release_version(firecracker_version).is_some_and(|release| release >= Version::new(0, 2, 0))
+}
+
+pub fn supports_filesystem_snapshots(firecracker_version: &str) -> bool {
+    e2b_release_version(firecracker_version).is_some_and(|release| release >= Version::new(0, 1, 0))
+}
+
+fn e2b_release_version(version: &str) -> Option<Version> {
+    let (line, release) = version.strip_prefix('v')?.split_once('-')?;
+    let is_line = line
+        .split_once('.')
+        .is_some_and(|(major, minor)| digits(major) && digits(minor));
+    let release = is_line.then(|| Version::parse(release).ok()).flatten()?;
+    (release.pre.is_empty() && release.build.is_empty()).then_some(release)
+}
+
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn release_line(version: &str) -> Option<Version> {
     match version.split_once('_') {
         Some((release, _)) => strict_semver(release),
@@ -116,6 +137,39 @@ mod tests {
         assert!(!supports_memfd("v01.14.0"));
         assert!(!supports_memfd("v1.14-0.1"));
         assert!(!supports_memfd("v1.14.x_431f1fc"));
+    }
+
+    #[test]
+    fn the_in_place_checkpoint_needs_e2b_release_0_2_0_and_filesystem_snapshots_0_1_0() {
+        let cases = [
+            ("v1.14-0.2.0", true, true),
+            ("v1.14-0.2.1", true, true),
+            ("v1.14-0.3.0", true, true),
+            ("v1.14-1.0.0", true, true),
+            ("v1.15-0.2.0", true, true),
+            ("v1.14-0.1.0", false, true),
+            ("v1.14-0.1.1", false, true),
+            ("v1.14.1_431f1fc", false, false),
+            ("v1.14.1_6ecb627", false, false),
+            ("v1.10.1", false, false),
+        ];
+
+        for (version, in_place, filesystem) in cases {
+            assert_eq!(supports_in_place_checkpoint(version), in_place, "in place {version}");
+            assert_eq!(
+                supports_filesystem_snapshots(version),
+                filesystem,
+                "filesystem {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparsable_versions_never_get_the_e2b_features() {
+        for version in ["", "latest", "v1.14-0.2", "v1.14-0.2.0-rc.1", "v1-0.2.0", "v1.x-0.2.0"] {
+            assert!(!supports_in_place_checkpoint(version), "{version}");
+            assert!(!supports_filesystem_snapshots(version), "{version}");
+        }
     }
 
     #[test]

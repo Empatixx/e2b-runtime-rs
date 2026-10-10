@@ -112,7 +112,7 @@ fn resume_contexts(config: &SandboxConfig) -> Vec<FlagContext> {
     ]
 }
 
-fn pause_contexts(config: &SandboxConfig) -> Vec<FlagContext> {
+pub(super) fn pause_contexts(config: &SandboxConfig) -> Vec<FlagContext> {
     vec![sandbox_attributes(config).build(), FlagContext::team(&config.team_id)]
 }
 
