@@ -106,7 +106,7 @@ fn start_failure(program: &str, error: &io::Error) -> CommandFailure {
     }
 }
 
-fn status_text(status: ExitStatus) -> String {
+pub fn status_text(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
         (Some(code), _) => format!("exit status {code}"),
         (None, Some(signal)) => format!(

@@ -30,6 +30,20 @@ pub type Held = Box<dyn std::any::Any + Send + Sync>;
 
 pub type PreBoot = Box<dyn FnOnce(PathBuf) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
+pub fn chain_pre_boot(steps: impl IntoIterator<Item = Option<PreBoot>>) -> Option<PreBoot> {
+    let steps: Vec<PreBoot> = steps.into_iter().flatten().collect();
+    (!steps.is_empty()).then(|| -> PreBoot {
+        Box::new(move |rootfs: PathBuf| -> BoxFuture<'static, Result<(), String>> {
+            Box::pin(async move {
+                for step in steps {
+                    step(rootfs.clone()).await?;
+                }
+                Ok(())
+            })
+        })
+    })
+}
+
 #[derive(Clone)]
 pub enum Rootfs {
     Overlay(Arc<Overlay>),
@@ -205,5 +219,41 @@ impl<S: sandbox_builder::State> SandboxBuilder<S> {
     {
         self.slot_ready = true;
         self.slot(slot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(
+        name: &'static str,
+        failure: Option<&'static str>,
+        order: &Arc<parking_lot::Mutex<Vec<String>>>,
+    ) -> Option<PreBoot> {
+        let order = order.clone();
+        Some(Box::new(
+            move |_rootfs: PathBuf| -> BoxFuture<'static, Result<(), String>> {
+                Box::pin(async move {
+                    order.lock().push(name.to_owned());
+                    failure.map_or(Ok(()), |failure| Err(failure.to_owned()))
+                })
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn pre_boot_steps_run_in_order_and_stop_at_the_first_failure() {
+        assert!(chain_pre_boot([None, None]).is_none());
+
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let chained = chain_pre_boot([None, step("recover", None, &order), step("swap", None, &order)]).unwrap();
+        assert_eq!(chained(PathBuf::from("/dev/nbd0")).await, Ok(()));
+        assert_eq!(*order.lock(), ["recover", "swap"]);
+
+        order.lock().clear();
+        let chained = chain_pre_boot([step("recover", Some("boom"), &order), step("swap", None, &order)]).unwrap();
+        assert_eq!(chained(PathBuf::from("/dev/nbd0")).await, Err("boom".to_owned()));
+        assert_eq!(*order.lock(), ["recover"]);
     }
 }

@@ -4,6 +4,7 @@ pub mod harvest;
 pub mod reboot;
 pub mod resources;
 pub mod resume;
+pub mod rootfs;
 pub mod snapshot;
 pub mod upgrade;
 pub mod vcpu_limit;

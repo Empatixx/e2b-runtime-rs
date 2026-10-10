@@ -21,6 +21,7 @@ use crate::featureflags::{
 use crate::firecracker::version::supports_in_place_checkpoint;
 use crate::memory::trace::Trace;
 use crate::proto::SchedulingMetadata;
+use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::server::build_id;
 use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
@@ -245,6 +246,7 @@ impl Node {
                 oom_watermark: parent.oom_watermark.clone(),
                 throwaway: false,
                 upgrade_envd: true,
+                fs_recovery: RecoveryRecord::default(),
             })
             .await
             .inspect_err(|_| drop(std::fs::remove_dir_all(self.work_dir_of(&lifecycle))))

@@ -20,6 +20,7 @@ use crate::sandbox::harvest::harvester::PrefetchHarvester;
 use crate::sandbox::harvest::{
     HarvestInstance, HarvestResumer, HarvestSlots, StartSlot, THROWAWAY_ID_PREFIX, ThrowawayResume,
 };
+use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
 use crate::server::oom_monitor::SharedWatermark;
 use crate::server::registry::Lifecycle;
@@ -159,6 +160,7 @@ impl HarvestResumer for ThrowawayHost {
                 oom_watermark: SharedWatermark::default(),
                 throwaway: true,
                 upgrade_envd: false,
+                fs_recovery: RecoveryRecord::default(),
             })
             .await
             .map_err(|failure| failure.message())?;

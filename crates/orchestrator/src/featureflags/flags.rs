@@ -34,6 +34,7 @@ pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-ins
 pub const SANDBOX_MAX_INCOMING_CONNECTIONS: IntFlag = Flag::new("sandbox-max-incoming-connections", -1);
 
 pub const USE_SYNC_WP: BoolFlag = Flag::new("use-sync-wp", false);
+pub const PREBOOT_FS_RECOVERY: BoolFlag = Flag::new("preboot-fs-recovery", false);
 pub const SYNC_WP_TRACKER_DIRTY: BoolFlag = Flag::new("sync-wp-tracker-dirty", false);
 pub const MEMFD_BACKGROUND_COPY: BoolFlag = Flag::new("memfd-background-copy", true);
 pub const IN_PLACE_CHECKPOINT: BoolFlag = Flag::new("in-place-checkpoint", false);

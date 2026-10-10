@@ -56,7 +56,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The reboot CPU template override (`reboot-cpu-template-override`, `{"template":...}` wrapper) and the CPU template apply on a filesystem boot have no Rust counterpart | API |
 | Metrics keep the SDK default cardinality limit of 2000 series per interval: the Rust SDK preallocates by the limit, so it is not lifted for delta counters and histograms as upstream does | perf |
 | The disk estimate of a pause has no memfile dedup copy because the Rust node does not dedup memory diffs | later |
 | The rootfs seal duration metric (`snapshot.rootfs_seal.duration`) is missing because the rootfs seal is not deferred yet | perf |
@@ -66,7 +65,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The reboot path has no pre-boot filesystem recovery (`fsRecoverPreBoot`, e2fsck journal replay and the `fs_recovery` create label) | API |
 | The reboot path has no offline envd upgrade before the cold boot (`envdOfflineUpgradePreBoot`) | API |
 | The `resume-build` dev tool (`defaultRunVcpu`) has no Rust counterpart | later |
 

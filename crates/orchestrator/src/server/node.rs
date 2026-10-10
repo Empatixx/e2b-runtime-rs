@@ -66,6 +66,7 @@ use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::config::sandbox_builder::{
     SetFirecracker, SetHugePages, SetHyperloopIp, SetId, SetKernel, SetSandboxType, SetTemplateId, SetWorkDir,
 };
+use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
@@ -144,6 +145,7 @@ struct StartRequest {
     oom_watermark: SharedWatermark,
     throwaway: bool,
     upgrade_envd: bool,
+    fs_recovery: RecoveryRecord,
 }
 
 enum StartFailure {
@@ -535,6 +537,7 @@ impl Node {
         config: SandboxConfig,
         lifetime: Lifetime,
         filesystem_boot_requested: bool,
+        fs_recovery: RecoveryRecord,
     ) -> Result<Created, Status> {
         let _work = self.status.track_work();
         let lifecycle = Lifecycle {
@@ -562,6 +565,7 @@ impl Node {
                     oom_watermark: SharedWatermark::default(),
                     throwaway: false,
                     upgrade_envd: config_snapshot,
+                    fs_recovery,
                 },
                 filesystem_boot_requested,
             )
@@ -677,6 +681,7 @@ impl Node {
             oom_watermark,
             throwaway,
             upgrade_envd,
+            fs_recovery,
         } = request;
         let files = async {
             let (build, snapfile) =
@@ -741,6 +746,7 @@ impl Node {
                         lifecycle: &lifecycle,
                         end: lifetime.end,
                         requested: filesystem_boot_requested,
+                        fs_recovery: &fs_recovery,
                     })
                     .await
                     .map_err(StartFailure::Failed)?;

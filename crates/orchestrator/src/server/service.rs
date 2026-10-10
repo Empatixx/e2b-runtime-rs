@@ -20,6 +20,7 @@ use crate::proto::{
     RunningSandbox, SandboxCheckpointRequest, SandboxCheckpointResponse, SandboxCreateRequest, SandboxCreateResponse,
     SandboxDeleteRequest, SandboxListResponse, SandboxPauseRequest, SandboxPauseResponse, SandboxUpdateRequest,
 };
+use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::sandbox::snapshot::Snapshot;
 use crate::sandbox::snapshot::in_place::QuiesceFlags;
 use crate::telemetry::report::{ReportStatus, report_critical_error, report_error};
@@ -27,7 +28,6 @@ use crate::telemetry::server::sandbox::{CreateOutcome, PauseOutcome, record_kill
 use crate::telemetry::server::spans;
 use serde_json::json;
 
-const FS_RECOVERY_NONE: &str = "none";
 const KILL_REASON_SEAL_FAILED: &str = "seal_failed";
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 
@@ -58,14 +58,15 @@ impl SandboxService for SandboxServer {
             .as_ref()
             .map(|sandbox| sandbox.team_id.clone())
             .unwrap_or_default();
-        let created = self.create_sandbox(request).instrument(span).await;
+        let fs_recovery = RecoveryRecord::default();
+        let created = self.create_sandbox(request, &fs_recovery).instrument(span).await;
         CreateOutcome {
             resume,
             fs_only: created.as_ref().is_ok_and(|created| created.filesystem_only),
             fs_boot_requested,
             success: created.is_ok(),
             envd_upgraded: created.as_ref().is_ok_and(|created| created.envd_upgraded),
-            fs_recovery: FS_RECOVERY_NONE.to_owned(),
+            fs_recovery: fs_recovery.get().label().to_owned(),
             team_id,
         }
         .record(started.elapsed());
@@ -117,8 +118,12 @@ impl SandboxService for SandboxServer {
 }
 
 impl SandboxServer {
-    async fn create_sandbox(&self, request: Request<SandboxCreateRequest>) -> Result<CreatedResponse, Status> {
-        let created = self.start_sandbox(request).await;
+    async fn create_sandbox(
+        &self,
+        request: Request<SandboxCreateRequest>,
+        fs_recovery: &RecoveryRecord,
+    ) -> Result<CreatedResponse, Status> {
+        let created = self.start_sandbox(request, fs_recovery).await;
         report_create_failure(&created);
         if created.is_ok() {
             spans::record_balloon_mode();
@@ -126,7 +131,11 @@ impl SandboxServer {
         created
     }
 
-    async fn start_sandbox(&self, request: Request<SandboxCreateRequest>) -> Result<CreatedResponse, Status> {
+    async fn start_sandbox(
+        &self,
+        request: Request<SandboxCreateRequest>,
+        fs_recovery: &RecoveryRecord,
+    ) -> Result<CreatedResponse, Status> {
         let request = request.into_inner();
         let filesystem_boot_requested = request.filesystem_boot.unwrap_or_default();
         let config = request
@@ -138,9 +147,14 @@ impl SandboxServer {
             end: request.end_time.map_or(SystemTime::UNIX_EPOCH, system_time),
         };
         let resolved_firecracker_version = config.firecracker_version.clone();
-        let created = tokio::spawn(self.node.clone().create(config, lifetime, filesystem_boot_requested))
-            .await
-            .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
+        let created = tokio::spawn(self.node.clone().create(
+            config,
+            lifetime,
+            filesystem_boot_requested,
+            fs_recovery.clone(),
+        ))
+        .await
+        .map_err(|e| Status::internal(format!("failed to create sandbox: {e}")))??;
         Ok(CreatedResponse {
             filesystem_only: created.filesystem_only,
             envd_upgraded: created.envd_upgraded,

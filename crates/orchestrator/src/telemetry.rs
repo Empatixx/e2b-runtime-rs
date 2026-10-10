@@ -9,6 +9,7 @@ pub mod identity;
 pub mod logs;
 pub mod metrics;
 pub mod reads;
+pub mod reboot;
 pub mod report;
 pub mod resume;
 pub mod server;

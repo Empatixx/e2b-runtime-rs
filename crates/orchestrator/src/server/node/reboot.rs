@@ -1,3 +1,5 @@
+mod recovery;
+
 use std::time::{Duration, SystemTime};
 
 use tracing::field::Empty;
@@ -7,15 +9,16 @@ use super::Node;
 use crate::builder::layer::{DEFAULT_IO_ENGINE, ENVD_WAIT, MIN_ENVD_FOR_KVM_CLOCK, SYSTEMD_INIT};
 use crate::envd::EnvdInit;
 use crate::envd::version::is_at_least;
-use crate::featureflags::{FlagContext, REBOOT_CPU_TEMPLATE_OVERRIDE};
+use crate::featureflags::{FlagContext, PREBOOT_FS_RECOVERY, REBOOT_CPU_TEMPLATE_OVERRIDE};
 use crate::firecracker::kernel_args::{render, validate_cmdline_args};
 use crate::go_time::rfc3339;
 use crate::proto::SandboxConfig;
 use crate::sandbox::Sandbox;
-use crate::sandbox::config::START_REBOOT;
+use crate::sandbox::config::{PreBoot, START_REBOOT, chain_pre_boot};
 use crate::sandbox::reboot::{
     RebootCpuTemplate, check_reboot_cpu_template, reboot_allowed, reboot_cpu_template, reboot_max_vcpus,
 };
+use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::server::registry::Lifecycle;
 use crate::storage::build::Build;
 use crate::template::metadata::{CpuTemplate, TemplateMetadata, applied_digest};
@@ -31,6 +34,7 @@ pub(super) struct RebootRequest<'a> {
     pub lifecycle: &'a Lifecycle,
     pub end: SystemTime,
     pub requested: bool,
+    pub fs_recovery: &'a RecoveryRecord,
 }
 
 pub(super) struct Rebooted {
@@ -62,6 +66,7 @@ impl Node {
             lifecycle,
             end,
             requested,
+            fs_recovery,
         } = request;
         if !reboot_allowed(metadata, requested) {
             return Err(format!(
@@ -86,6 +91,9 @@ impl Node {
             "sandbox.cpu_template",
             applied_digest(chosen.template.as_ref()).as_str(),
         );
+        let pre_boot = chain_pre_boot([self
+            .fs_recover_pre_boot(config, metadata.fs_quiesced, requested, fs_recovery)
+            .await]);
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let overlay = self.layer_overlay(build, &work_dir)?;
@@ -113,6 +121,7 @@ impl Node {
             .start_type(START_REBOOT)
             .cmdline_args(metadata.cmdline_args.clone())
             .maybe_cpu_template(chosen.template.clone())
+            .maybe_pre_boot(pre_boot)
             .cold_boot()
             .await
             .map_err(|e| format!("create sandbox from rootfs: {e}"))?;
@@ -120,6 +129,34 @@ impl Node {
             sandbox,
             cpu_template: chosen.template,
         })
+    }
+
+    async fn fs_recover_pre_boot(
+        &self,
+        config: &SandboxConfig,
+        fs_quiesced: bool,
+        requested: bool,
+        record: &RecoveryRecord,
+    ) -> Option<PreBoot> {
+        let contexts = [
+            FlagContext::sandbox(&config.sandbox_id),
+            FlagContext::template(&config.template_id),
+        ];
+        let enabled = self.feature_flags.get(&PREBOOT_FS_RECOVERY, &contexts);
+        let span = info_span!(
+            "resolve fs recovery",
+            "sandbox.fs_quiesced" = fs_quiesced,
+            "fs_recovery.enabled" = enabled
+        );
+        async move {
+            if !enabled {
+                return None;
+            }
+            recovery::probe_journal_only().await;
+            recovery::recovery_step(fs_quiesced, requested, record)
+        }
+        .instrument(span)
+        .await
     }
 
     fn resolve_cpu_template(
