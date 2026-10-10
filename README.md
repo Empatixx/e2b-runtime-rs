@@ -16,7 +16,8 @@
 |---|---|---|
 | Language | Go | Rust (tokio, axum, tonic) |
 | Scope | the whole stack | envd and the orchestrator; API and proxy stay upstream's |
-| Deployment | Nomad with Terraform, plus Kubernetes and Docker Compose | Kubernetes (kustomize) and Docker Compose, no Nomad |
+| Infrastructure | Terraform for GCP, AWS and Azure | none yet: bring your own Linux nodes with KVM |
+| Deployment | Nomad, plus Kubernetes and Docker Compose | Kubernetes manifests (kustomize, envd and S3 so far) and Docker Compose, no Nomad |
 | NBD connect | generic netlink | ioctl, about 17 ms against netlink's 100 to 250 ms stall ([why](docs/performance-resume.md#tried-and-dropped)) |
 | Platform | Linux | Linux only |
 | Edges | | identical: routes, gRPC services, errors, snapshot formats, metrics, feature flags |
