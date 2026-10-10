@@ -117,15 +117,14 @@ mod serve {
         let address = SocketAddr::from(([0, 0, 0, 0], config.grpc_port));
         let listener = tokio::net::TcpListener::bind(address)
             .await
-            .map_err(|e| format!("listen on {address}: {e}"))?
-            .tap_io(no_delay);
+            .map_err(|e| format!("listen on {address}: {e}"))?;
         tracing::info!(%address, node = %config.node_id, "orchestrator listening");
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(
-            axum::serve(listener, app.router())
-                .with_graceful_shutdown(async move { drop(stopped.await) })
-                .into_future(),
-        );
+        let server = tokio::spawn(orchestrator::server::grpc_serve::serve(
+            listener,
+            app.router(),
+            async move { drop(stopped.await) },
+        ));
         let lookup_node = node.clone();
         let hyperloop = orchestrator::hyperloop::server::router(
             Arc::new(move |ip| lookup_node.source_of(ip)),
@@ -187,7 +186,7 @@ mod serve {
             node.shutdown().await;
         }
         let _ = stop.send(());
-        let served = server.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
+        let served = server.await.map_err(|e| e.to_string());
         if let Err(error) = sandbox_proxy.close(config.force_stop).await {
             tracing::error!(%error, "sandbox proxy shutdown failed");
         }

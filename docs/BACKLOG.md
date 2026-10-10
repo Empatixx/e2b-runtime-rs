@@ -55,7 +55,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | Delta counters and histograms keep up to 20 000 series per export interval; upstream lifts the cap entirely, but the Rust SDK preallocates its maps by the limit and rejects an unbounded one | later |
 | The template cache has no residency gauges (`orchestrator.templates.cache.entries`, pinned refs, oldest pin age, mapping bytes, layer entries by kind and generation band, unlanded layers) and no `evictions` counter by reason | later |
-| No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
+| The gRPC server pings every 15 s like upstream, but hyper has no keepalive enforcement policy, so a client that pings more often than every 5 s is not sent `too_many_pings` | later |
 
 ## Orchestrator: vCPU hotplug and filesystem boot
 

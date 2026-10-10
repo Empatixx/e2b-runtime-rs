@@ -23,7 +23,7 @@ httparse = "1"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server-auto", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server-auto", "server-graceful", "service", "http1", "http2"] }
 tower-service = "0.3"
 socket2 = { version = "0.6", features = ["all"] }
 subtle = "2"
