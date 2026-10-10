@@ -140,7 +140,10 @@ impl PrefetchHarvester {
 
     async fn resume_mapping(&self, job: &HarvestJob) -> Result<Option<MemoryPrefetch>, HarvestFailure> {
         let _slot = within(job.deadline, self.slots.acquire()).await.map_err(|e| {
-            HarvestFailure::new(HarvestOutcome::Skipped, format!("acquire start slot: {}", exhausted(e)))
+            HarvestFailure::new(
+                HarvestOutcome::SlotTimeout,
+                format!("acquire start slot: {}", exhausted(e)),
+            )
         })?;
         let hours = job.config.max_sandbox_length;
         let template = within(job.deadline, self.templates.pin(job.build_id, hours))
@@ -512,13 +515,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn no_free_start_slot_skips_the_harvest() {
+    async fn no_free_start_slot_is_a_slot_timeout() {
         let script = scripted(1);
         script.fails_at("acquire");
 
         let report = harvester(&script).run(&job(&script, true)).await;
 
-        assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
+        assert_eq!(report.run.outcome, HarvestOutcome::SlotTimeout);
         assert_eq!(report.error.as_deref(), Some("acquire start slot: acquire broke"));
         assert_eq!(script.events(), ["acquire"]);
     }
@@ -534,7 +537,7 @@ pub mod tests {
 
         let report = harvester(&script).run(&job).await;
 
-        assert_eq!(report.run.outcome, HarvestOutcome::Skipped);
+        assert_eq!(report.run.outcome, HarvestOutcome::SlotTimeout);
         assert_eq!(
             report.error.as_deref(),
             Some(

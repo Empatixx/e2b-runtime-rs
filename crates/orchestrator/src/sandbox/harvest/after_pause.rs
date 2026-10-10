@@ -12,7 +12,7 @@ use crate::memory::prefetch::flags::PrefetchFlags;
 use crate::proto::SandboxConfig;
 use crate::sandbox::config::Held;
 use crate::storage::backend::ObjectMetadata;
-use crate::telemetry::server::prefetch::record_seal_wait;
+use crate::telemetry::server::prefetch::PATH_PAUSE;
 use crate::template::Template;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,8 @@ impl PrefetchHarvest {
             parent: None,
             "harvest-resume-prefetch",
             build_id = %pause.build_id,
-            consume = settings.consume
+            consume = settings.consume,
+            path = PATH_PAUSE
         );
         tokio::spawn(harvest(self.harvester.clone(), pause, settings).instrument(span))
     }
@@ -73,14 +74,13 @@ async fn harvest(
 ) -> HarvestReport {
     let _work = pause.work.take();
     let deadline = Instant::now() + settings.timeout;
-    record_seal_wait(Duration::ZERO);
     let sandbox_id = pause.config.sandbox_id.clone();
     let build_id = pause.build_id;
     let report = match job_of(pause, settings.consume, deadline).await {
         Ok(job) => harvester.run(&job).await,
         Err(e) => HarvestReport::failed(HarvestRun::failed(HarvestOutcome::Skipped, Duration::ZERO), e),
     };
-    report.run.record_metrics();
+    report.run.record_metrics(Duration::ZERO);
     log_failure(&sandbox_id, build_id, &report);
     report
 }
@@ -106,7 +106,7 @@ async fn job_of(pause: PauseHarvest, consume: bool, deadline: Instant) -> Result
 
 fn log_failure(sandbox_id: &str, build_id: Uuid, report: &HarvestReport) {
     if let Some(error) = &report.error {
-        tracing::warn!(sandbox = %sandbox_id, build = %build_id, %error, "pause-resume prefetch harvest failed");
+        tracing::warn!(sandbox = %sandbox_id, build = %build_id, path = PATH_PAUSE, %error, "resume prefetch harvest failed");
     }
 }
 

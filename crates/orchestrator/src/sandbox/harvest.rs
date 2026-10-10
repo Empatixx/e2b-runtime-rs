@@ -32,6 +32,7 @@ pub enum HarvestOutcome {
     ResumeFailed,
     CollectFailed,
     Skipped,
+    SlotTimeout,
     PersistDeadline,
 }
 
@@ -42,6 +43,7 @@ impl HarvestOutcome {
             Self::ResumeFailed => "resume_failed",
             Self::CollectFailed => "collect_failed",
             Self::Skipped => "skipped",
+            Self::SlotTimeout => "slot_timeout",
             Self::PersistDeadline => "persist_deadline",
         }
     }
@@ -67,9 +69,11 @@ impl HarvestRun {
         }
     }
 
-    pub fn record_metrics(&self) {
+    pub fn record_metrics(&self, seal_wait: Duration) {
         telemetry::HarvestRun {
             result: self.outcome.as_str().to_owned(),
+            path: telemetry::PATH_PAUSE,
+            seal_wait,
             slot_hold: self.slot_hold,
             persist_wait: self.persist_attempted.then_some(self.persist_wait),
             pages: matches!(self.outcome, HarvestOutcome::Success).then_some(self.pages as u64),
