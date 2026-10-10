@@ -83,7 +83,9 @@ mod tests {
         );
     }
 
-    fn sse_cases() -> Vec<(&'static str, ServerSideEncryption, Vec<(&'static str, &'static str)>)> {
+    type SseCase = (&'static str, ServerSideEncryption, Vec<(&'static str, &'static str)>);
+
+    fn sse_cases() -> Vec<SseCase> {
         vec![
             ("none", encryption("", ""), vec![]),
             (

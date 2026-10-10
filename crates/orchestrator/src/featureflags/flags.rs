@@ -25,8 +25,12 @@ pub const BUILD_ENSURE_FREE_DISK_SPACE: BoolFlag = Flag::new("build-ensure-free-
 pub const BUILD_CPU_TEMPLATE: JsonFlag = Flag::new("build-cpu-template", Value::Null);
 pub const FREE_PAGE_REPORTING: BoolFlag = Flag::new("free-page-reporting", false);
 pub const FREE_PAGE_HINTING_CONFIG: JsonFlag = Flag::new("free-page-hinting-config", Value::Null);
+pub const EGRESS_RETIREMENT_TIMEOUT_MS: IntFlag = Flag::new("egress-retirement-timeout-ms", 60000);
 pub const MAX_SANDBOXES_PER_NODE: IntFlag = Flag::new("max-sandboxes-per-node", 200);
 pub const MAX_STARTING_INSTANCES_PER_NODE: IntFlag = Flag::new("max-starting-instances-per-node", 3);
+
+pub const PEER_TO_PEER_CHUNK_TRANSFER: BoolFlag = Flag::new("peer-to-peer-chunk-transfer", false);
+pub const PEER_TO_PEER_ASYNC_CHECKPOINT: BoolFlag = Flag::new("peer-to-peer-async-checkpoint", false);
 
 pub const PAUSE_RESUME_PREFETCH_HARVEST: BoolFlag = Flag::new("pause-resume-prefetch-harvest", false);
 pub const PAUSE_RESUME_PREFETCH_CONSUME: BoolFlag = Flag::new("pause-resume-prefetch-consume", false);
@@ -96,6 +100,7 @@ mod tests {
         );
         assert_eq!(BUILD_RESERVED_DISK_SPACE_MB.fallback, 256);
         assert_eq!(BUILD_BASE_ROOTFS_SIZE_LIMIT_MB.fallback, 25000);
+        assert_eq!(EGRESS_RETIREMENT_TIMEOUT_MS.fallback, 60000);
         assert_eq!(MAX_SANDBOXES_PER_NODE.fallback, 200);
         assert_eq!(MAX_STARTING_INSTANCES_PER_NODE.fallback, 3);
         assert_eq!(build_io_engine().fallback, "Sync");
