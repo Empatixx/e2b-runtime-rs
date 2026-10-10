@@ -1,5 +1,7 @@
 mod checkpoint;
 pub mod layers;
+mod pause_disk;
+use pause_disk::ROOTFS_OVERLAY_FILE;
 pub mod prefetch;
 
 use std::collections::{BTreeMap, HashMap};
@@ -24,6 +26,7 @@ use super::config::volume_mounts::VolumeMounts;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
+use super::pause_disk::{BuildDisk, PauseDiskReservation};
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::scheduling::from_headers;
@@ -93,6 +96,7 @@ pub struct Node {
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
     admission: Admission,
     pub max_sandboxes: MaxSandboxes,
+    pub build_disk: Arc<BuildDisk>,
     pub feature_flags: FeatureFlags,
     store: Arc<DiffStore>,
     binaries: Binaries,
@@ -194,6 +198,7 @@ impl Node {
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission,
             max_sandboxes,
+            build_disk: BuildDisk::on_directory(config.cache_dir.clone(), config.template_storage.clone()),
             feature_flags: config.feature_flags.clone(),
             volume_mounts: config.volume_mounts.clone(),
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
@@ -276,7 +281,12 @@ impl Node {
         }
     }
 
-    pub fn upload(&self, local: LocalSnapshot, object_metadata: ObjectMetadata) {
+    pub fn upload(
+        &self,
+        local: LocalSnapshot,
+        object_metadata: ObjectMetadata,
+        disk: Option<Arc<PauseDiskReservation>>,
+    ) {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
         let store = self.store.clone();
@@ -291,6 +301,7 @@ impl Node {
                     count_failed_snapshot_upload(&team_id, filesystem_only);
                 }
                 store.unpin(build.build_id);
+                drop(disk);
                 tokio::spawn(async move { peers.finish(build.build_id, outcome == Outcome::Landed).await });
             });
     }
@@ -675,7 +686,7 @@ impl Node {
             Artifact::Rootfs,
             self.store.clone(),
         ));
-        let overlay = Overlay::new(rootfs, &work_dir.join("rootfs.overlay"))
+        let overlay = Overlay::new(rootfs, &work_dir.join(ROOTFS_OVERLAY_FILE))
             .map_err(|e| format!("create rootfs overlay: {e}"))?;
         let memfile = Arc::new(BuildFile::new(
             build.memfile.clone(),

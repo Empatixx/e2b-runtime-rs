@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
 
+use super::pause_disk::ROOTFS_OVERLAY_FILE;
 use super::{BUILD_SANDBOX_TYPE, BaseSandbox, Node, parents};
 use crate::block::build_file::{Artifact, BuildFile};
 use crate::block::overlay::Overlay;
@@ -182,7 +183,7 @@ impl Node {
             Artifact::Rootfs,
             self.store.clone(),
         ));
-        Overlay::new(rootfs, &work_dir.join("rootfs.overlay"))
+        Overlay::new(rootfs, &work_dir.join(ROOTFS_OVERLAY_FILE))
             .map(Arc::new)
             .map_err(|e| format!("create rootfs overlay: {e}"))
     }

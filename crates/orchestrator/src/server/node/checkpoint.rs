@@ -222,7 +222,7 @@ impl Node {
             .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
         match sealed {
             Ok(()) => {
-                self.upload(local.clone(), object_metadata);
+                self.upload(local.clone(), object_metadata, None);
                 Ok(())
             }
             Err(e) => {

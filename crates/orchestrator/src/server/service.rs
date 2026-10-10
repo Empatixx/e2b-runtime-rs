@@ -8,6 +8,8 @@ use tracing::{Instrument, Span};
 use super::build_id;
 use super::lifecycle::{Command, SandboxHandle};
 use super::node::{CheckpointRequest, Lifetime, Node, egress_rules, event_sandbox, execution};
+use super::pause_disk::PauseDiskReservation;
+use super::registry::Lifecycle;
 use super::scheduling::from_headers;
 use super::vcpus::validate_vcpus;
 use crate::envd::version::check_for_snapshot;
@@ -260,13 +262,14 @@ impl SandboxServer {
         let running = self.running(&id, "sandbox not found", &sandbox_attribute(&id))?;
         spans::record_running(&running.info.lock().config);
         let lifecycle = running.lifecycle();
+        let disk = self.admit_pause_disk(&running, &lifecycle, request.filesystem_only)?;
         let handle = self
             .node
             .mark_stopping(&lifecycle)
             .await
             .ok_or_else(|| Status::internal("failed to pause sandbox"))
             .report_critical("failed to mark sandbox as stopping", &sandbox_attribute(&id))?;
-        let snapshotted = tokio::spawn(pause(handle, request.build_id, request.template_id).in_current_span())
+        let snapshotted = tokio::spawn(pause(handle, request.build_id, request.template_id, disk).in_current_span())
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
         snapshotted
@@ -311,6 +314,22 @@ impl SandboxServer {
 }
 
 impl SandboxServer {
+    fn admit_pause_disk(
+        &self,
+        running: &SandboxHandle,
+        lifecycle: &Lifecycle,
+        filesystem_only: bool,
+    ) -> Result<Option<Arc<PauseDiskReservation>>, Status> {
+        let info = running.info.lock();
+        self.node.admit_pause_disk(
+            &info.config.sandbox_id,
+            &info.config.team_id,
+            info.config.ram_mb,
+            &self.node.rootfs_cache_of(lifecycle),
+            filesystem_only,
+        )
+    }
+
     fn team_of(&self, sandbox_id: &str) -> String {
         self.node
             .registry
@@ -342,7 +361,12 @@ impl SandboxServer {
     }
 }
 
-async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> Result<Snapshot, String> {
+async fn pause(
+    handle: SandboxHandle,
+    build_id: String,
+    template_id: String,
+    disk: Option<Arc<PauseDiskReservation>>,
+) -> Result<Snapshot, String> {
     let build_id = match build_id::parse(&build_id) {
         Ok(build_id) => build_id,
         Err(e) => {
@@ -358,6 +382,7 @@ async fn pause(handle: SandboxHandle, build_id: String, template_id: String) -> 
             template_id,
             span: Span::current(),
             reply,
+            disk,
         })
         .await
         .map_err(|_| STOPPED.to_owned())?;

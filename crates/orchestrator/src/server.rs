@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod node;
 #[cfg(target_os = "linux")]
 pub mod oom_monitor;
+pub mod pause_disk;
 pub mod registry;
 pub mod retry;
 pub mod scheduling;

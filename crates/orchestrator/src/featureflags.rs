@@ -17,7 +17,7 @@ pub use flags::{
     PAUSE_RESUME_PREFETCH_HARVEST, PAUSE_RESUME_PREFETCH_HARVEST_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
     PEER_TO_PEER_CHUNK_TRANSFER, RESUME_LAST_CYCLE_PREFETCH_MAX_MIB, USE_MEMFD, build_envd_version,
     build_firecracker_version, build_io_engine, build_kernel_cmdline_args, build_kernel_version,
-    envd_timeout_milliseconds, resume_prefetch_source,
+    envd_timeout_milliseconds, pause_admission_disk_headroom_mib, resume_prefetch_source,
 };
 pub use flags::{BoolFlag, Flag, IntFlag, JsonFlag, StringFlag};
 pub use prefetch::ScopedPrefetchFlags;

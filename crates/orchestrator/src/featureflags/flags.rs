@@ -80,6 +80,14 @@ pub fn build_firecracker_version(fallback: &str) -> StringFlag {
     Flag::new("build-firecracker-version", fallback.to_owned())
 }
 
+pub fn pause_admission_disk_headroom_mib() -> IntFlag {
+    let fallback = std::env::var("PAUSE_ADMISSION_DISK_HEADROOM_MIB")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(-1);
+    Flag::new("pause-admission-disk-headroom-mib", fallback)
+}
+
 pub fn build_io_engine() -> StringFlag {
     Flag::new("build-io-engine", "Sync".to_owned())
 }

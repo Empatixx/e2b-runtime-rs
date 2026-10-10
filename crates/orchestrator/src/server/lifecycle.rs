@@ -13,6 +13,7 @@ use super::host_stats::HostStatsCollector;
 use super::node::prefetch::PausedBuild;
 use super::node::{Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::{OomMonitor, SharedWatermark};
+use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
 use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
@@ -51,6 +52,7 @@ pub enum Command {
         template_id: String,
         span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
+        disk: Option<Arc<PauseDiskReservation>>,
     },
     Checkpoint {
         build_id: Uuid,
@@ -92,6 +94,7 @@ enum Ending {
         template_id: String,
         span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
+        disk: Option<Arc<PauseDiskReservation>>,
     },
     Checkpoint {
         build_id: Uuid,
@@ -222,7 +225,8 @@ impl Running {
                 template_id,
                 span,
                 reply,
-            } => self.pause(build_id, template_id, span, reply).await,
+                disk,
+            } => self.pause(build_id, template_id, span, reply, disk).await,
             Ending::Checkpoint { build_id, reply } => self.checkpoint(build_id, reply).await,
             Ending::Stop { reason } => tracing::info!(sandbox = %id, %reason, "stopping sandbox"),
             Ending::Crashed { death } => tracing::info!(sandbox = %id, reason = %death.reason, "stopping sandbox"),
@@ -248,6 +252,7 @@ impl Running {
         template_id: String,
         span: Span,
         reply: oneshot::Sender<Result<Snapshot, String>>,
+        disk: Option<Arc<PauseDiskReservation>>,
     ) {
         let parent = self.info.lock().clone();
         let snapshotted = self.node.snapshot_locally(&self.sandbox, &parent, build_id).await;
@@ -263,7 +268,8 @@ impl Running {
                 .with("template_id", template_id)
                 .with("team_id", &parent.config.team_id)
                 .with("build_origin", "pause");
-            span.in_scope(|| self.node.upload(local.clone(), object_metadata.clone()));
+            self.node.mark_written_when_ready(disk.clone(), local.memfile_ready.clone());
+            span.in_scope(|| self.node.upload(local.clone(), object_metadata.clone(), disk));
             self.node.harvest_after_pause(PausedBuild {
                 parent: parent.clone(),
                 build_id,
@@ -286,7 +292,7 @@ impl Running {
                     Some(Command::Extend) => continue,
                     Some(Command::Trace { reply }) => drop(reply.send(self.sandbox.memory_trace())),
                     Some(Command::Checkpoint { build_id, reply }) => return Ending::Checkpoint { build_id, reply },
-                    Some(Command::Pause { build_id, template_id, span, reply }) => return Ending::Pause { build_id, template_id, span, reply },
+                    Some(Command::Pause { build_id, template_id, span, reply, disk }) => return Ending::Pause { build_id, template_id, span, reply, disk },
                     Some(Command::Delete) | None => return Ending::Stop { reason: "deleted".to_owned() },
                 },
                 () = expiry(deadline) => return Ending::Stop { reason: "expired".to_owned() },
