@@ -70,12 +70,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | A peer transition re-reads the diff from storage with the header it already holds; the chunker reads only uncompressed objects, so a build a Go peer uploads compressed is unreadable after the transition (upstream reloads the header and its frame table) | later |
 | `snapshot-cache-drop-provisional-header` is not read and the `orchestrator.sandbox.snapshot.dead_structure_outcome` and `dead_structure_bytes` counters are not recorded; the provisional header stays in the template until the entry goes | later |
 
-## Orchestrator: volumes
-
-| Item | Target |
-|---|---|
-| `Chrooted` has only what the volume service uses; upstream also has rename, remove, symlink, readlink, chtimes, temp files and the trailing-slash rules for them, which only the NFS proxy needs | NFS proxy |
-
 ## Orchestrator: in-place checkpoint
 
 | Item | Target |

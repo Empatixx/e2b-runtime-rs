@@ -1,4 +1,5 @@
 mod directory;
+mod entries;
 pub mod error;
 pub mod file;
 pub mod info;
@@ -29,6 +30,7 @@ use remove::remove_all_at;
 use resolve::resolve_path;
 use syscalls::{fchmodat2_empty_path, procfs_path, resolve_open, retry_interrupted, syscall_mode};
 
+pub use entries::RenameError;
 pub use support::check_support;
 
 pub struct Chrooted {

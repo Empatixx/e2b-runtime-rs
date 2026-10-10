@@ -42,6 +42,43 @@ impl fmt::Display for PathError {
 
 impl std::error::Error for PathError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+pub struct LinkError {
+    #[builder(into)]
+    pub operation: String,
+    #[builder(into)]
+    pub old: String,
+    #[builder(into)]
+    pub new: String,
+    pub errno: Errno,
+}
+
+impl fmt::Display for LinkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} {} {}: {}",
+            self.operation,
+            self.old,
+            self.new,
+            reason(&std::io::Error::from_raw_os_error(self.errno.raw_os_error()))
+        )
+    }
+}
+
+impl std::error::Error for LinkError {}
+
+pub fn link_failed(operation: &'static str, old: String, new: String) -> impl Fn(Errno) -> LinkError {
+    move |errno| {
+        LinkError::builder()
+            .operation(operation)
+            .old(old.clone())
+            .new(new.clone())
+            .errno(errno)
+            .build()
+    }
+}
+
 pub fn failed<'a>(operation: &'a str, name: &'a str) -> impl Fn(Errno) -> PathError + 'a {
     move |errno| {
         PathError::builder()
