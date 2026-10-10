@@ -5,7 +5,7 @@ use serde_json::Value;
 
 mod cpu_template;
 
-pub use cpu_template::CpuTemplate;
+pub use cpu_template::{CpuTemplate, applied_digest};
 
 pub const CURRENT_VERSION: u64 = 2;
 const DEPRECATED_VERSION: u64 = 1;

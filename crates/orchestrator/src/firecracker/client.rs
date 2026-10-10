@@ -59,11 +59,24 @@ impl FirecrackerClient {
         )
         .await?;
         self.put("/machine-config", machine_config(config)).await?;
+        self.set_cpu_config(config).await?;
         self.put("/entropy", entropy_device()).await?;
         if let Some(metadata) = metadata {
             self.set_mmds(metadata).await?;
         }
         self.put("/actions", json!({ "action_type": "InstanceStart" })).await
+    }
+
+    async fn set_cpu_config(&self, config: &VmConfig) -> Result<(), String> {
+        match config.cpu_template.as_ref().filter(|template| !template.is_empty()) {
+            Some(template) => self.put("/cpu-config", json!(template)).await.map_err(|e| {
+                format!(
+                    "error setting fc cpu config: error setting fc cpu config (template {}): {e}",
+                    template.digest()
+                )
+            }),
+            None => Ok(()),
+        }
     }
 
     pub async fn set_rate_limits(&self) -> Result<(), String> {
@@ -229,6 +242,7 @@ mod tests {
     use crate::firecracker::config::VmConfig;
     use crate::firecracker::memory_info::GuestRegion;
     use crate::firecracker::mmds::MmdsMetadata;
+    use crate::template::metadata::CpuTemplate;
 
     #[derive(Debug, Clone, PartialEq)]
     struct Call {
@@ -398,6 +412,49 @@ mod tests {
             ]
         );
         assert_eq!(calls[1].body["io_engine"], json!("Sync"));
+    }
+
+    #[tokio::test]
+    async fn a_cpu_template_is_sent_between_the_machine_config_and_the_entropy_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+        let template = CpuTemplate {
+            kvm_capabilities: vec!["!121".to_owned()],
+            ..CpuTemplate::default()
+        };
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .cpu_template(template)
+            .build();
+
+        FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
+
+        let calls = calls.lock().clone();
+        let paths: Vec<&str> = calls.iter().map(|call| call.path.as_str()).collect();
+        assert_eq!(
+            paths[4..7],
+            ["/machine-config", "/cpu-config", "/entropy"],
+            "Firecracker accepts the template only before boot, with the machine config omitting cpu_template"
+        );
+        assert_eq!(calls[5].body, json!({ "kvm_capabilities": ["!121"] }));
+    }
+
+    #[tokio::test]
+    async fn an_empty_cpu_template_sends_no_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .cpu_template(CpuTemplate::default())
+            .build();
+
+        FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
+
+        assert!(calls.lock().iter().all(|call| call.path != "/cpu-config"));
     }
 
     #[tokio::test]

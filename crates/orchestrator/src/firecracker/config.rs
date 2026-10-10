@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::template::metadata::CpuTemplate;
+
 #[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
 pub struct VmConfig {
     #[builder(default = 1)]
@@ -16,6 +18,7 @@ pub struct VmConfig {
     pub io_engine: Option<String>,
     #[builder(default)]
     pub huge_pages: bool,
+    pub cpu_template: Option<CpuTemplate>,
 }
 
 #[cfg(test)]
@@ -34,5 +37,6 @@ mod tests {
         assert_eq!(config.boot_args, "init=/sbin/init");
         assert_eq!(config.io_engine, None);
         assert!(!config.huge_pages);
+        assert_eq!(config.cpu_template, None);
     }
 }

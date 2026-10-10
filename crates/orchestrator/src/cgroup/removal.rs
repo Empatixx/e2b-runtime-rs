@@ -228,10 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn removing_kills_the_confined_threads_with_their_cgroup() {
-        let Some(mut cgroup) = Cgroup::create("test-vcpu-remove-live")
-            .ok()
-            .filter(|cgroup| has_cpu_controller(cgroup))
-        else {
+        let Some(mut cgroup) = Cgroup::create("test-vcpu-remove-live").ok().filter(has_cpu_controller) else {
             eprintln!("skipping: needs a cgroup v2 with the cpu controller delegated");
             return;
         };
