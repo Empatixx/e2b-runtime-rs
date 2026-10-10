@@ -296,7 +296,7 @@ R parses `cgroup_root` and `no_cgroups` but ignores them. G:
 - **Legacy SDK (missing; G `internal/services/legacy/*`):** for User-Agent exactly `connect-python`:
   - set `X-E2B-Legacy-SDK: true`;
   - down-convert filesystem responses to the legacy `EntryInfo{name,type,path}`.
-- **Keepalive (low):** G's `Atoi` of 0 or a negative value panics in `NewTicker`; R falls back to 90 s.
+- **Keepalive (upstream `ebe834e`):** `Keepalive-Ping-Interval` is read with `ParseInt`. A missing, invalid, zero, negative or too large value (above 9223372036 seconds) means 90 s. R matches.
 - **StreamInput data before start (low):** G dereferences nil; R returns FailedPrecondition `process not selected`.
 
 ## 5b. CPU hotplug (upstream `e7b859b`, G `internal/services/cpus`, `internal/reaper`, `internal/reexec`)
