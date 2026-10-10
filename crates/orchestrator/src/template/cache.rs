@@ -183,6 +183,17 @@ impl TemplateCache {
         template
     }
 
+    pub fn invalidate(&self, build_id: Uuid) {
+        if let Some(entry) = self.entries.lock().remove(&build_id) {
+            self.retire(entry.template);
+        }
+    }
+
+    pub fn invalidate_all(&self) {
+        let entries: Vec<Entry> = self.entries.lock().drain().map(|(_, entry)| entry).collect();
+        entries.into_iter().for_each(|entry| self.retire(entry.template));
+    }
+
     pub fn finish_upload(&self, build_id: Uuid, outcome: UploadOutcome) {
         if let Some(template) = self.lookup(build_id) {
             template.mark().finish_upload(outcome);

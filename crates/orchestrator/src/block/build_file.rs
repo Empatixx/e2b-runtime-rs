@@ -200,6 +200,10 @@ impl DiffStore {
         Ok(())
     }
 
+    pub fn clear(&self) {
+        self.entries.lock().clear();
+    }
+
     pub fn remove(&self, build_id: Uuid) {
         self.entries.lock().retain(|key, _| key.build_id != build_id);
     }

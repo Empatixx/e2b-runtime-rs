@@ -35,6 +35,18 @@ impl Binaries {
         }
     }
 
+    pub fn firecracker_versions_dir(&self) -> &Path {
+        &self.firecracker_versions_dir
+    }
+
+    pub fn kernels_dir(&self) -> &Path {
+        &self.kernels_dir
+    }
+
+    pub fn arch(&self) -> &str {
+        &self.arch
+    }
+
     pub fn firecracker_for(&self, version: &str) -> PathBuf {
         self.firecracker.clone().unwrap_or_else(|| {
             let base = self.firecracker_versions_dir.join(version);

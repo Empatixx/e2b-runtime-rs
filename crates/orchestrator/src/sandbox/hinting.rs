@@ -567,6 +567,12 @@ impl super::Sandbox {
         }
     }
 
+    pub async fn flush_balloon_totals(&self) -> Option<crate::firecracker::metrics::BalloonTotals> {
+        let vm = self.resources.vm.as_ref()?;
+        let reader = vm.metrics()?.reader();
+        reader.flush_and_read(&vm.client()).await.ok()
+    }
+
     pub fn hinting(&self) -> &Arc<SandboxHinting> {
         &self.hinting
     }

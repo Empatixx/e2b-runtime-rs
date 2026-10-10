@@ -115,6 +115,7 @@ pub fn as_context(context: &Context) -> CommandContext {
         user: user_of(context),
         workdir: context.workdir.clone(),
         env_vars: context.env_vars.clone().unwrap_or_default(),
+        ..CommandContext::default()
     }
 }
 
@@ -130,6 +131,7 @@ pub fn root_with_env(context: &Context) -> CommandContext {
         user: ROOT.to_owned(),
         workdir: None,
         env_vars: context.env_vars.clone().unwrap_or_default(),
+        ..CommandContext::default()
     }
 }
 

@@ -108,6 +108,7 @@ impl Node {
         let work_dir = self.work_dir_of(lifecycle);
         std::fs::create_dir_all(&work_dir).map_err(|e| format!("create {}: {e}", work_dir.display()))?;
         let overlay = self.layer_overlay(build, &work_dir)?;
+        let console = self.debug.lock().console.clone();
         let sandbox = Sandbox::builder()
             .id(&config.sandbox_id)
             .template_id(&config.template_id)
@@ -133,6 +134,8 @@ impl Node {
             .cmdline_args(metadata.cmdline_args.clone())
             .maybe_cpu_template(chosen.template.clone())
             .maybe_pre_boot(pre_boot)
+            .kernel_logs(console.is_some())
+            .maybe_console(console)
             .cold_boot()
             .await
             .map_err(|e| format!("create sandbox from rootfs: {e}"))?;

@@ -57,12 +57,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The template cache has no residency gauges (`orchestrator.templates.cache.entries`, pinned refs, oldest pin age, mapping bytes, layer entries by kind and generation band, unlanded layers) and no `evictions` counter by reason | later |
 | The gRPC server pings every 15 s like upstream, but hyper has no keepalive enforcement policy, so a client that pings more often than every 5 s is not sent `too_many_pings` | later |
 
-## Orchestrator: vCPU hotplug and filesystem boot
-
-| Item | Target |
-|---|---|
-| The `resume-build` dev tool (`defaultRunVcpu`) has no Rust counterpart | later |
-
 ## Orchestrator: peer chunk sharing
 
 | Item | Target |

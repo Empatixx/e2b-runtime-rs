@@ -142,6 +142,9 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        policy), uploads.rs (Uploads: background snapshot uploads, parents land first)
   src/proto.rs         tonic::include_proto!("_") of proto/orchestrator/*.proto (no package upstream)
   src/main.rs          orchestrator binary: NodeConfig::from_env, App served by axum on GRPC_PORT (5008), upstream shutdown order
+  src/bin/resume-build.rs  dev tool binary (upstream cmd/resume-build); the logic lives in src/resume_build.rs + resume_build/
+                       (options: Go-style flags via go_flag.rs, env: setupEnv, runner: resume/cmd/pause/benchmark over an in-process
+                       SandboxServer, guest: envd commands and pause signals, shell: PTY via envd/pty.rs, optimize, fph_bench, gdb)
   examples/sandbox.rs  dev runner: cold or (E2B_RESUME=1) resumed sandbox, 127.0.0.1:49983 forwarded to envd
   tests/*_contract.rs  Linux-only (root, KVM, nbd) integration tests, run in CI; proxy_contract.rs and sandbox_proxy_contract.rs
                        run anywhere (tests/proxy_contract/support.rs: backends, TLS fixtures in tests/fixtures/proxy)

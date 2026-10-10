@@ -63,7 +63,7 @@ impl FlagValue for Value {
 
 struct Connection {
     launch_darkly: Option<Client>,
-    overrides: HashMap<String, Value>,
+    overrides: parking_lot::RwLock<HashMap<String, Value>>,
     extra_contexts: Vec<FlagContext>,
 }
 
@@ -119,7 +119,7 @@ impl FlagSettings {
             api_key => Ok(FeatureFlags {
                 connection: Arc::new(Connection {
                     launch_darkly: Some(start(api_key, self.base_url().as_deref(), self.application()).await?),
-                    overrides: HashMap::new(),
+                    overrides: parking_lot::RwLock::default(),
                     extra_contexts: self.extra_contexts(),
                 }),
             }),
@@ -131,7 +131,7 @@ impl FlagSettings {
             connection: Arc::new(Connection {
                 launch_darkly: None,
                 extra_contexts: self.extra_contexts(),
-                overrides: self.overrides,
+                overrides: parking_lot::RwLock::new(self.overrides),
             }),
         }
     }
@@ -226,6 +226,10 @@ impl FeatureFlags {
         Self::builder().offline()
     }
 
+    pub fn set_override(&self, key: &str, value: Value) {
+        self.connection.overrides.write().insert(key.to_owned(), value);
+    }
+
     pub fn live(&self) -> bool {
         self.connection.launch_darkly.is_some()
     }
@@ -252,7 +256,7 @@ impl FeatureFlags {
     }
 
     fn override_of<T: FlagValue>(&self, flag: &Flag<T>) -> Option<T> {
-        self.connection.overrides.get(flag.key).and_then(T::from_json)
+        self.connection.overrides.read().get(flag.key).and_then(T::from_json)
     }
 
     fn context_for(&self, contexts: &[FlagContext]) -> Context {

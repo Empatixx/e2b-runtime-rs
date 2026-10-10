@@ -24,6 +24,8 @@ pub struct CommandContext {
     pub user: String,
     pub workdir: Option<String>,
     pub env_vars: BTreeMap<String, String>,
+    pub access_token: Option<String>,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -107,14 +109,23 @@ pub async fn run_command_confirmed(
 }
 
 async fn start_process(envd: SocketAddr, command: &str, context: &CommandContext) -> Result<Response, String> {
-    let response = reqwest::Client::builder()
+    let request = reqwest::Client::builder()
         .timeout(COMMAND_HARD_TIMEOUT)
         .build()
         .map_err(|e| format!("error starting process: {e}"))?
         .post(format!("http://{envd}{START_PATH}"))
         .header("Content-Type", CONNECT_JSON)
         .header("Connect-Protocol-Version", "1")
-        .header("Authorization", user_header(&context.user))
+        .header("Authorization", user_header(&context.user));
+    let request = match &context.access_token {
+        Some(token) => request.header("X-Access-Token", token),
+        None => request,
+    };
+    let request = match context.timeout {
+        Some(timeout) => request.header("Connect-Timeout-Ms", timeout.as_millis().to_string()),
+        None => request,
+    };
+    let response = request
         .body(envelope(&start_request(command, context)))
         .send()
         .await
@@ -322,6 +333,7 @@ mod tests {
             user: "root".to_owned(),
             workdir: None,
             env_vars: BTreeMap::from([("PATH".to_owned(), "/opt/bin".to_owned())]),
+            ..CommandContext::default()
         };
         let mut output = String::new();
 

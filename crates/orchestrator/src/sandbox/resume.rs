@@ -88,8 +88,10 @@ impl Sandbox {
         self.phases.mark("resume_vm");
         client.set_mmds(&self.mmds_metadata()).await?;
         self.phases.mark("mmds");
-        self.wait_for_envd_unless_memory_fails().await?;
-        self.phases.mark("envd_init");
+        if !self.config.resume_without_envd {
+            self.wait_for_envd_unless_memory_fails().await?;
+            self.phases.mark("envd_init");
+        }
         let probe = self.balloon.clone();
         tokio::spawn(async move { probe.prime().await });
         self.phases.note("faults", self.faults_served());

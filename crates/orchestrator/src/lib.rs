@@ -9,6 +9,7 @@ pub mod exposure;
 pub mod featureflags;
 pub mod firecracker;
 pub mod go_exec;
+pub mod go_flag;
 pub mod go_gzip;
 pub mod go_humanize;
 pub mod go_os;
@@ -27,6 +28,7 @@ pub mod peer;
 pub mod phases;
 pub mod proto;
 pub mod proxy;
+pub mod resume_build;
 pub mod routing;
 #[cfg(target_os = "linux")]
 pub mod sandbox;

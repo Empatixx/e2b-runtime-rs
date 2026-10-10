@@ -3,6 +3,7 @@ pub mod body;
 pub mod cpus;
 pub mod files;
 pub mod process;
+pub mod pty;
 pub mod quiesce;
 pub mod reclaim;
 pub mod report;

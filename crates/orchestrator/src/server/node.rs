@@ -98,7 +98,14 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 pub type BaseSandbox =
     SetHugePages<SetSandboxType<SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>>>;
 
+#[derive(Debug, Clone, Default)]
+pub struct SandboxDebug {
+    pub resume_without_envd: bool,
+    pub console: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
 pub struct Node {
+    pub debug: parking_lot::Mutex<SandboxDebug>,
     pub node_id: String,
     pub storage: Storage,
     pub peers: Arc<PeerSwitch>,
@@ -121,8 +128,8 @@ pub struct Node {
     upload_limiter: Arc<UploadLimiter>,
     pub feature_flags: FeatureFlags,
     pub volume_mounts: VolumeMounts,
-    store: Arc<DiffStore>,
-    binaries: Binaries,
+    pub store: Arc<DiffStore>,
+    pub binaries: Binaries,
     build_kernel_version: String,
     build_firecracker_version: String,
     work_dir: PathBuf,
@@ -252,6 +259,7 @@ impl Node {
             build_disk: BuildDisk::on_directory(config.cache_dir.clone(), config.template_storage.clone()),
             feature_flags: config.feature_flags.clone(),
             volume_mounts: config.volume_mounts.clone(),
+            debug: parking_lot::Mutex::default(),
             templates: Arc::new(
                 TemplateCache::new(storage.clone(), config.template_cache_dir.clone())
                     .with_flags(config.feature_flags.clone()),
@@ -909,6 +917,7 @@ impl Node {
             Artifact::Memfile,
             self.store.clone(),
         ));
+        let resume_without_envd = self.debug.lock().resume_without_envd;
         Sandbox::builder()
             .id(&config.sandbox_id)
             .template_id(&config.template_id)
@@ -942,6 +951,7 @@ impl Node {
             .use_sync_wp(use_sync_wp)
             .team_id(&config.team_id)
             .balloon_mode(balloon_mode)
+            .resume_without_envd(resume_without_envd)
             .envd(self.with_init_request_timeout(init))
             .resume(snapfile)
             .await

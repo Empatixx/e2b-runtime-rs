@@ -85,7 +85,7 @@ pub fn host_arch() -> &'static str {
     }
 }
 
-fn target_arch(value: Option<&str>) -> String {
+pub fn target_arch(value: Option<&str>) -> String {
     match value.filter(|value| !value.is_empty()) {
         None => host_arch().to_owned(),
         Some("amd64" | "x86_64") => "amd64".to_owned(),

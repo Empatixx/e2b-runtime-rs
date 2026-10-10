@@ -100,7 +100,7 @@ linux-raw-sys = { version = "0.12", default-features = false, features = ["gener
 iptables = "0.6"
 netns-rs = "0.2"
 rtnetlink = "0.23"
-rustix = { version = "1", features = ["fs", "std"] }
+rustix = { version = "1", features = ["fs", "std", "termios"] }
 tun = "0.8"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

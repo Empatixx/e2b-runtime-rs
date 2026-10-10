@@ -27,6 +27,7 @@ use super::status::Work;
 use crate::events::{PAUSED, SandboxEvent};
 use crate::featureflags::DEFER_ROOTFS_EXPORT;
 use crate::firecracker::exit::{CrashCause, ExitInfo};
+use crate::firecracker::metrics::BalloonTotals;
 use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::trace::Trace;
 use crate::network::pool::Release;
@@ -105,6 +106,13 @@ pub struct SandboxHandle {
     cleanup: Arc<AtomicBool>,
     checkpoints: Arc<CheckpointMarks>,
     health: Option<HealthCheck>,
+    pause_balloon: Arc<PauseBalloon>,
+}
+
+#[derive(Debug, Default)]
+pub struct PauseBalloon {
+    requested: AtomicBool,
+    totals: Mutex<Option<BalloonTotals>>,
 }
 
 pub struct InPlaceCheckpointGuard {
@@ -126,6 +134,14 @@ impl SandboxHandle {
 
     pub fn lifecycle(&self) -> Lifecycle {
         self.info.lock().lifecycle.clone()
+    }
+
+    pub fn record_balloon_after_pause(&self) {
+        self.pause_balloon.requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn balloon_after_pause(&self) -> Option<BalloonTotals> {
+        *self.pause_balloon.totals.lock()
     }
 
     pub async fn control_healthcheck(&self) {
@@ -211,6 +227,7 @@ struct Running {
     hint_loop: Option<HintLoop>,
     health_loop: Option<HealthLoop>,
     health: Option<HealthCheck>,
+    pause_balloon: Arc<PauseBalloon>,
     checkpoints: Arc<CheckpointMarks>,
     _work: Work,
     _execution: Span,
@@ -226,6 +243,7 @@ pub fn detached_handle(info: SandboxInfo) -> (SandboxHandle, mpsc::Receiver<Comm
         cleanup: Arc::default(),
         checkpoints: Arc::default(),
         health: None,
+        pause_balloon: Arc::default(),
     };
     (handle, receiver)
 }
@@ -246,6 +264,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         cleanup: Arc::default(),
         checkpoints: Arc::default(),
         health: health.clone(),
+        pause_balloon: Arc::default(),
     };
     let host_stats = node
         .host_stats
@@ -280,6 +299,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         hint_loop,
         health_loop: health.clone().map(HealthLoop::start),
         health,
+        pause_balloon: handle.pause_balloon.clone(),
         checkpoints: handle.checkpoints.clone(),
         _execution: execution,
         host_stats,
@@ -424,6 +444,9 @@ impl Running {
                 SnapshotLineage::of_running_build(Origin::Pause, &parent.config.build_id, false),
             )
             .await;
+        if snapshotted.is_ok() && self.pause_balloon.requested.load(Ordering::SeqCst) {
+            *self.pause_balloon.totals.lock() = self.sandbox.flush_balloon_totals().await;
+        }
         if snapshotted.is_ok() {
             self.node.events.publish(
                 SandboxEvent::new(PAUSED, &event_sandbox(&parent))
