@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::header::Header;
 use super::local_upload::UploadSigner;
+use super::object_path::validate_object_path;
 use super::spec::{Provider, StorageSpec};
 use crate::peer::switch::PeerSwitch;
 use aws::sse::ServerSideEncryption;
@@ -39,7 +40,6 @@ use gcs::ServiceAccountSigner;
 const AZURE_BLOB_TYPE_HEADER: &str = "x-ms-blob-type";
 const AZURE_BLOCK_BLOB: &str = "BlockBlob";
 const OBJECT_NOT_EXIST: &str = "object does not exist";
-const EMPTY_PREFIX_REFUSED: &str = "refusing to delete objects with an empty prefix";
 const RATE_LIMITED: &str = "object access rate limited";
 const TOO_MANY_REQUESTS_STATUS: &str = "Server returned non-2xx status code: 429";
 
@@ -216,6 +216,7 @@ impl Storage {
     }
 
     pub async fn put_object(&self, path: &str, data: Bytes, metadata: &ObjectMetadata) -> Result<(), PutError> {
+        validate_object_path(path).map_err(PutError::Failed)?;
         let options = PutOptions {
             attributes: self.attributes(metadata),
             ..PutOptions::default()
@@ -239,6 +240,7 @@ impl Storage {
     }
 
     pub async fn put_file_with(&self, path: &str, file: &Path, metadata: &ObjectMetadata) -> Result<(), String> {
+        validate_object_path(path)?;
         let mut source = tokio::fs::File::open(file)
             .await
             .map_err(|e| format!("open {}: {e}", file.display()))?;
@@ -264,6 +266,7 @@ impl Storage {
     }
 
     pub(crate) async fn get_direct(&self, path: &str) -> Result<Bytes, String> {
+        validate_object_path(path)?;
         let object = self
             .store
             .get(&ObjectPath::from(path))
@@ -273,6 +276,7 @@ impl Storage {
     }
 
     pub(crate) async fn find_direct(&self, path: &str) -> Result<Option<Bytes>, String> {
+        validate_object_path(path)?;
         match self.store.get(&ObjectPath::from(path)).await {
             Ok(object) => object.bytes().await.map(Some).map_err(|e| format!("read {path}: {e}")),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
@@ -285,6 +289,7 @@ impl Storage {
         path: &str,
         range: Range<u64>,
     ) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
+        validate_object_path(path)?;
         let options = GetOptions {
             range: Some(range.clone().into()),
             ..GetOptions::default()
@@ -302,6 +307,7 @@ impl Storage {
     }
 
     pub(crate) async fn write_to_direct(&self, path: &str, destination: &Path) -> Result<(), String> {
+        validate_object_path(path)?;
         let mut chunks = self.blob_stream(path).await?;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -354,6 +360,7 @@ impl Storage {
     }
 
     pub(crate) async fn get_range_direct(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
+        validate_object_path(path)?;
         let bytes = self
             .store
             .get_range(&ObjectPath::from(path), range.clone())
@@ -367,6 +374,7 @@ impl Storage {
     }
 
     pub(crate) async fn size_direct(&self, path: &str) -> Result<u64, String> {
+        validate_object_path(path)?;
         self.store
             .head(&ObjectPath::from(path))
             .await
@@ -375,6 +383,7 @@ impl Storage {
     }
 
     pub(crate) async fn exists_direct(&self, path: &str) -> Result<bool, String> {
+        validate_object_path(path)?;
         match self.store.head(&ObjectPath::from(path)).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -383,11 +392,8 @@ impl Storage {
     }
 
     pub async fn delete_prefix(&self, prefix: &str) -> Result<(), String> {
-        match (&self.signing, prefix.is_empty()) {
-            (Signing::S3 { .. } | Signing::Azure(_), true) => Err(EMPTY_PREFIX_REFUSED.to_owned()),
-            (Signing::Gcs(_), true) => Ok(()),
-            _ => self.delete_listed(prefix).await,
-        }
+        validate_object_path(prefix)?;
+        self.delete_listed(prefix).await
     }
 
     async fn delete_listed(&self, prefix: &str) -> Result<(), String> {
@@ -406,6 +412,7 @@ impl Storage {
     }
 
     pub fn open_blob(&self, path: &str) -> Result<(), String> {
+        validate_object_path(path)?;
         match &self.signing {
             Signing::Local { root, .. } => {
                 let parent = crate::go_os::parent(&root.join(path));
@@ -416,6 +423,7 @@ impl Storage {
     }
 
     pub async fn upload_signed_url(&self, path: &str, expires_in: Duration) -> Result<UploadUrl, String> {
+        validate_object_path(path)?;
         match &self.signing {
             Signing::Local { upload: None, .. } => {
                 Err("file system storage does not support signed URLs (no local upload endpoint configured)".to_owned())
@@ -621,8 +629,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_empty_prefix_is_refused_on_s3_and_azure_ignored_on_gcs_and_wipes_local() {
+    async fn providers() -> Vec<(&'static str, Storage)> {
         let spec = StorageSpec {
             provider: Provider::Aws,
             bucket: "b".to_owned(),
@@ -632,21 +639,97 @@ mod tests {
         let credentials = AmazonS3Builder::new()
             .with_access_key_id("test-access-key")
             .with_secret_access_key("test-secret-key");
-        let s3 = Storage::s3(&spec, credentials).unwrap();
-        let azure = Storage::open_azure_for_test();
-        let gcs = crate::storage::testing::rate_limited_gcs().await;
+        let dir = tempfile::tempdir().unwrap().keep();
+        vec![
+            ("fs", Storage::local(&dir).unwrap()),
+            ("gcs", crate::storage::testing::rate_limited_gcs().await),
+            ("aws", Storage::s3(&spec, credentials).unwrap()),
+            ("azure", Storage::open_azure_for_test()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn every_provider_refuses_an_invalid_object_path_before_touching_its_backend() {
+        let paths = [
+            "",
+            ".",
+            "/build/memfile",
+            "../build/memfile",
+            "build/../../memfile",
+            "build/../memfile",
+            "build/./memfile",
+            "build//memfile",
+            "build/",
+        ];
+        for (name, storage) in providers().await {
+            for path in paths {
+                let invalid: Result<(), String> =
+                    Err(format!("invalid object path: {}", crate::go_strconv::quote(path)));
+                let context = format!("{name} {path:?}");
+                assert_eq!(storage.open_blob(path), invalid.clone(), "open_blob {context}");
+                assert_eq!(
+                    storage.delete_prefix(path).await,
+                    invalid.clone(),
+                    "delete_prefix {context}"
+                );
+                assert_eq!(
+                    storage
+                        .upload_signed_url(path, Duration::from_secs(60))
+                        .await
+                        .map(|_| ()),
+                    invalid.clone(),
+                    "upload_signed_url {context}"
+                );
+                assert_eq!(storage.get(path).await.map(|_| ()), invalid.clone(), "get {context}");
+                assert_eq!(storage.find(path).await.map(|_| ()), invalid.clone(), "find {context}");
+                assert_eq!(
+                    storage.exists(path).await.map(|_| ()),
+                    invalid.clone(),
+                    "exists {context}"
+                );
+                assert_eq!(storage.size(path).await.map(|_| ()), invalid.clone(), "size {context}");
+                assert_eq!(
+                    storage.put(path, Bytes::from_static(b"x")).await,
+                    invalid.clone(),
+                    "put {context}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalid_prefix_deletes_nothing_on_the_local_filesystem() {
         let dir = tempfile::tempdir().unwrap();
         let local = Storage::local(dir.path()).unwrap();
         local.put("a/one", Bytes::from_static(b"1")).await.unwrap();
         local.put("b/two", Bytes::from_static(b"2")).await.unwrap();
 
-        let refused = Err("refusing to delete objects with an empty prefix".to_owned());
-        assert_eq!(s3.delete_prefix("").await, refused);
-        assert_eq!(azure.delete_prefix("").await, refused);
-        assert_eq!(gcs.delete_prefix("").await, Ok(()));
-        assert_eq!(local.delete_prefix("").await, Ok(()));
-        assert_eq!(local.exists("a/one").await, Ok(false));
-        assert_eq!(local.exists("b/two").await, Ok(false));
+        assert!(local.delete_prefix("").await.is_err());
+        assert!(local.delete_prefix("../outside").await.is_err());
+
+        assert_eq!(local.exists("a/one").await, Ok(true));
+        assert_eq!(local.exists("b/two").await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn the_paths_templates_are_stored_under_stay_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = Storage::local(dir.path()).unwrap();
+        let build = crate::storage::paths::BuildPaths::new(Uuid::new_v4());
+
+        for path in [
+            build.memfile(),
+            build.memfile_header(),
+            build.rootfs(),
+            build.rootfs_header(),
+            build.snapfile(),
+            build.metadata(),
+        ] {
+            assert_eq!(local.open_blob(&path), Ok(()), "{path}");
+            assert!(local.upload_signed_url(&path, Duration::from_secs(60)).await.is_err());
+            assert_eq!(local.exists(&path).await, Ok(false), "{path}");
+        }
+        assert_eq!(local.delete_prefix(&build.build_id.to_string()).await, Ok(()));
     }
 
     #[tokio::test]
