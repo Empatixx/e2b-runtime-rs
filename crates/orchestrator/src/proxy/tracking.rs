@@ -14,6 +14,8 @@ use tokio::sync::watch;
 use super::go_replies::Replacement;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
+const SERVED_READ_LIMIT: usize = 256 << 10;
+
 #[derive(Clone, Default)]
 pub struct Connections {
     active: Arc<Mutex<HashMap<u64, CancellationToken>>>,
@@ -183,7 +185,10 @@ impl<Io: AsyncRead + Abortable + Unpin> AsyncRead for Tracked<Io> {
             Poll::Ready(error) => Poll::Ready(Err(error)),
             Poll::Pending => {
                 let before = buf.filled().len();
-                let polled = Pin::new(&mut self.io).poll_read(cx, buf);
+                let polled = match self.probe.is_some() {
+                    true => poll_read_limited(&mut self.io, cx, buf),
+                    false => Pin::new(&mut self.io).poll_read(cx, buf),
+                };
                 if let (Poll::Ready(Ok(())), Some(probe)) = (&polled, &self.probe) {
                     probe.record(&buf.filled()[before..]);
                 }
@@ -191,6 +196,21 @@ impl<Io: AsyncRead + Abortable + Unpin> AsyncRead for Tracked<Io> {
             }
         }
     }
+}
+
+fn poll_read_limited<Io: AsyncRead + Unpin>(
+    io: &mut Io,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+) -> Poll<io::Result<()>> {
+    let limit = buf.remaining().min(SERVED_READ_LIMIT);
+    let mut limited = ReadBuf::new(buf.initialize_unfilled_to(limit));
+    let polled = Pin::new(io).poll_read(cx, &mut limited);
+    let read = limited.filled().len();
+    if polled.is_ready() {
+        buf.advance(read);
+    }
+    polled
 }
 
 impl<Io: AsyncWrite + Abortable + Unpin> Tracked<Io> {
