@@ -13,6 +13,7 @@ use crate::peer::handle::PeerHandle;
 use crate::peer::resolver::{PeerRoute, Resolution};
 use crate::peer::seekable::{PeerSeekable, SeekableError};
 use crate::peer::switch::PeerSwitch;
+use crate::storage::object_path::validate_object_path;
 
 const BLOB_FILES: [&str; 4] = ["snapfile", "metadata.json", "memfile.header", "rootfs.ext4.header"];
 const SEEKABLE_FILES: [&str; 2] = ["memfile", "rootfs.ext4"];
@@ -37,6 +38,7 @@ impl Storage {
     }
 
     pub async fn get(&self, path: &str) -> Result<Bytes, String> {
+        validate_object_path(path)?;
         match self.peer_blob(path).await {
             Some(blob) => blob.read().await,
             None => self.get_direct(path).await,
@@ -44,6 +46,7 @@ impl Storage {
     }
 
     pub async fn find(&self, path: &str) -> Result<Option<Bytes>, String> {
+        validate_object_path(path)?;
         match self.peer_blob(path).await {
             Some(blob) => blob.find().await,
             None => self.find_direct(path).await,
@@ -51,6 +54,7 @@ impl Storage {
     }
 
     pub async fn write_to(&self, path: &str, destination: &Path) -> Result<(), String> {
+        validate_object_path(path)?;
         match self.peer_blob(path).await {
             Some(blob) => blob.write_to(destination).await,
             None => self.write_to_direct(path, destination).await,
@@ -58,6 +62,7 @@ impl Storage {
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool, String> {
+        validate_object_path(path)?;
         match self.peer_blob(path).await {
             Some(blob) => blob.exists().await,
             None => self.exists_direct(path).await,
@@ -65,6 +70,7 @@ impl Storage {
     }
 
     pub async fn size(&self, path: &str) -> Result<u64, String> {
+        validate_object_path(path)?;
         match self.peer_seekable(path).await {
             Some(seekable) => match seekable.size().await {
                 Ok(size) => Ok(size),
@@ -80,6 +86,7 @@ impl Storage {
         path: &str,
         range: Range<u64>,
     ) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
+        validate_object_path(path)?;
         match self.peer_seekable(path).await {
             Some(seekable) => match seekable.open_range_reader(range.clone()).await {
                 Ok(chunks) => Ok(chunks),
@@ -91,6 +98,7 @@ impl Storage {
     }
 
     pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
+        validate_object_path(path)?;
         match self.peer_seekable(path).await {
             Some(_) => self.get_range_through_peer(path, range).await,
             None => self.get_range_direct(path, range).await,
@@ -115,22 +123,22 @@ impl Storage {
     }
 
     async fn peer_blob(&self, path: &str) -> Option<PeerBlob> {
-        let (route, build_id, name) = self.peer_route(path, &BLOB_FILES).await?;
+        let target = self.peer_target(path, &BLOB_FILES).await?;
         Some(PeerBlob {
-            handle: handle(route, build_id, name),
+            handle: target.into_handle(),
             base: self.clone(),
         })
     }
 
     async fn peer_seekable(&self, path: &str) -> Option<PeerSeekable> {
-        let (route, build_id, name) = self.peer_route(path, &SEEKABLE_FILES).await?;
+        let target = self.peer_target(path, &SEEKABLE_FILES).await?;
         Some(PeerSeekable {
-            handle: handle(route, build_id, name),
+            handle: target.into_handle(),
             base: self.clone(),
         })
     }
 
-    async fn peer_route<'a>(&self, path: &'a str, files: &[&str]) -> Option<(PeerRoute, &'a str, &'a str)> {
+    async fn peer_target<'a>(&self, path: &'a str, files: &[&str]) -> Option<PeerTarget<'a>> {
         let peers = self.peers.as_ref().filter(|_| self.peer_routed)?;
         let (build_id, name) = path.split_once('/').filter(|(_, name)| files.contains(name))?;
         let span = tracing::info_span!("resolve peer-provider", build_id, peer_resolve = tracing::field::Empty);
@@ -138,7 +146,11 @@ impl Storage {
         match resolution {
             Resolution::Peer(route) => {
                 span.record("peer_resolve", "peer");
-                Some((*route, build_id, name))
+                Some(PeerTarget {
+                    route: *route,
+                    build_id,
+                    name,
+                })
             }
             Resolution::Base(reason) => {
                 span.record("peer_resolve", reason.label());
@@ -148,13 +160,21 @@ impl Storage {
     }
 }
 
-fn handle(route: PeerRoute, build_id: &str, name: &str) -> PeerHandle {
-    PeerHandle::builder()
-        .client(route.client)
-        .build_id(build_id)
-        .name(name)
-        .uploaded(route.uploaded)
-        .build()
+struct PeerTarget<'a> {
+    route: PeerRoute,
+    build_id: &'a str,
+    name: &'a str,
+}
+
+impl PeerTarget<'_> {
+    fn into_handle(self) -> PeerHandle {
+        PeerHandle::builder()
+            .client(self.route.client)
+            .build_id(self.build_id)
+            .name(self.name)
+            .uploaded(self.route.uploaded)
+            .build()
+    }
 }
 
 #[cfg(test)]
