@@ -10,6 +10,7 @@ use tokio_util::task::TaskTracker;
 use tonic::{Request, Response, Status};
 
 use super::builds::{BuildCache, BuildInfo, BuildResult};
+use super::config::BuildVm;
 use super::hash::validate_files_hash;
 use super::index::layer_files_path;
 use super::logs::LogQuery;
@@ -19,7 +20,7 @@ use crate::go_time;
 use crate::proto::template_service_server::TemplateService;
 use crate::proto::{
     InitLayerFileUploadRequest, InitLayerFileUploadResponse, LogLevel, LogsDirection, TemplateBuildDeleteRequest,
-    TemplateBuildMetadata, TemplateBuildState, TemplateBuildStatusReason, TemplateBuildStatusResponse,
+    TemplateBuildMetadata, TemplateBuildState, TemplateBuildStatusReason, TemplateBuildStatusResponse, TemplateConfig,
     TemplateCreateRequest, TemplateStatusRequest, template_config,
 };
 use crate::storage::backend::Storage;
@@ -30,9 +31,12 @@ const PANIC_MESSAGE: &str = "fatal error occurred during template build, please 
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 pub trait TemplateBuilder: Send + Sync + 'static {
+    fn resolve_vm(&self, template: &TemplateConfig) -> Result<BuildVm, Status>;
+
     fn build(
         &self,
         request: TemplateCreateRequest,
+        vm: BuildVm,
         info: Arc<BuildInfo>,
         uploads: Arc<LayerUploads>,
     ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>>;
@@ -73,7 +77,7 @@ impl<B: TemplateBuilder> TemplateServer<B> {
         self.tasks.wait().await;
     }
 
-    fn start(&self, mut request: TemplateCreateRequest, info: Arc<BuildInfo>, build_id: String) {
+    fn start(&self, mut request: TemplateCreateRequest, vm: BuildVm, info: Arc<BuildInfo>, build_id: String) {
         if request.version.as_deref().is_none_or(str::is_empty) {
             request.version = Some(DEFAULT_VERSION.to_owned());
         }
@@ -89,7 +93,7 @@ impl<B: TemplateBuilder> TemplateServer<B> {
             info.log
                 .push(LogLevel::Info, format!("Building template {template_id}/{build_id}"));
             let uploads = Arc::new(LayerUploads::new(info.clone()));
-            let build = builder.build(request, info.clone(), uploads.clone());
+            let build = builder.build(request, vm, info.clone(), uploads.clone());
             let finished = AssertUnwindSafe(until_cancelled(build, &info))
                 .catch_unwind()
                 .await
@@ -206,11 +210,12 @@ impl<B: TemplateBuilder> TemplateService for TemplateServer<B> {
             .iter()
             .filter_map(|step| step.files_hash.as_deref())
             .try_for_each(|hash| validate_files_hash(hash).map_err(Status::invalid_argument))?;
+        let vm = self.builder.resolve_vm(&config)?;
         let info = self
             .builds
             .register(&config.build_id)
             .map_err(|e| Status::unknown(format!("error while creating build cache: {e}")))?;
-        self.start(request, info, config.build_id);
+        self.start(request, vm, info, config.build_id);
         Ok(Response::new(()))
     }
 
@@ -334,9 +339,14 @@ mod tests {
     struct Stub;
 
     impl TemplateBuilder for Stub {
+        fn resolve_vm(&self, _template: &TemplateConfig) -> Result<BuildVm, Status> {
+            Ok(BuildVm::default())
+        }
+
         fn build(
             &self,
             request: TemplateCreateRequest,
+            _vm: BuildVm,
             info: Arc<BuildInfo>,
             _uploads: Arc<LayerUploads>,
         ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>> {

@@ -26,8 +26,8 @@ use crate::network::slot::{HostSlots, Slot};
 use crate::proto::LogLevel;
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::sandbox_builder::{
-    IsUnset, SetEnvdTimeout, SetInitPath, SetIoEngine, SetKernelLogs, SetMemoryMib, SetSkipEnvd, SetSlot, SetVcpus,
-    SetWithoutMmds, State,
+    IsUnset, SetBalloon, SetCmdlineArgs, SetCpuTemplate, SetEnvdTimeout, SetInitPath, SetIoEngine, SetKernelLogs,
+    SetMemoryMib, SetSkipEnvd, SetSlot, SetVcpus, SetWithoutMmds, State,
 };
 use crate::sandbox::config::{PreBoot, SandboxBuilder};
 use crate::sandbox::snapshot::LocalSnapshot;
@@ -122,8 +122,15 @@ pub struct LayerBuild<'a> {
     pub build_origin: &'a str,
 }
 
-pub type BootOptioned<S> =
-    SetSkipEnvd<SetEnvdTimeout<SetKernelLogs<SetInitPath<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<S>>>>>>>>;
+pub type BootOptioned<S> = SetBalloon<
+    SetCpuTemplate<
+        SetCmdlineArgs<
+            SetSkipEnvd<
+                SetEnvdTimeout<SetKernelLogs<SetInitPath<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<S>>>>>>>,
+            >,
+        >,
+    >,
+>;
 
 pub struct BuildSlot {
     slot: Slot,
@@ -263,6 +270,9 @@ impl LayerExecutor<'_> {
         S::KernelLogs: IsUnset,
         S::EnvdTimeout: IsUnset,
         S::SkipEnvd: IsUnset,
+        S::CmdlineArgs: IsUnset,
+        S::CpuTemplate: IsUnset,
+        S::Balloon: IsUnset,
     {
         builder
             .vcpus(shape.vcpus as u32)
@@ -273,6 +283,9 @@ impl LayerExecutor<'_> {
             .kernel_logs(self.env.development)
             .envd_timeout(ENVD_WAIT)
             .skip_envd()
+            .cmdline_args(self.settings.cmdline_args.clone())
+            .maybe_cpu_template(self.settings.cpu_template.clone())
+            .balloon(self.settings.balloon)
     }
 
     pub async fn lease_slot(&self, sandbox_id: &str, context: &str) -> Result<BuildSlot, BuildError> {

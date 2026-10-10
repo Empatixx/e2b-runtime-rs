@@ -88,6 +88,22 @@ impl BootOptions {
     }
 }
 
+pub fn parse_cmdline_args(fragment: &str) -> Result<BTreeMap<String, String>, String> {
+    fragment
+        .split_whitespace()
+        .map(|field| {
+            let (name, value) = field.split_once('=').unwrap_or((field, ""));
+            match name.is_empty() {
+                true => Err(format!(
+                    "guest kernel cmdline parameter {} has an empty name",
+                    crate::go_strconv::quote(field)
+                )),
+                false => Ok((name.to_owned(), value.to_owned())),
+            }
+        })
+        .collect()
+}
+
 pub fn validate_cmdline_args(args: &BTreeMap<String, String>) -> Result<(), String> {
     args.keys()
         .find(|name| RESERVED.contains(&name.as_str()))
@@ -148,6 +164,40 @@ mod tests {
             validate_cmdline_args(&options.cmdline_args),
             Err("guest kernel cmdline parameter \"init\" is reserved by the orchestrator".to_owned())
         );
+    }
+
+    #[test]
+    fn a_fragment_parses_like_go() {
+        let args = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect()
+        };
+        let cases = [
+            ("", args(&[])),
+            ("   \t ", args(&[])),
+            ("psi=1", args(&[("psi", "1")])),
+            ("psi=1 nokaslr", args(&[("psi", "1"), ("nokaslr", "")])),
+            ("  psi=1   nokaslr  ", args(&[("psi", "1"), ("nokaslr", "")])),
+            ("foo=a=b", args(&[("foo", "a=b")])),
+            ("init=/evil", args(&[("init", "/evil")])),
+        ];
+        for (fragment, want) in cases {
+            assert_eq!(parse_cmdline_args(fragment), Ok(want), "fragment {fragment:?}");
+        }
+        assert_eq!(
+            parse_cmdline_args("=x"),
+            Err("guest kernel cmdline parameter \"=x\" has an empty name".to_owned())
+        );
+    }
+
+    #[test]
+    fn parsing_then_validating_rejects_reserved_parameters() {
+        for fragment in ["init=/evil", "psi=1 init=/evil", "clocksource=tsc"] {
+            let parsed = parse_cmdline_args(fragment).unwrap();
+            assert!(validate_cmdline_args(&parsed).is_err(), "fragment {fragment:?}");
+        }
     }
 
     #[test]

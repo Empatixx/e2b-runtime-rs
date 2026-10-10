@@ -1,6 +1,7 @@
 mod envd_binary;
 mod flags;
 mod settings;
+mod vm;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use std::path::PathBuf;
 pub use envd_binary::{envd_version, resolve_build_binary};
 pub use flags::BuildFlags;
 pub use settings::BuildSettings;
+pub use vm::BuildVm;
 
 use crate::featureflags::FeatureFlags;
 

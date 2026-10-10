@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::envd::EnvdInit;
+use crate::firecracker::client::BalloonCaps;
 use crate::firecracker::kernel_args::BootOptions;
 use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::prefetch::source::PrefetchSettings;
@@ -78,6 +79,7 @@ pub struct SandboxConfig {
     pub throwaway: bool,
     pub use_sync_wp: bool,
     pub balloon_mode: BalloonMode,
+    pub balloon: BalloonCaps,
     pub team_id: String,
     pub start_type: &'static str,
 }
@@ -133,6 +135,7 @@ impl SandboxConfig {
         #[builder(default)] throwaway: bool,
         #[builder(default)] use_sync_wp: bool,
         #[builder(default)] balloon_mode: BalloonMode,
+        #[builder(default)] balloon: BalloonCaps,
         #[builder(default)] team_id: String,
         #[builder(default = START_CREATE)] start_type: &'static str,
     ) -> Self {
@@ -178,6 +181,7 @@ impl SandboxConfig {
             throwaway,
             use_sync_wp,
             balloon_mode,
+            balloon,
             team_id,
             start_type,
         }

@@ -1,4 +1,9 @@
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
+
+use crate::firecracker::kernel_args::render;
+use crate::template::metadata::CpuTemplate;
 
 pub const INDEX_VERSION: &str = "v2";
 const GO_NIL: &str = "<nil>";
@@ -23,16 +28,28 @@ pub struct BaseKey<'a> {
     pub provision_version: &'a str,
     pub disk_size_mb: i64,
     pub source: &'a str,
+    pub cmdline_args: &'a BTreeMap<String, String>,
+    pub cpu_template: Option<&'a CpuTemplate>,
     pub envd_memory_protection: bool,
 }
 
 impl BaseKey<'_> {
     pub fn hash(&self) -> String {
         let disk_size_mb = self.disk_size_mb.to_string();
-        let protection = format!("{ENVD_MEMORY_PROTECTION_KEY}:{ENVD_MEMORY_MIN_MIB}:{ENVD_MEMORY_LOW_MIB}");
-        let keys = [self.provision_version, &disk_size_mb, self.source]
-            .into_iter()
-            .chain(self.envd_memory_protection.then_some(protection.as_str()));
+        let cmdline = (!self.cmdline_args.is_empty()).then(|| format!("cmdline:{}", render(self.cmdline_args)));
+        let cpu_template = self
+            .cpu_template
+            .filter(|template| !template.is_empty())
+            .map(|template| format!("cpu-template:{}", template.canonical()));
+        let protection = self
+            .envd_memory_protection
+            .then(|| format!("{ENVD_MEMORY_PROTECTION_KEY}:{ENVD_MEMORY_MIN_MIB}:{ENVD_MEMORY_LOW_MIB}"));
+        let keys = [self.provision_version, &disk_size_mb, self.source].into_iter().chain(
+            [&cmdline, &cpu_template, &protection]
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+        );
         hash_keys(INDEX_VERSION, keys)
     }
 }
@@ -82,14 +99,81 @@ mod tests {
         assert_eq!(hash_keys("base", []), sha("base"));
     }
 
-    #[test]
-    fn phase_hashes_use_upstream_keys() {
-        let key = BaseKey {
+    fn base_key<'a>(cmdline_args: &'a BTreeMap<String, String>, cpu_template: Option<&'a CpuTemplate>) -> BaseKey<'a> {
+        BaseKey {
             provision_version: "7",
             disk_size_mb: 1024,
             source: "debian:12",
+            cmdline_args,
+            cpu_template,
             envd_memory_protection: false,
+        }
+    }
+
+    fn tsc(khz: i64) -> CpuTemplate {
+        CpuTemplate {
+            x86_tsc_khz: khz,
+            ..CpuTemplate::default()
+        }
+    }
+
+    #[test]
+    fn cmdline_args_enter_the_base_key_only_when_set() {
+        let none = BTreeMap::new();
+        let psi = BTreeMap::from([("psi".to_owned(), "1".to_owned())]);
+        let nokaslr = BTreeMap::from([("nokaslr".to_owned(), String::new())]);
+        let several = BTreeMap::from([
+            ("psi".to_owned(), "1".to_owned()),
+            ("nokaslr".to_owned(), String::new()),
+            ("a".to_owned(), "b".to_owned()),
+        ]);
+
+        assert_eq!(base_key(&none, None).hash(), sha("v2;7;1024;debian:12"));
+        assert_eq!(base_key(&psi, None).hash(), sha("v2;7;1024;debian:12;cmdline:psi=1"));
+        assert_ne!(base_key(&psi, None).hash(), base_key(&nokaslr, None).hash());
+        assert_eq!(
+            base_key(&several, None).hash(),
+            sha("v2;7;1024;debian:12;cmdline:a=b nokaslr psi=1")
+        );
+    }
+
+    #[test]
+    fn a_cpu_template_enters_the_base_key_only_when_it_changes_something() {
+        let none = BTreeMap::new();
+        let psi = BTreeMap::from([("psi".to_owned(), "1".to_owned())]);
+        let fast = tsc(3_200_000);
+        let slow = tsc(2_400_000);
+        let with_capability = CpuTemplate {
+            kvm_capabilities: vec!["!121".to_owned()],
+            ..tsc(3_200_000)
         };
+        let reordered = CpuTemplate::parse(r#"{"kvm_capabilities":["!121"],"x86_tsc_khz":3200000}"#)
+            .unwrap()
+            .unwrap();
+        let empty = CpuTemplate::default();
+
+        assert_eq!(
+            base_key(&none, Some(&fast)).hash(),
+            sha("v2;7;1024;debian:12;cpu-template:{\"x86_tsc_khz\":3200000}")
+        );
+        assert_eq!(base_key(&none, Some(&empty)).hash(), base_key(&none, None).hash());
+        assert_ne!(base_key(&none, Some(&fast)).hash(), base_key(&none, Some(&slow)).hash());
+        assert_ne!(
+            base_key(&none, Some(&fast)).hash(),
+            base_key(&none, Some(&with_capability)).hash()
+        );
+        assert_eq!(
+            base_key(&none, Some(&with_capability)).hash(),
+            base_key(&none, Some(&reordered)).hash()
+        );
+        assert_ne!(base_key(&psi, Some(&fast)).hash(), base_key(&psi, None).hash());
+        assert_ne!(base_key(&psi, Some(&fast)).hash(), base_key(&none, Some(&fast)).hash());
+    }
+
+    #[test]
+    fn phase_hashes_use_upstream_keys() {
+        let none = BTreeMap::new();
+        let key = base_key(&none, None);
         assert_eq!(key.hash(), sha("v2;7;1024;debian:12"));
         assert_eq!(
             BaseKey {

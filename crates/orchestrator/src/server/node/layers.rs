@@ -12,9 +12,10 @@ use crate::block::overlay::Overlay;
 use crate::envd::{EnvdDefaults, EnvdInit};
 use crate::featureflags::FlagContext;
 use crate::firecracker::version::supports_memfd;
+use crate::memory::balloon_mode::BalloonMode;
 use crate::sandbox::config::SandboxBuilder;
 use crate::sandbox::config::sandbox_builder::{
-    SetMemfile, SetMemoryBase, SetPrefetch, SetPrefetchSettings, SetRootfs, SetUseMemfd,
+    SetBalloonMode, SetMemfile, SetMemoryBase, SetPrefetch, SetPrefetchSettings, SetRootfs, SetUseMemfd,
 };
 use crate::sandbox::snapshot::filesystem::FilesystemSnapshot;
 use crate::server::retry::Failure;
@@ -39,7 +40,8 @@ pub struct LayerSandbox<'a> {
     pub firecracker_version: &'a str,
 }
 
-pub type ResumedLayer = SetUseMemfd<SetPrefetchSettings<SetPrefetch<SetMemfile<SetRootfs<BaseSandbox>>>>>;
+pub type ResumedLayer =
+    SetBalloonMode<SetUseMemfd<SetPrefetchSettings<SetPrefetch<SetMemfile<SetRootfs<BaseSandbox>>>>>>;
 
 impl Node {
     pub async fn layer_source(&self, build_id: &str) -> Result<LayerSource, String> {
@@ -166,6 +168,7 @@ impl Node {
                         BUILD_SANDBOX_TYPE,
                     )),
             )
+            .balloon_mode(BalloonMode::stamped(layer.source.metadata.balloon))
             .envd(self.build_envd(EnvdDefaults {
                 user: super::default_user(Some(&layer.source.metadata)),
                 workdir: None,

@@ -8,6 +8,14 @@ pub fn supports_huge_pages(firecracker_version: &str) -> bool {
     release_line(firecracker_version).is_some_and(|release| (release.major, release.minor) >= (1, 7))
 }
 
+pub fn supports_free_page_reporting(firecracker_version: &str) -> bool {
+    supports_memfd(firecracker_version)
+}
+
+pub fn supports_free_page_hinting(firecracker_version: &str) -> bool {
+    supports_memfd(firecracker_version)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirecrackerVersion {
     e2b_release: Option<Version>,
@@ -114,6 +122,18 @@ mod tests {
         assert!(!supports_memfd("v1.12.1_a41d3fb"));
         assert!(!supports_memfd("v1.10-0.3.0"));
         assert!(!supports_memfd("v1.13.9"));
+    }
+
+    #[test]
+    fn the_balloon_features_need_release_line_1_14() {
+        for version in ["v1.14-0.2.0", "v1.14.1_621718e", "v1.15.0"] {
+            assert!(supports_free_page_reporting(version), "{version}");
+            assert!(supports_free_page_hinting(version), "{version}");
+        }
+        for version in ["v1.12.1_a41d3fb", "v1.10-0.3.0", "latest"] {
+            assert!(!supports_free_page_reporting(version), "{version}");
+            assert!(!supports_free_page_hinting(version), "{version}");
+        }
     }
 
     #[test]

@@ -146,6 +146,8 @@ fn base_hash(settings: &BuildSettings, request: &BaseRequest, source_key: &str) 
         provision_version: &provision_version,
         disk_size_mb: request.disk_size_mb,
         source: source_key,
+        cmdline_args: &settings.cmdline_args,
+        cpu_template: settings.cpu_template.as_ref(),
         envd_memory_protection: matches!(request.source, BaseSource::Image { .. })
             && settings.flags.envd_memory_protection(),
     }
@@ -254,7 +256,8 @@ mod tests {
             feature_flags: flags,
             ..crate::builder::config::BuilderConfig::from_vars(&Default::default())
         };
-        BuildSettings::resolve(&config, "template", "team").await.unwrap()
+        let vm = crate::builder::config::BuildVm::resolve(&config, "template", "team").unwrap();
+        BuildSettings::resolve(&config, "template", "team", vm).await.unwrap()
     }
 
     fn template_source() -> BaseSource {
@@ -305,6 +308,8 @@ mod tests {
                 provision_version: "7",
                 disk_size_mb: 1024,
                 source: "debian:12",
+                cmdline_args: &Default::default(),
+                cpu_template: None,
                 envd_memory_protection: false,
             }
             .hash()

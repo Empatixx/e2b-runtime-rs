@@ -17,6 +17,7 @@ use opentelemetry::KeyValue;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::Instant;
 
+use self::balloon::mode_of;
 use self::config::{Rootfs, SandboxBuilder, SandboxConfig, sandbox_builder};
 use self::resources::Resources;
 use self::vcpu_limit::{boot_cpu_quota, guest_cpu_count, move_limit_to_vcpu_threads, record_boot_failure};
@@ -196,6 +197,7 @@ impl Sandbox {
                 .map_err(|e| format!("pre-boot hook failed: {e}"))?;
         }
         self.limit_cgroup_before_boot(cpu_quota)?;
+        self.stamp_balloon_mode(mode_of(self.config.balloon));
         let client = self.spawn_firecracker(rootfs).await?;
         self.boot(&client).await?;
         move_limit_to_vcpu_threads(
@@ -289,6 +291,7 @@ impl Sandbox {
             .maybe_io_engine(self.config.io_engine.as_deref())
             .huge_pages(self.config.huge_pages)
             .maybe_cpu_template(self.config.cpu_template.clone())
+            .balloon(self.config.balloon)
             .build();
         let metadata = self.config.mmds.then(|| self.mmds_metadata());
         client.boot(&vm_config, metadata.as_ref()).await

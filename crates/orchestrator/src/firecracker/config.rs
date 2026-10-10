@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use super::client::BalloonCaps;
 use crate::template::metadata::CpuTemplate;
 
 #[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
@@ -19,6 +20,8 @@ pub struct VmConfig {
     #[builder(default)]
     pub huge_pages: bool,
     pub cpu_template: Option<CpuTemplate>,
+    #[builder(default)]
+    pub balloon: BalloonCaps,
 }
 
 #[cfg(test)]
@@ -38,5 +41,6 @@ mod tests {
         assert_eq!(config.io_engine, None);
         assert!(!config.huge_pages);
         assert_eq!(config.cpu_template, None);
+        assert_eq!(config.balloon, BalloonCaps::default());
     }
 }

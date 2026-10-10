@@ -61,6 +61,7 @@ impl FirecrackerClient {
         self.put("/machine-config", machine_config(config)).await?;
         self.set_cpu_config(config).await?;
         self.put("/entropy", entropy_device()).await?;
+        self.install_balloon(config.balloon).await?;
         if let Some(metadata) = metadata {
             self.set_mmds(metadata).await?;
         }
@@ -76,6 +77,16 @@ impl FirecrackerClient {
                 )
             }),
             None => Ok(()),
+        }
+    }
+
+    async fn install_balloon(&self, balloon: BalloonCaps) -> Result<(), String> {
+        match balloon.reporting || balloon.hinting {
+            true => self
+                .put("/balloon", balloon_device(balloon))
+                .await
+                .map_err(|e| format!("error installing balloon device: error installing balloon device: {e}")),
+            false => Ok(()),
         }
     }
 
@@ -291,6 +302,15 @@ fn entropy_device() -> serde_json::Value {
                 "refill_time": ENTROPY_REFILL_TIME
             }
         }
+    })
+}
+
+fn balloon_device(balloon: BalloonCaps) -> serde_json::Value {
+    json!({
+        "amount_mib": 0,
+        "deflate_on_oom": false,
+        "free_page_reporting": balloon.reporting,
+        "free_page_hinting": balloon.hinting
     })
 }
 
@@ -529,6 +549,68 @@ mod tests {
         FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
 
         assert!(calls.lock().iter().all(|call| call.path != "/cpu-config"));
+    }
+
+    #[tokio::test]
+    async fn a_balloon_is_installed_after_the_entropy_device_like_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .balloon(BalloonCaps {
+                reporting: true,
+                hinting: false,
+            })
+            .build();
+
+        FirecrackerClient::new(socket).boot(&config, None).await.unwrap();
+
+        let calls = calls.lock().clone();
+        let paths: Vec<&str> = calls.iter().map(|call| call.path.as_str()).collect();
+        assert_eq!(paths[5..8], ["/entropy", "/balloon", "/actions"]);
+        assert_eq!(
+            calls[6].body,
+            json!({ "amount_mib": 0, "deflate_on_oom": false, "free_page_reporting": true, "free_page_hinting": false })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_balloon_feature_means_no_balloon_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let calls = fake_firecracker(socket.clone(), Faults::default()).await;
+
+        FirecrackerClient::new(socket).boot(&config(), None).await.unwrap();
+
+        assert!(calls.lock().iter().all(|call| call.path != "/balloon"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_balloon_names_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let faults = Faults {
+            fail: Some("/balloon"),
+            ..Faults::default()
+        };
+        let _calls = fake_firecracker(socket.clone(), faults).await;
+        let config = VmConfig::builder()
+            .kernel("/opt/vmlinux")
+            .rootfs("/fc-vm/rootfs.ext4")
+            .balloon(BalloonCaps {
+                reporting: false,
+                hinting: true,
+            })
+            .build();
+
+        let error = FirecrackerClient::new(socket).boot(&config, None).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            "error installing balloon device: error installing balloon device: PUT /balloon: 400 Bad Request: {\"fault_message\":\"bad cfg\"}"
+        );
     }
 
     #[tokio::test]

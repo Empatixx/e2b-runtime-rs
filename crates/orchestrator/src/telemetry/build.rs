@@ -7,7 +7,29 @@ use opentelemetry::metrics::{Counter, Histogram, Meter};
 
 const METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/template/build/metrics";
 
+const SERVER_METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/template/server";
+
 static METER: LazyLock<Meter> = LazyLock::new(|| global::meter(METER_NAME));
+
+static SERVER_METER: LazyLock<Meter> = LazyLock::new(|| global::meter(SERVER_METER_NAME));
+
+static CMDLINE_ARGS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SERVER_METER
+        .u64_counter("orchestrator.template.build.cmdline_args")
+        .with_description("Template builds by the guest kernel cmdline parameters applied")
+        .with_unit("{build}")
+        .build()
+});
+
+static CPU_TEMPLATE: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SERVER_METER
+        .u64_counter("orchestrator.template.build.cpu_template")
+        .with_description(
+            "Template builds by the digest of the custom Firecracker CPU template applied and by result (result=applied|rejected|none|malformed)",
+        )
+        .with_unit("{build}")
+        .build()
+});
 
 static DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
     METER
@@ -108,4 +130,18 @@ pub fn record_cache_result(team_id: &str, phase: &str, step_type: &str, hit: boo
 
 pub fn record_rootfs_size(team_id: &str, bytes: u64) {
     ROOTFS_SIZE.record(bytes, &[team(team_id)]);
+}
+
+pub fn record_build_cmdline_args(args: &str) {
+    CMDLINE_ARGS.add(1, &[KeyValue::new("args", args.to_owned())]);
+}
+
+pub fn record_build_cpu_template(digest: &str, result: &'static str) {
+    CPU_TEMPLATE.add(
+        1,
+        &[
+            KeyValue::new("template", digest.to_owned()),
+            KeyValue::new("result", result),
+        ],
+    );
 }

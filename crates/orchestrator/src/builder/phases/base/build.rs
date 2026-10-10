@@ -19,10 +19,12 @@ use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISI
 use crate::envd::version::is_at_least;
 use crate::go_exec::GoCommand;
 use crate::proto::LogLevel;
-use crate::sandbox::config::sandbox_builder::{SetIoEngine, SetMemoryMib, SetVcpus, SetWithoutMmds};
+use crate::sandbox::config::sandbox_builder::{SetBalloon, SetIoEngine, SetMemoryMib, SetVcpus, SetWithoutMmds};
 use crate::sandbox::config::{Rootfs, SandboxBuilder};
 use crate::server::node::BaseSandbox;
 use crate::template::metadata::TemplateMetadata;
+
+type ProvisionSandbox = SetBalloon<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<BaseSandbox>>>>>;
 
 const BUILD_DIR_MODE: u32 = 0o777;
 const ROOTFS_FILE: &str = "rootfs.filesystem.build";
@@ -185,10 +187,7 @@ impl BaseBuild<'_> {
         }
     }
 
-    fn sandbox_builder(
-        &self,
-        sandbox_id: &str,
-    ) -> SandboxBuilder<SetWithoutMmds<SetIoEngine<SetMemoryMib<SetVcpus<BaseSandbox>>>>> {
+    fn sandbox_builder(&self, sandbox_id: &str) -> SandboxBuilder<ProvisionSandbox> {
         self.phase
             .env
             .node
@@ -197,6 +196,7 @@ impl BaseBuild<'_> {
             .memory_mib(self.phase.request.memory_mb as u32)
             .io_engine(DEFAULT_IO_ENGINE)
             .without_mmds()
+            .balloon(self.phase.settings.balloon)
     }
 
     async fn check_provisioned(&self, ext4: &Ext4) -> Result<(), BuildError> {

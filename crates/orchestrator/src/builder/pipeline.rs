@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
+use tonic::Status;
 
 use super::builds::BuildInfo;
-use super::config::{BuildSettings, envd_version};
+use super::config::{BuildSettings, BuildVm, envd_version};
 use super::index::LayerIndex;
 use super::phase::{BuildError, LayerResult, Phase, run_phases};
 use super::phases::BuildEnv;
@@ -122,9 +123,14 @@ fn with_default_user(version: &str) -> Result<bool, BuildError> {
 }
 
 impl TemplateBuilder for PhasePipeline {
+    fn resolve_vm(&self, template: &TemplateConfig) -> Result<BuildVm, Status> {
+        BuildVm::resolve(&self.env.config, &template.template_id, &template.team_id)
+    }
+
     fn build(
         &self,
         request: TemplateCreateRequest,
+        vm: BuildVm,
         info: Arc<BuildInfo>,
         uploads: Arc<LayerUploads>,
     ) -> BoxFuture<'static, Result<TemplateBuildMetadata, BuildError>> {
@@ -133,7 +139,7 @@ impl TemplateBuilder for PhasePipeline {
         async move {
             let started = Instant::now();
             let team_id = request.template.clone().unwrap_or_default().team_id;
-            let built = pipeline.run(request, info, uploads).await;
+            let built = pipeline.run(request, vm, info, uploads).await;
             record_build_outcome(&team_id, started.elapsed(), &built);
             built.map(|(metadata, _)| metadata)
         }
@@ -161,6 +167,7 @@ impl PhasePipeline {
     async fn run(
         &self,
         request: TemplateCreateRequest,
+        vm: BuildVm,
         info: Arc<BuildInfo>,
         uploads: Arc<LayerUploads>,
     ) -> Result<(TemplateBuildMetadata, u64), BuildError> {
@@ -168,7 +175,7 @@ impl PhasePipeline {
         let pipeline = PhasePipeline { env: env.clone() };
         async move {
             let template = request.template.clone().unwrap_or_default();
-            let settings = BuildSettings::resolve(&env.config, &template.template_id, &template.team_id)
+            let settings = BuildSettings::resolve(&env.config, &template.template_id, &template.team_id, vm)
                 .await
                 .map(Arc::new)
                 .map_err(BuildError::Internal)?;

@@ -19,9 +19,10 @@ use crate::builder::logs::ScopedLog;
 use crate::builder::phase::{BuildError, LayerResult, Phase, PhaseMeta, internal_context};
 use crate::envd::EnvdDefaults;
 use crate::envd::process::CommandContext;
+use crate::firecracker::client::BalloonCaps;
 use crate::go_time;
 use crate::proto::LogLevel;
-use crate::template::metadata::{Balloon, Context, Start, TemplateMetadata, TemplateVersions};
+use crate::template::metadata::{Balloon, Context, CpuTemplate, Start, TemplateMetadata, TemplateVersions};
 
 const FINALIZE: &str = "finalize";
 const FINALIZE_TEXT: &str = "Finalizing template build";
@@ -57,8 +58,15 @@ impl FinalizePhase {
             firecracker_version: settings.firecracker_version.clone(),
         };
         let start = start_of(&source.metadata, &self.start_command, &self.ready_command);
+        let vm = BootedVm {
+            template,
+            vcpus: self.build.vcpus,
+            cmdline_args: settings.cmdline_args.clone(),
+            cpu_template: settings.cpu_template.clone(),
+            balloon: settings.balloon,
+        };
         LayerResult {
-            metadata: final_metadata(&source.metadata, start, template, self.build.vcpus),
+            metadata: final_metadata(&source.metadata, start, vm),
             cached: false,
             hash,
         }
@@ -276,22 +284,30 @@ fn envd_defaults(context: &Context, context_defaults: bool) -> EnvdDefaults {
     }
 }
 
-fn final_metadata(
-    source: &TemplateMetadata,
-    start: Option<Start>,
+#[derive(Debug, Clone, Default)]
+struct BootedVm {
     template: TemplateVersions,
     vcpus: i64,
-) -> TemplateMetadata {
+    cmdline_args: BTreeMap<String, String>,
+    cpu_template: Option<CpuTemplate>,
+    balloon: BalloonCaps,
+}
+
+fn final_metadata(source: &TemplateMetadata, start: Option<Start>, vm: BootedVm) -> TemplateMetadata {
+    let cpu_template = vm.cpu_template.filter(|template| !template.is_empty());
     TemplateMetadata {
         start,
-        template,
-        cmdline_args: BTreeMap::new(),
-        balloon: Some(Balloon::default()),
-        cpu_template: None,
-        build_cpu_template: None,
+        template: vm.template,
+        cmdline_args: vm.cmdline_args,
+        balloon: Some(Balloon {
+            reporting: vm.balloon.reporting,
+            hinting: vm.balloon.hinting,
+        }),
+        cpu_template: cpu_template.clone(),
+        build_cpu_template: cpu_template,
         ..source.clone()
     }
-    .with_vcpu_count(vcpus)
+    .with_vcpu_count(vm.vcpus)
 }
 
 fn configure_script(template_id: &str, build_id: &str) -> String {
@@ -384,7 +400,11 @@ mod tests {
                 ..TemplateMetadata::default()
             };
 
-            let metadata = final_metadata(&source, None, TemplateVersions::default(), build);
+            let vm = BootedVm {
+                vcpus: build,
+                ..BootedVm::default()
+            };
+            let metadata = final_metadata(&source, None, vm);
 
             assert_eq!(metadata.vcpu_count, build, "{name}");
         }
@@ -453,6 +473,113 @@ mod tests {
             "curl -f localhost"
         );
         assert_eq!(ready_command("tpl", &start("", "true")), "true");
+    }
+
+    fn args(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    fn tsc(khz: i64) -> CpuTemplate {
+        CpuTemplate {
+            x86_tsc_khz: khz,
+            ..CpuTemplate::default()
+        }
+    }
+
+    #[test]
+    fn the_layer_stamps_this_builds_cmdline_args() {
+        let cases = [
+            (
+                "this build wins",
+                args(&[("psi", "1")]),
+                args(&[("nokaslr", "")]),
+                args(&[("nokaslr", "")]),
+            ),
+            (
+                "none clears inherited ones",
+                args(&[("psi", "1")]),
+                args(&[]),
+                args(&[]),
+            ),
+            ("nothing stays empty", args(&[]), args(&[]), args(&[])),
+        ];
+        for (name, inherited, build, want) in cases {
+            let source = TemplateMetadata {
+                cmdline_args: inherited,
+                ..TemplateMetadata::default()
+            };
+            let vm = BootedVm {
+                cmdline_args: build,
+                ..BootedVm::default()
+            };
+
+            assert_eq!(final_metadata(&source, None, vm).cmdline_args, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_layer_stamps_this_builds_cpu_template() {
+        let cases = [
+            (
+                "this build wins",
+                Some(tsc(3_200_000)),
+                Some(tsc(2_400_000)),
+                Some(tsc(2_400_000)),
+            ),
+            ("none clears an inherited one", Some(tsc(3_200_000)), None, None),
+            ("nothing stays empty", None, None, None),
+            (
+                "an empty template is not recorded",
+                None,
+                Some(CpuTemplate::default()),
+                None,
+            ),
+        ];
+        for (name, inherited, build, want) in cases {
+            let source = TemplateMetadata {
+                cpu_template: inherited.clone(),
+                build_cpu_template: inherited,
+                ..TemplateMetadata::default()
+            };
+            let vm = BootedVm {
+                cpu_template: build,
+                ..BootedVm::default()
+            };
+
+            let metadata = final_metadata(&source, None, vm);
+
+            assert_eq!(metadata.cpu_template, want, "{name}");
+            assert_eq!(metadata.build_cpu_template, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_layer_stamps_the_balloon_this_build_booted_with() {
+        let source = TemplateMetadata {
+            balloon: Some(Balloon {
+                reporting: true,
+                hinting: true,
+            }),
+            ..TemplateMetadata::default()
+        };
+        let vm = BootedVm {
+            balloon: BalloonCaps {
+                reporting: false,
+                hinting: true,
+            },
+            ..BootedVm::default()
+        };
+
+        assert_eq!(
+            final_metadata(&source, None, vm).balloon,
+            Some(Balloon {
+                reporting: false,
+                hinting: true
+            })
+        );
     }
 
     #[test]
