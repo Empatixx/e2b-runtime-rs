@@ -32,6 +32,7 @@ use super::header::Header;
 use super::local_upload::UploadSigner;
 use super::object_path::validate_object_path;
 use super::spec::{Provider, StorageSpec};
+use super::upload_limit::{UploadLimiter, UploadTarget, acquire_upload_slot, max_upload_tasks};
 use crate::peer::switch::PeerSwitch;
 use aws::sse::ServerSideEncryption;
 use azure::{AzureBackend, AzureEnv, AzureSigner};
@@ -82,6 +83,7 @@ pub struct Storage {
     signing: Signing,
     peers: Option<Arc<PeerSwitch>>,
     peer_routed: bool,
+    upload_limiter: Option<Arc<UploadLimiter>>,
 }
 
 #[derive(Clone)]
@@ -181,6 +183,7 @@ impl Storage {
             signing,
             peers: None,
             peer_routed: false,
+            upload_limiter: None,
         }
     }
 
@@ -190,6 +193,7 @@ impl Storage {
             signing: signing(store),
             peers: None,
             peer_routed: false,
+            upload_limiter: None,
         }
     }
 
@@ -204,6 +208,7 @@ impl Storage {
             },
             peers: None,
             peer_routed: false,
+            upload_limiter: None,
         })
     }
 
@@ -244,9 +249,23 @@ impl Storage {
         let mut source = tokio::fs::File::open(file)
             .await
             .map_err(|e| format!("open {}: {e}", file.display()))?;
-        let writer =
-            BufWriter::new(self.store.clone(), ObjectPath::from(path)).with_attributes(self.attributes(metadata));
+        let _slot = acquire_upload_slot(self.upload_limiter.as_ref()).await;
+        let concurrency = self
+            .upload_target()
+            .part_concurrency(max_upload_tasks(self.upload_limiter.as_ref()));
+        let writer = BufWriter::new(self.store.clone(), ObjectPath::from(path))
+            .with_attributes(self.attributes(metadata))
+            .with_max_concurrency(concurrency);
         upload(&mut source, writer, path).await
+    }
+
+    fn upload_target(&self) -> UploadTarget {
+        match self.signing {
+            Signing::Local { .. } => UploadTarget::Local,
+            Signing::S3 { .. } => UploadTarget::S3,
+            Signing::Gcs(_) => UploadTarget::Gcs,
+            Signing::Azure(_) => UploadTarget::Azure,
+        }
     }
 
     fn attributes(&self, metadata: &ObjectMetadata) -> Attributes {
@@ -752,6 +771,25 @@ mod tests {
     async fn put_file_uploads_large_files_in_parts() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::local(&dir.path().join("store")).unwrap();
+        let content: Vec<u8> = (0..25 << 20).map(|i: u32| (i % 251) as u8).collect();
+        let source = dir.path().join("memfile");
+        std::fs::write(&source, &content).unwrap();
+
+        storage.put_file("t/memfile", &source).await.unwrap();
+
+        assert_eq!(storage.get("t/memfile").await.unwrap(), Bytes::from(content));
+    }
+
+    #[tokio::test]
+    async fn a_negative_upload_task_limit_still_uploads_large_files() {
+        let flags = crate::featureflags::FeatureFlags::builder()
+            .override_flag("gcloud-max-tasks", -1)
+            .offline();
+        let limiter = UploadLimiter::new(flags).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::local(&dir.path().join("store"))
+            .unwrap()
+            .with_upload_limiter(limiter);
         let content: Vec<u8> = (0..25 << 20).map(|i: u32| (i % 251) as u8).collect();
         let source = dir.path().join("memfile");
         std::fs::write(&source, &content).unwrap();

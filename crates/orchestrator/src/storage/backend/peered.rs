@@ -14,6 +14,7 @@ use crate::peer::resolver::{PeerRoute, Resolution};
 use crate::peer::seekable::{PeerSeekable, SeekableError};
 use crate::peer::switch::PeerSwitch;
 use crate::storage::object_path::validate_object_path;
+use crate::storage::upload_limit::UploadLimiter;
 
 const COMPRESSION_SUFFIXES: [&str; 2] = [".zstd", ".lz4"];
 
@@ -21,6 +22,13 @@ impl Storage {
     pub fn with_peers(self, peers: Arc<PeerSwitch>) -> Self {
         Self {
             peers: Some(peers),
+            ..self
+        }
+    }
+
+    pub fn with_upload_limiter(self, limiter: Arc<UploadLimiter>) -> Self {
+        Self {
+            upload_limiter: Some(limiter),
             ..self
         }
     }
@@ -286,6 +294,7 @@ mod tests {
         let (_dir, routed_storage) = routed(chunks, true).await;
         let plain = Storage {
             peer_routed: false,
+            upload_limiter: None,
             ..routed_storage
         };
         put(&plain, "build-1/snapfile", b"base").await;

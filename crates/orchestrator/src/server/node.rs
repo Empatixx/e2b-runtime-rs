@@ -27,6 +27,7 @@ use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
 use super::pause_disk::{BuildDisk, PauseDiskReservation};
+use crate::storage::upload_limit::UploadLimiter;
 use super::registry::{Lifecycle, Registry};
 use super::retry::Failure;
 use super::scheduling::from_headers;
@@ -98,6 +99,7 @@ pub struct Node {
     admission: Admission,
     pub max_sandboxes: MaxSandboxes,
     pub build_disk: Arc<BuildDisk>,
+    upload_limiter: Arc<UploadLimiter>,
     pub feature_flags: FeatureFlags,
     store: Arc<DiffStore>,
     binaries: Binaries,
@@ -177,7 +179,11 @@ pub struct Lifetime {
 impl Node {
     pub fn new(config: &NodeConfig) -> Result<Self, String> {
         let peers = PeerSwitch::new(config.feature_flags.clone());
-        let storage = config.open_template_storage()?.with_peers(peers.clone());
+        let upload_limiter = UploadLimiter::new(config.feature_flags.clone())?;
+        let storage = config
+            .open_template_storage()?
+            .with_peers(peers.clone())
+            .with_upload_limiter(upload_limiter.clone());
         let uploads = Arc::new(Uploads::default());
         uploads.follow_peers(PeerParents {
             peers: peers.clone(),
@@ -199,6 +205,7 @@ impl Node {
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission,
             max_sandboxes,
+            upload_limiter,
             build_disk: BuildDisk::on_directory(config.cache_dir.clone(), config.template_storage.clone()),
             feature_flags: config.feature_flags.clone(),
             volume_mounts: config.volume_mounts.clone(),
@@ -233,6 +240,7 @@ impl Node {
         self.admission
             .start_refresh(self.feature_flags.clone(), LIMIT_REFRESH_INTERVAL);
         self.network.start();
+        self.upload_limiter.start_refresh();
         tokio::spawn(self.templates.clone().run_eviction());
         let runtime_flags = self.runtime_flags.clone();
         tokio::spawn(
