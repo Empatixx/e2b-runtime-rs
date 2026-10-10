@@ -57,7 +57,11 @@ async fn metrics_report_the_guest_like_upstream() {
                 keys,
                 [
                     "cpu_count",
+                    "cpu_possible",
+                    "cpu_target",
+                    "cpu_target_attempts",
                     "cpu_used_pct",
+                    "cpu_write_pending_ms",
                     "disk_total",
                     "disk_used",
                     "mem_cache",
@@ -71,6 +75,29 @@ async fn metrics_report_the_guest_like_upstream() {
         }
         false => assert_eq!((status.as_u16(), body.as_str()), (500, "")),
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn metrics_carry_the_cpu_target() {
+    let cpus = std::sync::Arc::new(common::FakeCpus::with_state(8, 16));
+    {
+        let mut state = cpus.state.lock();
+        state.target = 8;
+        state.attempts = 2;
+        state.write_pending = std::time::Duration::from_millis(1500);
+    }
+    let addr = common::spawn_server_with_cpus(cpus).await;
+
+    let res = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
+
+    assert_eq!(res.status(), 200);
+    let metrics: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(metrics["cpu_possible"], 16);
+    assert_eq!(metrics["cpu_target"], 8);
+    assert_eq!(metrics["cpu_target_attempts"], 2);
+    assert_eq!(metrics["cpu_write_pending_ms"], 1500);
+    assert!(metrics.get("cpu_count").is_some());
 }
 
 #[test]

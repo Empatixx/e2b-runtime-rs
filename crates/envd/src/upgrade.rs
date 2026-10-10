@@ -100,4 +100,19 @@ mod tests {
             ("user", Some(""), true)
         );
     }
+
+    #[test]
+    fn helper_pids_survive_the_handover_blob_without_raising_the_schema() {
+        use buffa::Message;
+
+        let state = HandoverState {
+            helper_pids: vec![4242, 4243],
+            ..Default::default()
+        };
+
+        let decoded = HandoverState::decode_from_slice(&state.encode_to_vec()).unwrap();
+
+        assert_eq!(decoded.helper_pids, vec![4242, 4243]);
+        assert_eq!(schema_for(&decoded), SCHEMA_BASE);
+    }
 }

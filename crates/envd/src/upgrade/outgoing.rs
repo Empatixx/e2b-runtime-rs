@@ -70,6 +70,7 @@ async fn swap(state: &Arc<AppState>, new_bin: Option<&str>) -> String {
 fn hand_over(state: &AppState, running: &[(Arc<Process>, bool)], new_bin: Option<&str>) -> String {
     let watchers = state.watchers.lock();
     let forwards = state.forwards.lock();
+    let helpers = state.children.export_hold();
     let mut handover = HandoverState {
         from_ver: VERSION.to_owned(),
         watchers: export_watchers(&watchers),
@@ -87,6 +88,7 @@ fn hand_over(state: &AppState, running: &[(Arc<Process>, bool)], new_bin: Option
         guest_frozen_cgroups: state.freezer.guest_frozen_paths(),
         defaults: handover_defaults(&state.defaults()).into(),
         terminated: state.processes.retained().iter().map(handover_exit).collect(),
+        helper_pids: helpers.pids.clone(),
         ..Default::default()
     };
     handover.schema = schema_for(&handover);

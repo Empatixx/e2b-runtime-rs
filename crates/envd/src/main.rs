@@ -5,8 +5,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use envd::cgroups::ProcessType;
+use envd::cpus::sysfs::WRITE_ONLINE;
 use envd::logs::layer::JsonLines;
 use envd::port::forward::Forwarder;
+use envd::reexec::{self, Helper};
 use envd::upgrade::HandoverReport;
 use envd::{app::AppState, config, host, router, upgrade};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -19,8 +21,15 @@ const READ_BUFFER: usize = 64 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(640);
 const HANDOVER_FALLBACK_THAW: Duration = Duration::from_secs(60);
 
+const HELPERS: &[Helper] = &[WRITE_ONLINE];
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    reexec::main(HELPERS);
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::parse(std::env::args()).inspect_err(|e| eprintln!("{e}"))?;
     if config.version {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -53,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state.config.resume_handover {
         resume_handover(&state).await;
     }
+    state.cpus.clone().start();
     if !state.config.is_not_fc {
         let poller = state.clone();
         tokio::spawn(async move {

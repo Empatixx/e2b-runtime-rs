@@ -19,6 +19,7 @@ An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179
 | Log exporter to the MMDS collector | done | `logs/` |
 | connect-python legacy conversion | done | `middleware/legacy_sdk.rs`, `controllers/filesystem/legacy.rs` |
 | `/envs` Go encoder, DeadlineExceeded start errors | done | |
+| `cpuCount` on `/init`, `X-Envd-Cpus`, CPU hotplug worker, helper children handed over on upgrade (upstream `e7b859b`) | done | `cpus/`, `reaper.rs`, `reexec.rs`, `controllers/init.rs` |
 | Version | `0.9.0` as upstream | |
 
 Not ported on purpose:
@@ -45,6 +46,10 @@ Not ported on purpose:
   | `cpu_used_pct` | f32 | gopsutil `cpu.Percent(0,false)[0]`: delta since the previous call, rounded to 2 decimals only when > 0 |
   | `mem_total`, `mem_used`, `mem_cache` | u64 | gopsutil v4.26.6: `Used = Total − Available` (`MemAvailable`, else `Cached + Free`); `Cached` includes `SReclaimable` |
   | `disk_used`, `disk_total` | u64 | `statfs("/")`: `total = Blocks*Bsize`, `used = total − Bavail*Bsize` |
+  | `cpu_possible` | u32 | CPUs the guest can bring online (`/sys/devices/system/cpu/possible`) |
+  | `cpu_target` | u32 | online count last requested, 0 when none was |
+  | `cpu_target_attempts` | u32 | reconcile runs since the target was set |
+  | `cpu_write_pending_ms` | u64 | how long a CPU online or offline write has been in the kernel, 0 when none is |
   | `oom_kills` | `*[]OOMKill` | `omitempty`, see below |
 
 - `oom_kills` appears only when the watcher exists and `Kills()` returns ok. `nil` omits the key; an empty list is `[]`.
@@ -292,6 +297,19 @@ R parses `cgroup_root` and `no_cgroups` but ignores them. G:
   - down-convert filesystem responses to the legacy `EntryInfo{name,type,path}`.
 - **Keepalive (low):** G's `Atoi` of 0 or a negative value panics in `NewTicker`; R falls back to 90 s.
 - **StreamInput data before start (low):** G dereferences nil; R returns FailedPrecondition `process not selected`.
+
+## 5b. CPU hotplug (upstream `e7b859b`, G `internal/services/cpus`, `internal/reaper`, `internal/reexec`)
+
+`/init` accepts `cpuCount` (integer). The guest boots with `maxcpus=` below the vCPU count Firecracker created, so the extra CPUs are possible but offline until envd writes `/sys/devices/system/cpu/cpuN/online`.
+
+- **Header `X-Envd-Cpus`** on every 204 from `/init`: `{"online":4,"possible":16,"target":8}`. `rejected` holds the refusal text of this request's `cpuCount` and is left out otherwise. Retry counters are not in the header.
+- **Refused count:** the `/init` still answers 204. A count outside `1..possible` reads `cpu target 32 outside 1..16`. Only a request that is newest by timestamp can move the target.
+- **Target file:** `/run/e2b/cpu-target`, written through `.tmp` and a rename, read back at start. A file longer than 64 bytes or not a valid target is ignored.
+- **Worker:** one CPU at a time, lowest offline first when growing, highest online first when shrinking, CPU0 never. It reads the target again before every CPU and checks the online mask after every write.
+- **Retries:** backoff 1 s doubling to 30 s. The worker gives up after 10 runs in a row that changed no CPU, until a new target arrives.
+- **Writer child:** each write runs in a child (`/proc/self/exe cpu-online PATH 0|1`, marked by `E2B_REEXEC_HELPER`), because a bring-up the kernel never finishes cannot be interrupted. The child accepts only a `cpuN/online` path.
+- **Handover:** the children's pids travel in `helper_pids` of the handover blob (schema unchanged). The new envd reaps them and waits for them before it reconciles.
+- Not Firecracker (`-isnotfc`): a manager that accepts everything and reports zeros.
 
 ## 6. `/files`
 

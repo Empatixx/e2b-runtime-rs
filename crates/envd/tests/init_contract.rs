@@ -133,3 +133,115 @@ async fn init_accepts_bodies_over_two_megabytes() {
         .unwrap();
     assert_eq!(res.status(), 204);
 }
+
+mod cpu_count {
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+
+    use super::common::{FakeCpus, spawn_server_with_cpus};
+
+    async fn post_init(addr: std::net::SocketAddr, body: Value) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/init"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn cpus_header(response: &reqwest::Response) -> Value {
+        serde_json::from_str(response.headers()["x-envd-cpus"].to_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn records_the_target_and_reports_it_on_the_header() {
+        let cpus = Arc::new(FakeCpus::with_state(4, 16));
+        let addr = spawn_server_with_cpus(cpus.clone()).await;
+
+        let response = post_init(addr, json!({ "cpuCount": 8 })).await;
+
+        assert_eq!(response.status(), 204);
+        assert_eq!(cpus.recorded(), vec![8]);
+        assert_eq!(
+            cpus_header(&response),
+            json!({ "online": 4, "possible": 16, "target": 8 })
+        );
+    }
+
+    #[tokio::test]
+    async fn without_cpu_count_the_target_is_untouched_but_the_state_is_still_reported() {
+        let cpus = Arc::new(FakeCpus::with_state(4, 16));
+        let addr = spawn_server_with_cpus(cpus.clone()).await;
+
+        let response = post_init(addr, json!({})).await;
+
+        assert_eq!(response.status(), 204);
+        assert!(cpus.recorded().is_empty());
+        assert_eq!(
+            cpus_header(&response),
+            json!({ "online": 4, "possible": 16, "target": 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_count_does_not_fail_the_init_and_is_named_on_the_header() {
+        let cpus = Arc::new(FakeCpus {
+            refusal: Some("cpu target 32 outside 1..16".to_owned()),
+            ..FakeCpus::with_state(4, 16)
+        });
+        let addr = spawn_server_with_cpus(cpus.clone()).await;
+
+        let response = post_init(addr, json!({ "cpuCount": 32 })).await;
+
+        assert_eq!(response.status(), 204);
+        assert!(cpus.recorded().is_empty());
+        assert_eq!(cpus_header(&response)["rejected"], "cpu target 32 outside 1..16");
+
+        let next = post_init(addr, json!({})).await;
+        assert!(cpus_header(&next).get("rejected").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_request_does_not_move_the_target() {
+        let cpus = Arc::new(FakeCpus::with_state(4, 16));
+        let addr = spawn_server_with_cpus(cpus.clone()).await;
+        let now = chrono::Utc::now();
+        let minute_ago = now - chrono::Duration::minutes(1);
+
+        let first = post_init(addr, json!({ "cpuCount": 8, "timestamp": now.to_rfc3339() })).await;
+        assert_eq!(first.status(), 204);
+        let stale = post_init(addr, json!({ "cpuCount": 2, "timestamp": minute_ago.to_rfc3339() })).await;
+        assert_eq!(stale.status(), 204);
+
+        assert_eq!(cpus.recorded(), vec![8]);
+    }
+
+    #[tokio::test]
+    async fn the_header_carries_only_the_counts() {
+        let cpus = Arc::new(FakeCpus::with_state(6, 16));
+        {
+            let mut state = cpus.state.lock();
+            state.target = 8;
+            state.attempts = 3;
+        }
+        let addr = spawn_server_with_cpus(cpus).await;
+
+        let response = post_init(addr, json!({})).await;
+
+        assert_eq!(response.status(), 204);
+        assert_eq!(
+            cpus_header(&response),
+            json!({ "online": 6, "possible": 16, "target": 8 })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_integer_count_is_a_bad_request() {
+        let addr = spawn_server_with_cpus(Arc::new(FakeCpus::with_state(4, 16))).await;
+
+        let response = post_init(addr, json!({ "cpuCount": 8.5 })).await;
+
+        assert_eq!(response.status(), 400);
+    }
+}

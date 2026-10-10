@@ -19,6 +19,7 @@ pub struct InitRequest {
     pub ca_bundle: Option<String>,
     pub volume_mounts: Option<Vec<VolumeMount>>,
     pub lifecycle_id: Option<String>,
+    pub cpu_count: Option<i64>,
 }
 
 struct Fields {
@@ -70,6 +71,7 @@ fn assign(mut request: InitRequest, key: &str, value: &RawValue) -> Result<InitR
         () if named("hyperloopIP") => request.hyperloop_ip = optional(value)?,
         () if named("caBundle") => request.ca_bundle = optional(value)?,
         () if named("lifecycleID") => request.lifecycle_id = optional(value)?,
+        () if named("cpuCount") => request.cpu_count = optional(value)?,
         () if named("volumeMounts") => request.volume_mounts = volume_mounts(value)?,
         () => {}
     }
@@ -163,5 +165,15 @@ mod tests {
         );
         assert_eq!(request.lifecycle_id.as_deref(), Some("l1"));
         assert!(parse(br#"{"volumeMounts":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn cpu_count_is_an_optional_integer() {
+        assert_eq!(parse(br#"{"cpuCount":8}"#).unwrap().cpu_count, Some(8));
+        assert_eq!(parse(br#"{"cpuCount":null}"#).unwrap().cpu_count, None);
+        assert_eq!(parse(b"{}").unwrap().cpu_count, None);
+        assert_eq!(parse(br#"{"cpuCount":-1}"#).unwrap().cpu_count, Some(-1));
+        assert!(parse(br#"{"cpuCount":8.5}"#).is_err());
+        assert!(parse(br#"{"cpuCount":"8"}"#).is_err());
     }
 }

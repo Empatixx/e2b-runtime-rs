@@ -12,6 +12,9 @@ use crate::cgroups::memory::MemoryProtection;
 use crate::config::Config;
 use crate::controllers::filesystem::watch::FileWatcher;
 use crate::controllers::process::registry::Processes;
+use crate::cpus::hotplug::Hotplug;
+use crate::cpus::sysfs::KernelSysfs;
+use crate::cpus::{CpuManager, NoopCpus};
 use crate::envvars::EnvVars;
 use crate::host::cacerts::CaCertInstaller;
 use crate::host::metrics::{CpuUsage, read_metrics};
@@ -20,6 +23,7 @@ use crate::host::nfs::NfsMounts;
 use crate::host::oom::OomWatcher;
 use crate::logs::exporter::LogExporter;
 use crate::port::forward::Forwards;
+use crate::reaper::Registry;
 use crate::upgrade::HandoverReport;
 
 #[derive(Debug, Clone)]
@@ -60,10 +64,24 @@ pub struct AppState {
     pub watchers: Arc<Mutex<HashMap<String, FileWatcher>>>,
     pub forwards: Forwards,
     pub handover: Mutex<Option<HandoverReport>>,
+    pub children: Arc<Registry>,
+    pub cpus: Arc<dyn CpuManager>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Arc<Self> {
+        let children = Arc::new(Registry::default());
+        let cpus: Arc<dyn CpuManager> = match config.is_not_fc {
+            true => Arc::new(NoopCpus),
+            false => Hotplug::builder()
+                .sys(KernelSysfs::builder().children(children.clone()).build())
+                .children(children.clone())
+                .build(),
+        };
+        Self::with_cpus(config, children, cpus)
+    }
+
+    pub fn with_cpus(config: Config, children: Arc<Registry>, cpus: Arc<dyn CpuManager>) -> Arc<Self> {
         let cpu = CpuUsage::start();
         let cgroups = CgroupManager::create(&config, || read_metrics(&cpu).map(|metrics| metrics.mem_total));
         let memory = MemoryProtection::read(Path::new(PROC_SELF_CGROUP), cgroups.walk_root());
@@ -78,6 +96,8 @@ impl AppState {
             watchers: Arc::default(),
             forwards: Forwards::default(),
             handover: Mutex::new(None),
+            children,
+            cpus,
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
             freezer,

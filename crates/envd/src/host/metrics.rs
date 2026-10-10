@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 
 use super::oom::OomKill;
+use crate::cpus::State;
 use crate::util::go_json;
 
 const KIB: u64 = 1024;
@@ -14,6 +15,10 @@ pub struct Metrics {
     pub cpu_count: u32,
     #[serde(serialize_with = "go_json::float32")]
     pub cpu_used_pct: f32,
+    pub cpu_possible: u32,
+    pub cpu_target: u32,
+    pub cpu_target_attempts: u32,
+    pub cpu_write_pending_ms: u64,
     pub mem_total: u64,
     pub mem_used: u64,
     pub mem_cache: u64,
@@ -21,6 +26,18 @@ pub struct Metrics {
     pub disk_total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oom_kills: Option<Vec<OomKill>>,
+}
+
+impl Metrics {
+    pub fn with_cpus(self, cpus: State) -> Self {
+        Self {
+            cpu_possible: cpus.possible as u32,
+            cpu_target: cpus.target as u32,
+            cpu_target_attempts: cpus.attempts as u32,
+            cpu_write_pending_ms: cpus.write_pending.as_millis() as u64,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -72,6 +89,10 @@ pub fn read_metrics(cpu: &CpuUsage) -> io::Result<Metrics> {
         ts: chrono::Utc::now().timestamp(),
         cpu_count,
         cpu_used_pct: rounded_percent(percent),
+        cpu_possible: 0,
+        cpu_target: 0,
+        cpu_target_attempts: 0,
+        cpu_write_pending_ms: 0,
         mem_total: memory.total,
         mem_used: memory.used,
         mem_cache: memory.cached,
@@ -223,6 +244,10 @@ mod tests {
             ts: 1,
             cpu_count: 2,
             cpu_used_pct: 0.0,
+            cpu_possible: 8,
+            cpu_target: 4,
+            cpu_target_attempts: 2,
+            cpu_write_pending_ms: 1500,
             mem_total: 3,
             mem_used: 4,
             mem_cache: 5,
@@ -232,12 +257,43 @@ mod tests {
         };
         assert_eq!(
             go_json::encode(&metrics).unwrap(),
-            "{\"ts\":1,\"cpu_count\":2,\"cpu_used_pct\":0,\"mem_total\":3,\"mem_used\":4,\"mem_cache\":5,\"disk_used\":6,\"disk_total\":7}\n"
+            "{\"ts\":1,\"cpu_count\":2,\"cpu_used_pct\":0,\"cpu_possible\":8,\"cpu_target\":4,\"cpu_target_attempts\":2,\"cpu_write_pending_ms\":1500,\"mem_total\":3,\"mem_used\":4,\"mem_cache\":5,\"disk_used\":6,\"disk_total\":7}\n"
         );
         let with_kills = Metrics {
             oom_kills: Some(Vec::new()),
             ..metrics
         };
         assert!(go_json::encode(&with_kills).unwrap().ends_with(",\"oom_kills\":[]}\n"));
+    }
+
+    #[test]
+    fn the_cpu_manager_state_fills_the_hotplug_fields() {
+        let metrics = Metrics {
+            ts: 1,
+            cpu_count: 8,
+            cpu_used_pct: 0.0,
+            cpu_possible: 0,
+            cpu_target: 0,
+            cpu_target_attempts: 0,
+            cpu_write_pending_ms: 0,
+            mem_total: 0,
+            mem_used: 0,
+            mem_cache: 0,
+            disk_used: 0,
+            disk_total: 0,
+            oom_kills: None,
+        };
+        let state = State {
+            online: 8,
+            possible: 16,
+            target: 8,
+            attempts: 2,
+            write_pending: std::time::Duration::from_millis(1500),
+        };
+
+        let filled = metrics.with_cpus(state);
+
+        assert_eq!((filled.cpu_count, filled.cpu_possible, filled.cpu_target), (8, 16, 8));
+        assert_eq!((filled.cpu_target_attempts, filled.cpu_write_pending_ms), (2, 1500));
     }
 }

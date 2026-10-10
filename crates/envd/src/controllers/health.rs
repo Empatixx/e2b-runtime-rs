@@ -19,7 +19,7 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
     ];
     let metrics = read_metrics(&state.cpu).map(|metrics| Metrics {
         oom_kills: state.oom_kills.as_ref().and_then(|watcher| watcher.kills()),
-        ..metrics
+        ..metrics.with_cpus(state.cpus.status())
     });
     match metrics
         .map_err(|e| e.to_string())

@@ -72,6 +72,7 @@ fn resume_frozen(state: &Arc<AppState>) -> Result<Option<HandoverReport>, String
             .iter()
             .map(|mount| (mount.path.clone(), mount.lifecycle_id.clone())),
     );
+    handover.helper_pids.iter().for_each(|pid| state.children.adopt(*pid));
     let readopted = state.forwards.import(&handover.forwards);
     if readopted > 0 {
         eprintln!("envd: re-adopted {readopted} forwarded port(s) after handover");

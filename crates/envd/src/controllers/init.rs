@@ -19,12 +19,14 @@ use self::request::InitRequest;
 use crate::app::AppState;
 use crate::host;
 use crate::host::mmds_route::pin_mmds_route;
+use crate::util::go_json;
 use crate::util::rate_limit::RateLimit;
 
 const VERSION_HEADER: &str = "X-Envd-Version";
 const MEMORY_HEADER: &str = "X-Envd-Memory";
 const DEFAULTS_HEADER: &str = "X-Envd-Defaults";
 const HANDOVER_HEADER: &str = "X-Envd-Handover";
+const CPUS_HEADER: &str = "X-Envd-Cpus";
 const EVENTS_ADDRESS: &str = "E2B_EVENTS_ADDRESS";
 const MMDS_POLL_LIMIT: Duration = Duration::from_secs(60);
 
@@ -93,11 +95,11 @@ async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
     let freeze_audit = resume_freeze::audit_header(state);
     let applied = match is_newest(state, request.timestamp) {
         true => apply(state, request).await,
-        false => Ok(()),
+        false => Ok(None),
     };
     resume_freeze::unfreeze_user_cgroups(state).await;
     let mut response = match applied {
-        Ok(()) => initialized(state),
+        Ok(cpu_rejection) => initialized(state, cpu_rejection),
         Err(e) => {
             tracing::error!("Failed to set data: {e}");
             (StatusCode::BAD_REQUEST, e).into_response()
@@ -109,7 +111,7 @@ async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
     response
 }
 
-fn initialized(state: &Arc<AppState>) -> Response {
+fn initialized(state: &Arc<AppState>, cpu_rejection: Option<String>) -> Response {
     state.initialized.store(true, Ordering::SeqCst);
     let poller = state.clone();
     tokio::spawn(async move {
@@ -123,11 +125,29 @@ fn initialized(state: &Arc<AppState>) -> Response {
         fallback: !defaults.user_delivered,
     };
     let reported = serde_json::to_string(&effective).unwrap_or_default();
-    (
+    let mut response = (
         StatusCode::NO_CONTENT,
         [("cache-control", "no-store"), (DEFAULTS_HEADER, reported.as_str())],
     )
-        .into_response()
+        .into_response();
+    if let Some(report) = cpu_report(state, cpu_rejection).and_then(|report| report.parse().ok()) {
+        response.headers_mut().insert(CPUS_HEADER, report);
+    }
+    response
+}
+
+fn cpu_report(state: &AppState, rejected: Option<String>) -> Option<String> {
+    let status = state.cpus.status();
+    let report = CpuReport {
+        online: status.online,
+        possible: status.possible,
+        target: status.target,
+        rejected,
+    };
+    serde_json::to_string(&report)
+        .inspect_err(|e| tracing::warn!(error = %e, "could not encode the cpu state report"))
+        .ok()
+        .map(|json| go_json::escape_html(&json))
 }
 
 async fn mmds_hash(state: &AppState) -> Option<String> {
@@ -151,6 +171,15 @@ async fn mmds_hash(state: &AppState) -> Option<String> {
 }
 
 #[derive(Serialize)]
+struct CpuReport {
+    online: usize,
+    possible: usize,
+    target: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected: Option<String>,
+}
+
+#[derive(Serialize)]
 struct EffectiveDefaults {
     user: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,7 +193,7 @@ fn is_newest(state: &AppState, timestamp: Option<DateTime<Utc>>) -> bool {
         .is_none_or(|nanos| state.last_set_time.fetch_max(nanos, Ordering::SeqCst) <= nanos)
 }
 
-async fn apply(state: &Arc<AppState>, request: InitRequest) -> Result<(), String> {
+async fn apply(state: &Arc<AppState>, request: InitRequest) -> Result<Option<String>, String> {
     if let Some(timestamp) = request.timestamp {
         host::sync_clock(timestamp);
     }
@@ -200,7 +229,15 @@ async fn apply(state: &Arc<AppState>, request: InitRequest) -> Result<(), String
             .await
             .map_err(|e| format!("failed to setup NFS volumes: {e}"))?;
     }
-    Ok(())
+    Ok(request.cpu_count.and_then(|count| set_cpu_target(state, count)))
+}
+
+fn set_cpu_target(state: &AppState, count: i64) -> Option<String> {
+    state
+        .cpus
+        .set_target(count)
+        .inspect_err(|e| tracing::warn!(error = %e, cpu_count = count, "ignoring cpu count"))
+        .err()
 }
 
 fn setup_hyperloop(state: &AppState, address: &str) {

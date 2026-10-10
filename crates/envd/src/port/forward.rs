@@ -53,10 +53,8 @@ impl Forwards {
                         },
                     },
                 );
-                let pid = Pid::from_raw(forward.socat_pid);
-                tokio::task::spawn_blocking(move || {
-                    let _ = nix::sys::wait::waitpid(pid, None);
-                });
+                let pid = forward.socat_pid;
+                tokio::task::spawn_blocking(move || crate::reaper::reap(pid));
             })
             .count()
     }
