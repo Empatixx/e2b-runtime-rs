@@ -18,13 +18,14 @@ use crate::builder::oci::pull::Puller;
 use crate::builder::phases::BuildEnv;
 use crate::builder::pipeline::PhasePipeline;
 use crate::builder::service::{TemplateServer, TemplateStorages};
+use crate::proto::chunk_service_server::ChunkServiceServer;
 use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
 use crate::proto::template_service_server::TemplateServiceServer;
-use crate::telemetry::grpc::trace_grpc;
 use crate::proto::volume_service_server::VolumeServiceServer;
-
+use crate::telemetry::grpc::trace_grpc;
 use crate::volumes::VolumeServer;
+
 const CONSUMER_STATUS_CHECK_GRACE: Duration = Duration::from_secs(15);
 
 pub const COMMIT: &str = match option_env!("E2B_COMMIT") {
@@ -87,12 +88,13 @@ impl App {
     pub fn router(&self) -> Router {
         let (_, grpc_health) = tonic_health::server::health_reporter();
         let routes = Routes::new(SandboxServiceServer::new(SandboxServer::new(self.node.clone())))
+            .add_service(ChunkServiceServer::new(self.node.chunk_server()))
             .add_service(InfoServiceServer::new(self.info()))
-            .add_service(grpc_health);
-        let routes = match &self.templates {
             .add_service(VolumeServiceServer::new(VolumeServer::new(
                 self.node.volume_mounts.clone(),
             )))
+            .add_service(grpc_health);
+        let routes = match &self.templates {
             Some(templates) => routes.add_service(TemplateServiceServer::from_arc(templates.clone())),
             None => routes,
         };

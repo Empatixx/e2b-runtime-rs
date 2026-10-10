@@ -2,9 +2,9 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use envd::app::AppState;
+use envd::app::{AppState, Seams};
 use envd::cpus::{CpuManager, State};
-use envd::reaper::Registry;
+use envd::host::GuestClock;
 use parking_lot::Mutex;
 
 pub fn args(list: &[&str]) -> impl Iterator<Item = String> {
@@ -72,7 +72,65 @@ impl CpuManager for FakeCpus {
 
 pub async fn spawn_server_with_cpus(cpus: Arc<FakeCpus>) -> SocketAddr {
     let cfg = envd::config::parse(args(&["envd", "-isnotfc", "-port", "0", "-no-cgroups"])).expect("valid flags");
-    let state = AppState::with_cpus(cfg, Arc::new(Registry::default()), cpus);
+    let seams = Seams {
+        cpus,
+        ..Seams::for_config(&cfg)
+    };
+    let state = AppState::with_seams(cfg, seams);
+    let app = envd::router::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    addr
+}
+
+pub struct SteppingClock {
+    base: std::time::Instant,
+    delay: std::time::Duration,
+    readings: std::sync::atomic::AtomicU32,
+    steps: Mutex<Vec<chrono::DateTime<chrono::Utc>>>,
+}
+
+impl SteppingClock {
+    pub fn new(delay: std::time::Duration) -> Arc<Self> {
+        Arc::new(Self {
+            base: std::time::Instant::now(),
+            delay,
+            readings: std::sync::atomic::AtomicU32::new(0),
+            steps: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn steps(&self) -> Vec<chrono::DateTime<chrono::Utc>> {
+        self.steps.lock().clone()
+    }
+}
+
+impl GuestClock for SteppingClock {
+    fn now(&self) -> std::time::Instant {
+        let reading = self.readings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.base + self.delay * reading
+    }
+
+    fn step(&self, to: chrono::DateTime<chrono::Utc>) {
+        self.steps.lock().push(to);
+    }
+}
+
+pub fn isolated_config() -> envd::config::Config {
+    envd::config::parse(args(&["envd", "-isnotfc", "-port", "0", "-no-cgroups"])).expect("valid flags")
+}
+
+pub fn state_with_clock(clock: Arc<dyn GuestClock>) -> Arc<AppState> {
+    let config = isolated_config();
+    let seams = Seams {
+        clock,
+        ..Seams::for_config(&config)
+    };
+    AppState::with_seams(config, seams)
+}
+
+pub async fn serve_state(state: Arc<AppState>) -> SocketAddr {
     let app = envd::router::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

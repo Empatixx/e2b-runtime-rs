@@ -44,13 +44,38 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/tcpfirewall/     egress TCP proxy on 5016/5017/5018: rules.rs (domain/CIDR allow-deny), sniff.rs (HTTP Host,
                        TLS SNI), proxy.rs (SO_ORIGINAL_DST, 30s dial)
   src/hyperloop/       hyperloop server on 5010 for the guest: server.rs (/me, /logs), logs.rs (SourceSandbox)
+  src/proxy.rs         sandbox HTTP proxy on PROXY_PORT 5007 (upstream shared/pkg/proxy + orchestrator/pkg/proxy): server.rs
+                       (ProxyServer: h1/h2c accept loop, graceful shutdown, forced close), handler.rs (resolve, refuse with cors/pages,
+                       connection limit, forward), forward.rs (hop-by-hop, Host mask, upgrade tunnel), host.rs (sandbox id and port
+                       from Host or E2b-Sandbox-* headers), refusal.rs (Refusal), pages.rs + pages/template.rs (JSON/HTML error pages
+                       from assets/proxy/*.html, Go template subset), cors.rs, limit.rs + limiter.rs (per-lifecycle connection
+                       limit), pool.rs + pool/ (client per lifecycle, retrying dialer, TLS skip-verify), tracking.rs (counted,
+                       abortable connections), stream_abort.rs (Connect end-stream frame), destination.rs, body.rs;
+                       sandbox.rs (SandboxProxy: ingress token, mask_request_host, https_ports, envd internal routes in
+                       sandbox/internal_routes.rs, metrics in sandbox/metrics.rs, node.rs registry lookup)
   src/routing/         publisher.rs (RoutingPublisher: sandbox:routing:{id} on insert/stopping, tombstones),
                        redis.rs (fred client: Redis::connect, RoutingCatalog, EventStream, RedisSettings)
+  src/peer.rs          peer chunk sharing between orchestrators (ChunkService): switch.rs (PeerSwitch: installed registry + resolver,
+                       flag peer-to-peer-chunk-transfer, register/finish around a snapshot upload, uploaded builds for 1 h),
+                       registry.rs (PeerRegistry, key peer:{build}, Redis impl in routing/redis.rs), resolver.rs (Resolver: lazy
+                       channels, per-build "switched to storage" flag), handle.rs (PeerHandle, try_peer), stream.rs (PeerChunks,
+                       first message decides availability), blob.rs (PeerBlob), seekable.rs (PeerSeekable, SeekableError::Transitioned),
+                       parents.rs (PeerParents: a parent that a peer still uploads is waited for in storage), availability.rs, server.rs (ChunkServer: the four RPCs) + server/ (resolve.rs PeerCache lookups, blob.rs and
+                       seekable.rs sources, chunk.rs 1 MiB message bound, source.rs SourceError to gRPC status); testing.rs (FakeChunks
+                       gRPC server). storage/backend/peered.rs routes Storage reads through the peer for the six served files
   src/events.rs        SandboxEvent, EventsService fan-out to EventSinks (Redis stream gated by wh:{team})
   src/clickhouse/      batcher.rs (1000 rows / 1000 queue / 1s), endpoint.rs (DSN, native writer with TLS),
                        rows.rs (sandbox_events, sandbox_host_stats), sinks.rs
   src/hoststats.rs     per-sandbox host stats sampler (StatsIdentity, cgroup CPU/memory)
   src/oom.rs           OOM kill watermark from envd /metrics
+  src/volumes.rs       VolumeService (upstream pkg/volumes): service.rs (VolumeServer, volume and path confinement, gRPC
+                       trait), one file per RPC (volume.rs, dir_create.rs, dir_list.rs, file_create.rs FileUpload,
+                       file_get.rs FileDownload, path_delete.rs, path_stat.rs, path_update.rs), parents.rs (ensure_dirs),
+                       entry.rs (EntryInfo, symlinks resolved inside the volume), failure.rs (processError mapping),
+                       api_error.rs (UserError status details), spans.rs, test_support.rs;
+                       chrooted.rs + chrooted/ (upstream pkg/chrooted: Chrooted confined by openat2 RESOLVE_IN_ROOT
+                       through rustix; resolve.rs symlink walk, remove.rs, names.rs, info.rs, file.rs, metrics.rs);
+                       the PERSISTENT_VOLUME_MOUNTS config is server/config/volume_mounts.rs
   src/builder/         template-manager role: service.rs (TemplateService RPCs, TemplateBuilder trait), builds.rs
                        (BuildCache, 10 min TTL), logs.rs (BuildLog), phase.rs (Phase trait, run_phases, BuildError),
                        pipeline.rs (PhasePipeline), hash.rs (HashKeys), index.rs (LayerIndex), uploads.rs

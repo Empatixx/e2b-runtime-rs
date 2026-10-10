@@ -177,6 +177,14 @@ impl NodeConfig {
             .map_err(|e| format!("failed to create template storage provider: {e}"))
     }
 
+    pub fn node_address(&self) -> Option<String> {
+        match (self.node_ip.as_str(), self.node_ip.contains(':')) {
+            ("localhost", _) => None,
+            (ip, true) => Some(format!("[{ip}]:{}", self.grpc_port)),
+            (ip, false) => Some(format!("{ip}:{}", self.grpc_port)),
+        }
+    }
+
     pub fn open_build_storage(&self) -> Result<Option<BuildStorage>, String> {
         self.build_cache_storage
             .as_ref()
@@ -276,10 +284,31 @@ mod tests {
             (config.orchestrator_ip.as_str(), config.hyperloop_port),
             ("192.0.2.1", 5010)
         );
+        assert_eq!(config.proxy_port, 5007);
         assert!(config.labels.is_empty());
         assert_eq!(config.template_storage, StorageSpec::local("/srv/builds"));
         assert_eq!(config.build_cache_storage, None);
         assert_eq!(config.upload_base_url(), "http://localhost:5008");
+    }
+
+    #[test]
+    fn the_node_address_joins_the_node_ip_and_the_grpc_port() {
+        let address = |extra: &[(&str, &str)]| {
+            let base = [
+                ("E2B_FIRECRACKER", "/f"),
+                ("E2B_KERNEL", "/k"),
+                ("STORAGE_PROVIDER", "Local"),
+            ];
+            let pairs: Vec<(&str, &str)> = base.iter().chain(extra).copied().collect();
+            NodeConfig::from_vars(&vars(&pairs)).unwrap().node_address()
+        };
+
+        assert_eq!(address(&[]), None);
+        assert_eq!(address(&[("NODE_IP", "10.0.0.7")]), Some("10.0.0.7:5008".to_owned()));
+        assert_eq!(
+            address(&[("NODE_IP", "fd00::7"), ("GRPC_PORT", "6000")]),
+            Some("[fd00::7]:6000".to_owned())
+        );
     }
 
     #[test]

@@ -9,19 +9,21 @@ use uuid::Uuid;
 
 use super::{Lifetime, Node, StartRequest, event_sandbox, routed_sandbox};
 use crate::events::{CHECKPOINTED, SandboxEvent};
+use crate::featureflags::PEER_TO_PEER_ASYNC_CHECKPOINT;
 use crate::memory::trace::Trace;
 use crate::proto::SchedulingMetadata;
 use crate::sandbox::snapshot::LocalSnapshot;
 use crate::server::build_id;
 use crate::server::lifecycle::{Command, SandboxHandle, SandboxInfo};
 use crate::server::registry::{Lifecycle, StopReserved};
+use crate::server::retry::ATTEMPT_TIMEOUT;
 use crate::server::scheduling::from_headers;
 use crate::server::user_error::filesystem_only_checkpoint_disabled;
 use crate::storage::backend::ObjectMetadata;
-use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
 use crate::telemetry::report::{ReportStatus, report_critical_error};
 use crate::telemetry::server::sandbox::CheckpointOutcome;
 use crate::telemetry::server::spans;
+use crate::template::metadata::PREFETCH_ORIGIN_CHECKPOINT;
 
 const STOPPED: &str = "error snapshotting sandbox: the sandbox stopped";
 const BUILD_ORIGIN: &str = "snapshot_template";
@@ -49,6 +51,7 @@ impl Node {
             return Err(filesystem_only_checkpoint_disabled(&id));
         }
         let started = Instant::now();
+        let team_id = handle.info.lock().config.team_id.clone();
         spans::record_checkpoint_route(ROUTE_FLAG_OFF, BALLOON_MODE_UNKNOWN);
         let checkpointed = self.checkpoint_routed(handle, request, lifecycle).await;
         CheckpointOutcome {
@@ -58,6 +61,7 @@ impl Node {
             balloon_mode: BALLOON_MODE_UNKNOWN.to_owned(),
             deferred: false,
             success: checkpointed.is_ok(),
+            team_id,
         }
         .record(started.elapsed());
         checkpointed
@@ -107,16 +111,13 @@ impl Node {
         let resumed = self
             .resume_checkpoint(&parent, build_id)
             .await
-            .inspect_err(|_| self.store.unpin(build_id))
+            .inspect_err(|_| self.abandon_checkpoint(build_id))
             .report_critical("error resuming sandbox after checkpoint", &attributes)?;
         self.embed_prefetch(&resumed, &local).await;
         let object_metadata = object_metadata(request.provenance, &parent);
-        if let Err(e) = self.upload_now(local.clone(), object_metadata).await {
+        if let Err(status) = self.persist_checkpoint(&local, object_metadata, &id, &attributes).await {
             self.kill(&resumed).await;
-            return Err(Status::internal(format!(
-                "error uploading snapshot for checkpoint '{id}': {e}"
-            )))
-            .report_critical("error uploading snapshot for checkpoint", &attributes);
+            return Err(status);
         }
         let info = resumed.info.lock().clone();
         self.events
@@ -186,6 +187,58 @@ impl Node {
         if let Err(e) = written {
             tracing::warn!(build = %local.snapshot.build.build_id, error = %e, "failed to update local metadata with prefetch");
         }
+    }
+
+    async fn persist_checkpoint(
+        &self,
+        local: &LocalSnapshot,
+        object_metadata: ObjectMetadata,
+        id: &str,
+        attributes: &[KeyValue],
+    ) -> Result<(), Status> {
+        match self.feature_flags.get(&PEER_TO_PEER_ASYNC_CHECKPOINT, &[]) {
+            true => {
+                self.detach_checkpoint_upload(local, object_metadata, id, attributes)
+                    .await
+            }
+            false => self
+                .upload_now(local.clone(), object_metadata)
+                .await
+                .map_err(|e| Status::internal(format!("error uploading snapshot for checkpoint '{id}': {e}")))
+                .report_critical("error uploading snapshot for checkpoint", attributes),
+        }
+    }
+
+    async fn detach_checkpoint_upload(
+        &self,
+        local: &LocalSnapshot,
+        object_metadata: ObjectMetadata,
+        id: &str,
+        attributes: &[KeyValue],
+    ) -> Result<(), Status> {
+        let build_id = local.snapshot.build.build_id;
+        let sealed = tokio::time::timeout(ATTEMPT_TIMEOUT, local.memfile_ready.clone())
+            .await
+            .unwrap_or_else(|_| Err("context deadline exceeded".to_owned()));
+        match sealed {
+            Ok(()) => {
+                self.upload(local.clone(), object_metadata);
+                Ok(())
+            }
+            Err(e) => {
+                self.abandon_checkpoint(build_id);
+                Err(Status::internal(format!(
+                    "deferred memory export for checkpoint '{id}' failed: {e}"
+                )))
+                .report_critical("deferred memory seal failed before checkpoint upload", attributes)
+            }
+        }
+    }
+
+    fn abandon_checkpoint(&self, build_id: Uuid) {
+        self.store.unpin(build_id);
+        let peers = self.peers.clone();
+        tokio::spawn(async move { peers.finish(build_id, false).await });
     }
 
     async fn kill(&self, resumed: &SandboxHandle) {

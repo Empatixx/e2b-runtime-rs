@@ -8,6 +8,7 @@ use redissun::{Client, Object, StringCodec};
 
 use super::publisher::{RouteStore, RoutingRecord};
 use crate::events::{EventSink, STREAM, SandboxEvent, delivery_key};
+use crate::peer::registry::{PeerRegistry, redis_key};
 
 const ROUTING_KEY_PREFIX: &str = "sandbox:routing:";
 const DEFAULT_POOL_SIZE: usize = 5;
@@ -127,6 +128,13 @@ impl Redis {
         }
     }
 
+    pub fn peer_registry(&self, node_address: String) -> RedisPeerRegistry {
+        RedisPeerRegistry {
+            redis: self.client.clone(),
+            node_address,
+        }
+    }
+
     pub fn event_stream(&self) -> EventStream {
         EventStream {
             redis: self.client.clone(),
@@ -150,6 +158,30 @@ pub struct RoutingCatalog {
 #[derive(Clone)]
 pub struct EventStream {
     redis: Client<StringCodec>,
+}
+
+#[derive(Clone)]
+pub struct RedisPeerRegistry {
+    redis: Client<StringCodec>,
+    node_address: String,
+}
+
+impl PeerRegistry for RedisPeerRegistry {
+    fn register(&self, build_id: &str, ttl: Duration) -> BoxFuture<'static, Result<(), String>> {
+        let entry = self.redis.bucket::<String>(redis_key(build_id));
+        let address = self.node_address.clone();
+        async move { entry.set_ex(&address, ttl).await.map_err(|e| e.to_string()) }.boxed()
+    }
+
+    fn lookup(&self, build_id: &str) -> BoxFuture<'static, Result<Option<String>, String>> {
+        let entry = self.redis.bucket::<String>(redis_key(build_id));
+        async move { entry.get().await.map_err(|e| e.to_string()) }.boxed()
+    }
+
+    fn unregister(&self, build_id: &str) -> BoxFuture<'static, Result<(), String>> {
+        let entry = self.redis.bucket::<String>(redis_key(build_id));
+        async move { entry.get_del().await.map(|_| ()).map_err(|e| e.to_string()) }.boxed()
+    }
 }
 
 impl RouteStore for RoutingCatalog {

@@ -22,8 +22,10 @@ pub mod hyperloop;
 pub mod memory;
 pub mod network;
 pub mod oom;
+pub mod peer;
 pub mod phases;
 pub mod proto;
+pub mod proxy;
 pub mod routing;
 #[cfg(target_os = "linux")]
 pub mod sandbox;

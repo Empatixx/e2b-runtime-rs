@@ -20,6 +20,7 @@ pub struct InitRequest {
     pub volume_mounts: Option<Vec<VolumeMount>>,
     pub lifecycle_id: Option<String>,
     pub cpu_count: Option<i64>,
+    pub thaw: Option<String>,
 }
 
 struct Fields {
@@ -71,6 +72,7 @@ fn assign(mut request: InitRequest, key: &str, value: &RawValue) -> Result<InitR
         () if named("hyperloopIP") => request.hyperloop_ip = optional(value)?,
         () if named("caBundle") => request.ca_bundle = optional(value)?,
         () if named("lifecycleID") => request.lifecycle_id = optional(value)?,
+        () if named("thaw") => request.thaw = optional(value)?,
         () if named("cpuCount") => request.cpu_count = optional(value)?,
         () if named("volumeMounts") => request.volume_mounts = volume_mounts(value)?,
         () => {}
@@ -165,6 +167,14 @@ mod tests {
         );
         assert_eq!(request.lifecycle_id.as_deref(), Some("l1"));
         assert!(parse(br#"{"volumeMounts":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn thaw_is_an_optional_string_and_any_value_is_kept() {
+        assert_eq!(parse(br#"{"thaw":"skip"}"#).unwrap().thaw.as_deref(), Some("skip"));
+        assert_eq!(parse(br#"{"thaw":"later"}"#).unwrap().thaw.as_deref(), Some("later"));
+        assert_eq!(parse(br#"{"thaw":null}"#).unwrap().thaw, None);
+        assert!(parse(br#"{"thaw":5}"#).is_err());
     }
 
     #[test]

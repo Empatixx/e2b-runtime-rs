@@ -3,11 +3,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const PROTO_DIR: &str = "../../proto/orchestrator";
-const PROTOS: [&str; 4] = [
+const PROTOS: [&str; 5] = [
     "orchestrator.proto",
     "info.proto",
     "template-manager.proto",
     "volume.proto",
+    "chunks.proto",
 ];
 const DEPRECATED_OPTION: &str = " [deprecated = true]";
 

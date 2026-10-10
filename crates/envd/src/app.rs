@@ -21,6 +21,7 @@ use crate::host::metrics::{CpuUsage, read_metrics};
 use crate::host::mmds::MmdsOpts;
 use crate::host::nfs::NfsMounts;
 use crate::host::oom::OomWatcher;
+use crate::host::{GuestClock, SystemClock};
 use crate::logs::exporter::LogExporter;
 use crate::port::forward::Forwards;
 use crate::reaper::Registry;
@@ -66,10 +67,17 @@ pub struct AppState {
     pub handover: Mutex<Option<HandoverReport>>,
     pub children: Arc<Registry>,
     pub cpus: Arc<dyn CpuManager>,
+    pub clock: Arc<dyn GuestClock>,
 }
 
-impl AppState {
-    pub fn new(config: Config) -> Arc<Self> {
+pub struct Seams {
+    pub children: Arc<Registry>,
+    pub cpus: Arc<dyn CpuManager>,
+    pub clock: Arc<dyn GuestClock>,
+}
+
+impl Seams {
+    pub fn for_config(config: &Config) -> Self {
         let children = Arc::new(Registry::default());
         let cpus: Arc<dyn CpuManager> = match config.is_not_fc {
             true => Arc::new(NoopCpus),
@@ -78,10 +86,22 @@ impl AppState {
                 .children(children.clone())
                 .build(),
         };
-        Self::with_cpus(config, children, cpus)
+        Self {
+            children,
+            cpus,
+            clock: Arc::new(SystemClock),
+        }
+    }
+}
+
+impl AppState {
+    pub fn new(config: Config) -> Arc<Self> {
+        let seams = Seams::for_config(&config);
+        Self::with_seams(config, seams)
     }
 
-    pub fn with_cpus(config: Config, children: Arc<Registry>, cpus: Arc<dyn CpuManager>) -> Arc<Self> {
+    pub fn with_seams(config: Config, seams: Seams) -> Arc<Self> {
+        let Seams { children, cpus, clock } = seams;
         let cpu = CpuUsage::start();
         let cgroups = CgroupManager::create(&config, || read_metrics(&cpu).map(|metrics| metrics.mem_total));
         let memory = MemoryProtection::read(Path::new(PROC_SELF_CGROUP), cgroups.walk_root());
@@ -98,6 +118,7 @@ impl AppState {
             handover: Mutex::new(None),
             children,
             cpus,
+            clock,
             oom_kills: (!config.is_not_fc).then(OomWatcher::start),
             cpu,
             freezer,

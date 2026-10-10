@@ -43,7 +43,12 @@ use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
+use crate::peer::parents::PeerParents;
+use crate::peer::server::ChunkServer;
+use crate::peer::server::resolve::PeerCache;
+use crate::peer::switch::PeerSwitch;
 use crate::proto::{SandboxConfig, SandboxNetworkEgressConfig, SchedulingMetadata};
+use crate::proxy::sandbox::SandboxProxy;
 use crate::routing::publisher::{RoutedSandbox, RoutingPublisher};
 use crate::sandbox::Sandbox;
 use crate::sandbox::config::SandboxBuilder;
@@ -72,6 +77,7 @@ pub type BaseSandbox = SetHugePages<SetHyperloopIp<SetWorkDir<SetKernel<SetFirec
 pub struct Node {
     pub node_id: String,
     pub storage: Storage,
+    pub peers: Arc<PeerSwitch>,
     pub registry: Registry<SandboxHandle>,
     pub network: Arc<NetworkPool<HostSlots>>,
     pub local_expiry: bool,
@@ -163,7 +169,13 @@ pub struct Lifetime {
 
 impl Node {
     pub fn new(config: &NodeConfig) -> Result<Self, String> {
-        let storage = config.open_template_storage()?;
+        let peers = PeerSwitch::new(config.feature_flags.clone());
+        let storage = config.open_template_storage()?.with_peers(peers.clone());
+        let uploads = Arc::new(Uploads::default());
+        uploads.follow_peers(PeerParents {
+            peers: peers.clone(),
+            storage: storage.clone(),
+        });
         let admission = Admission::from_flags(&config.feature_flags)?;
         let max_sandboxes = admission.max_sandboxes();
         Ok(Self {
@@ -172,16 +184,19 @@ impl Node {
             labels: config.labels.clone(),
             services: config.services.clone(),
             status: Arc::default(),
-            uploads: Arc::default(),
+            uploads,
             build_network: Arc::default(),
             events: EventsService::default(),
             host_stats: OnceLock::new(),
+            proxy: OnceLock::new(),
             routing: RoutingPublisher::new(None, Uuid::new_v4().to_string(), config.node_ip.clone()),
             admission,
             max_sandboxes,
             feature_flags: config.feature_flags.clone(),
+            volume_mounts: config.volume_mounts.clone(),
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
+            peers,
             registry: Registry::new(),
             network: NetworkPool::new(
                 HostSlots,
@@ -245,22 +260,36 @@ impl Node {
             discard_snapshot_dir(&dir);
             return Err(format!("error adding snapshot to template cache: {e}"));
         }
+        self.peers.register(build_id).await;
         Ok(local)
+    }
+
+    pub fn chunk_server(&self) -> ChunkServer {
+        ChunkServer {
+            cache: PeerCache {
+                templates: self.templates.clone(),
+                diffs: self.store.clone(),
+            },
+            peers: self.peers.clone(),
+        }
     }
 
     pub fn upload(&self, local: LocalSnapshot, object_metadata: ObjectMetadata) {
         let build = local.snapshot.build.clone();
         let storage = self.storage.clone();
         let store = self.store.clone();
+        let peers = self.peers.clone();
         let filesystem_only = build.memfile.metadata.size == 0;
+        let team_id = object_metadata.entries.get("team_id").cloned().unwrap_or_default();
         let attempt = move || upload_attempt(local.clone(), storage.clone(), object_metadata.clone());
         self.uploads
             .start(build.build_id, parents(&build), attempt, move |outcome| {
                 tracing::info!(build = %build.build_id, ?outcome, "snapshot upload finished");
                 if outcome == Outcome::Failed {
-                    count_failed_snapshot_upload(filesystem_only);
+                    count_failed_snapshot_upload(&team_id, filesystem_only);
                 }
                 store.unpin(build.build_id);
+                tokio::spawn(async move { peers.finish(build.build_id, outcome == Outcome::Landed).await });
             });
     }
 
@@ -277,9 +306,11 @@ impl Node {
         let attempt = upload_attempt(local, self.storage.clone(), object_metadata);
         let uploads = self.uploads.clone();
         let store = self.store.clone();
+        let peers = self.peers.clone();
         let task = tokio::spawn(async move {
             let uploaded = uploads.run(build.build_id, parents(&build), attempt).await;
             store.unpin(build.build_id);
+            peers.finish(build.build_id, uploaded.is_ok()).await;
             uploaded
         });
         async move { task.await.map_err(|e| format!("snapshot upload task failed: {e}"))? }
@@ -393,11 +424,13 @@ impl Node {
     }
 
     pub async fn close(&self) {
+        self.peers.close();
         self.uploads.drain(false).await;
         self.network.close().await;
     }
 
     pub async fn close_forced(&self) {
+        self.peers.close();
         self.uploads.drain(true).await;
         self.network.close().await;
     }

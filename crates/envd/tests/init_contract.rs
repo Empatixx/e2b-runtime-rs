@@ -1,6 +1,6 @@
 mod common;
 
-use common::spawn_server_with_state;
+use common::{SteppingClock, serve_state, spawn_server_with_state, state_with_clock};
 
 #[tokio::test]
 async fn init_sets_envs_user_and_token() {
@@ -49,7 +49,8 @@ async fn init_token_rotation_rules() {
 
 #[tokio::test]
 async fn init_rejects_bad_json_and_older_timestamp_keeps_data() {
-    let (addr, state) = spawn_server_with_state().await;
+    let state = state_with_clock(SteppingClock::new(std::time::Duration::ZERO));
+    let addr = serve_state(state.clone()).await;
     let c = reqwest::Client::new();
     let res = c
         .post(format!("http://{addr}/init"))

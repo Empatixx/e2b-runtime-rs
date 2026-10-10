@@ -235,7 +235,7 @@ impl DiffStore {
         let cache_path = self
             .cache_dir
             .join(format!("{build_id}-{}-{}", artifact.name(), Uuid::new_v4()));
-        Chunker::open(self.storage.clone(), &artifact.object(build_id), &cache_path)
+        Chunker::open(self.storage.for_template(), &artifact.object(build_id), &cache_path)
             .await
             .map(Arc::new)
     }

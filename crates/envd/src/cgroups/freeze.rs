@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -21,6 +22,7 @@ use crate::util::fs::clean;
 
 pub const THAW_WATCHDOG_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const THAW_MAX_CGROUPS: usize = 8192;
+const MAX_FREEZE_GENERATION_SEED: u64 = 1 << 52;
 const FREEZE_MAX_CGROUPS: usize = 512;
 const FREEZE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 pub const WORKLOAD_PROCESS_TYPES: [ProcessType; 2] = [ProcessType::User, ProcessType::Pty];
@@ -92,6 +94,17 @@ pub struct ThawResult {
     pub discovered: bool,
 }
 
+#[derive(Debug)]
+pub enum Thaw {
+    Withheld {
+        current: u64,
+    },
+    Done {
+        current: u64,
+        outcome: Result<ThawResult, String>,
+    },
+}
+
 #[derive(Default)]
 struct Sweep {
     last_mode: Option<FreezeMode>,
@@ -125,6 +138,8 @@ pub struct WorkloadFreezer {
     manager: Arc<CgroupManager>,
     lock: Arc<Semaphore>,
     pub(super) spawns: SpawnBarrier,
+    freeze_generation: AtomicU64,
+    unobserved_inits: AtomicI64,
     thawed: watch::Sender<u64>,
     sweep: Mutex<Sweep>,
     watchdog: Mutex<Watchdog>,
@@ -172,6 +187,8 @@ impl WorkloadFreezer {
             manager,
             lock: Arc::new(Semaphore::new(1)),
             spawns,
+            freeze_generation: AtomicU64::new(rand::random_range(0..MAX_FREEZE_GENERATION_SEED)),
+            unobserved_inits: AtomicI64::new(0),
             thawed: watch::Sender::new(0),
             sweep: Mutex::default(),
             watchdog: Mutex::default(),
@@ -196,6 +213,34 @@ impl WorkloadFreezer {
             .expect("the freezer lock is never closed");
         let (result, errors) = self.freeze_locked(options).await;
         (permit, result, errors)
+    }
+
+    pub async fn freeze_generation(&self) -> u64 {
+        let _permit = self.lock.acquire().await.expect("the freezer lock is never closed");
+        self.freeze_generation.load(Ordering::SeqCst)
+    }
+
+    pub async fn thaw_if_generation(self: &Arc<Self>, wanted: u64, after_thaw: impl FnOnce() + Send) -> Thaw {
+        let _permit = self.lock.acquire().await.expect("the freezer lock is never closed");
+        let current = self.freeze_generation.load(Ordering::SeqCst);
+        if current != wanted {
+            return Thaw::Withheld { current };
+        }
+        let (result, errors) = self.unfreeze_locked(THAW_MAX_CGROUPS);
+        after_thaw();
+        let outcome = match errors.is_empty() {
+            true => Ok(result),
+            false => Err(errors.join("\n")),
+        };
+        Thaw::Done { current, outcome }
+    }
+
+    pub fn add_unobserved_init(&self) {
+        self.unobserved_inits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn take_unobserved_inits(&self) -> i64 {
+        self.unobserved_inits.swap(0, Ordering::SeqCst)
     }
 
     pub fn thawed(&self) -> watch::Receiver<u64> {
@@ -268,6 +313,8 @@ impl WorkloadFreezer {
     }
 
     async fn freeze_locked(self: &Arc<Self>, options: FreezeOptions) -> (FreezeResult, Vec<String>) {
+        self.freeze_generation.fetch_add(1, Ordering::SeqCst);
+        self.unobserved_inits.store(0, Ordering::SeqCst);
         if let Err(refused) = self.spawns.raise().await {
             let refusal = FreezeResult {
                 mode: options.mode,
@@ -1152,6 +1199,134 @@ mod tests {
         assert!(
             freezer.watchdog.lock().cancel.is_some(),
             "a dirty thaw keeps the watchdog armed"
+        );
+    }
+
+    fn watchdog_armed(freezer: &WorkloadFreezer) -> bool {
+        freezer.watchdog.lock().cancel.is_some()
+    }
+
+    fn hour_watchdog(tree: &Tree) -> Arc<WorkloadFreezer> {
+        tree.freezer_configured("user", Duration::from_secs(3600), SpawnBarrier::default())
+    }
+
+    #[tokio::test]
+    async fn the_freeze_generation_advances_on_freezes_only() {
+        let freezer = noop_freezer();
+        let generation = freezer.freeze_generation().await;
+
+        freezer.freeze(no_wait()).await;
+        assert_eq!(freezer.freeze_generation().await, generation + 1, "freeze advances it");
+
+        let (hold, _, _) = freezer.freeze_hold(no_wait()).await;
+        drop(hold);
+        assert_eq!(
+            freezer.freeze_generation().await,
+            generation + 2,
+            "freeze_hold advances it"
+        );
+
+        freezer.unfreeze().await.unwrap();
+        freezer.thaw_if_generation(generation + 2, || {}).await;
+        freezer.thaw_if_generation(generation, || {}).await;
+        freezer.resume_frozen().await.unwrap();
+        assert_eq!(
+            freezer.freeze_generation().await,
+            generation + 2,
+            "thaws, reads and resume_frozen leave it alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_freeze_still_advances_the_generation_and_zeroes_the_count() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        let generation = freezer.freeze_generation().await;
+        freezer.add_unobserved_init();
+        let wedged = freezer.begin_spawn(ProcessType::User).await.unwrap();
+
+        freezer.freeze(no_wait()).await;
+
+        assert_eq!(freezer.freeze_generation().await, generation + 1);
+        assert_eq!(freezer.take_unobserved_inits(), 0);
+        drop(wedged);
+    }
+
+    #[tokio::test]
+    async fn the_generation_starts_below_two_to_the_fifty_two() {
+        for _ in 0..16 {
+            assert!(noop_freezer().freeze_generation().await < 1 << 52);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conditional_thaw_runs_only_for_the_current_generation() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        let entered = freezer.freeze_generation().await;
+        freezer.freeze(no_wait()).await;
+
+        let mut ran = false;
+        let stale = freezer.thaw_if_generation(entered, || ran = true).await;
+        assert!(matches!(stale, Thaw::Withheld { current } if current == entered + 1));
+        assert!(!ran, "nothing runs on a mismatch");
+        assert!(tree.requested("user"), "the freeze stands");
+
+        let current = freezer.thaw_if_generation(entered + 1, || ran = true).await;
+        assert!(matches!(current, Thaw::Done { outcome: Ok(_), .. }));
+        assert!(ran);
+        assert!(!tree.requested("user"), "the current generation thaws");
+    }
+
+    #[tokio::test]
+    async fn the_after_thaw_hook_runs_after_the_thaw_and_under_the_lock() {
+        let tree = envd_tree();
+        let freezer = tree.freezer();
+        freezer.freeze(no_wait()).await;
+        let generation = freezer.freeze_generation().await;
+
+        let mut observed = None;
+        freezer
+            .thaw_if_generation(generation, || {
+                observed = Some((tree.requested("user"), freezer.lock.try_acquire().is_err()));
+            })
+            .await;
+
+        assert_eq!(
+            observed,
+            Some((false, true)),
+            "after the thaw, before the lock is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_thaw_keeps_the_watchdog_rules() {
+        let clean = envd_tree();
+        let freezer = hour_watchdog(&clean);
+        freezer.freeze(no_wait()).await;
+        assert!(watchdog_armed(&freezer), "the freeze arms the watchdog");
+        let generation = freezer.freeze_generation().await;
+        freezer.thaw_if_generation(generation, || {}).await;
+        assert!(!watchdog_armed(&freezer), "a clean thaw disarms it");
+
+        let dirty = envd_tree();
+        let freezer = hour_watchdog(&dirty);
+        freezer.freeze(no_wait()).await;
+        break_freeze_file(&dirty, "user");
+        let generation = freezer.freeze_generation().await;
+        let thawed = freezer.thaw_if_generation(generation, || {}).await;
+        assert!(matches!(thawed, Thaw::Done { outcome: Err(_), .. }));
+        assert!(watchdog_armed(&freezer), "a dirty thaw leaves it armed to retry");
+
+        let withheld = envd_tree();
+        let freezer = hour_watchdog(&withheld);
+        freezer.freeze(no_wait()).await;
+        let generation = freezer.freeze_generation().await;
+        let thawed = freezer.thaw_if_generation(generation - 1, || {}).await;
+        assert!(matches!(thawed, Thaw::Withheld { .. }));
+        assert!(
+            watchdog_armed(&freezer),
+            "a withheld thaw leaves it armed for the freeze that voided it"
         );
     }
 }

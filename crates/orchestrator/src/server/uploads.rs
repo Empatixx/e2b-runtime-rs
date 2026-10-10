@@ -10,6 +10,7 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use super::retry::{Failure, retry};
+use crate::peer::parents::PeerParents;
 
 const DRAIN_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -25,6 +26,7 @@ pub enum Outcome {
 pub struct Uploads {
     outcomes: Mutex<HashMap<Uuid, watch::Receiver<Outcome>>>,
     tasks: TaskTracker,
+    peer_parents: OnceLock<PeerParents>,
 }
 
 impl Uploads {
@@ -84,6 +86,10 @@ impl Uploads {
         sender
     }
 
+    pub fn follow_peers(&self, peer_parents: PeerParents) {
+        let _ = self.peer_parents.set(peer_parents);
+    }
+
     pub fn outcome(&self, build_id: Uuid) -> Option<Outcome> {
         self.outcomes.lock().get(&build_id).map(|outcome| *outcome.borrow())
     }
@@ -95,7 +101,20 @@ impl Uploads {
                 .wait_for(|outcome| *outcome != Outcome::Pending)
                 .await
                 .map_or(Outcome::Failed, |outcome| *outcome),
-            None => Outcome::Landed,
+            None => self.wait_for_peer(build_id).await,
+        }
+    }
+
+    async fn wait_for_peer(&self, build_id: Uuid) -> Outcome {
+        let Some(peer_parents) = self.peer_parents.get().filter(|parents| parents.is_uploading(build_id)) else {
+            return Outcome::Landed;
+        };
+        match peer_parents.wait_for_headers(build_id).await {
+            Ok(()) => Outcome::Landed,
+            Err(e) => {
+                tracing::warn!(build = %build_id, error = %e, "peer upload of a parent did not land");
+                Outcome::Failed
+            }
         }
     }
 
@@ -313,5 +332,54 @@ mod tests {
         seen.sort_by_key(|(build, _)| *build);
         assert_eq!(seen, vec![(1, Outcome::Failed), (2, Outcome::Failed)]);
         assert_eq!(uploads.wait(id(9)).await, Outcome::Landed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parent_that_a_peer_is_still_uploading_is_waited_for_in_storage() {
+        use bytes::Bytes;
+
+        use crate::featureflags::FeatureFlags;
+        use crate::peer::switch::PeerSwitch;
+        use crate::peer::testing::{FixedRegistry, local_storage};
+        use crate::storage::paths::BuildPaths;
+
+        let (_dir, storage) = local_storage();
+        let flags = FeatureFlags::builder()
+            .override_flag("peer-to-peer-chunk-transfer", true)
+            .offline();
+        let peers = PeerSwitch::new(flags);
+        peers.install(
+            Arc::new(FixedRegistry {
+                lookup: Ok(Some("10.0.0.2:5008".to_owned())),
+            }),
+            "10.0.0.1:5008".to_owned(),
+        );
+        let parent = Uuid::new_v4();
+        peers.resolve(&parent.to_string()).await;
+        let uploads = Arc::new(Uploads::default());
+        uploads.follow_peers(PeerParents {
+            peers,
+            storage: storage.clone(),
+        });
+        let waiting = {
+            let uploads = uploads.clone();
+            tokio::spawn(async move { uploads.wait(parent).await })
+        };
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!waiting.is_finished(), "the headers are not in storage yet");
+        let paths = BuildPaths::new(parent);
+        for header in [paths.memfile_header(), paths.rootfs_header()] {
+            storage.put(&header, Bytes::from_static(b"header")).await.unwrap();
+        }
+
+        assert_eq!(waiting.await.unwrap(), Outcome::Landed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parent_nobody_is_uploading_has_landed() {
+        let uploads = Arc::new(Uploads::default());
+
+        assert_eq!(uploads.wait(id(5)).await, Outcome::Landed);
     }
 }

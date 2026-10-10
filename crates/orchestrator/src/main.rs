@@ -70,6 +70,10 @@ mod serve {
             Some(settings) => {
                 let redis = Redis::connect(settings).await?;
                 node.routing.install(Arc::new(redis.routing_catalog()));
+                if let Some(address) = config.node_address() {
+                    node.peers
+                        .install(Arc::new(redis.peer_registry(address.clone())), address);
+                }
                 event_sinks.push(Arc::new(redis.event_stream()));
             }
             None => tracing::warn!("redis disabled; orchestrator sandbox routing records are not published"),

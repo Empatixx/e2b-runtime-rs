@@ -1,3 +1,4 @@
+pub mod presence;
 pub mod request;
 mod resume_freeze;
 
@@ -5,16 +6,17 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
+use self::presence::{Client, Presence};
 use self::request::InitRequest;
 use crate::app::AppState;
 use crate::host;
@@ -27,6 +29,10 @@ const MEMORY_HEADER: &str = "X-Envd-Memory";
 const DEFAULTS_HEADER: &str = "X-Envd-Defaults";
 const HANDOVER_HEADER: &str = "X-Envd-Handover";
 const CPUS_HEADER: &str = "X-Envd-Cpus";
+const THAW_HEADER: &str = "X-Envd-Thaw";
+const CLOCK_CORRECTION_HEADER: &str = "X-Envd-Init-Clock-Correction";
+const UNOBSERVED_HEADER: &str = "X-Envd-Init-Unobserved";
+const SKIP_THAW: &str = "skip";
 const EVENTS_ADDRESS: &str = "E2B_EVENTS_ADDRESS";
 const MMDS_POLL_LIMIT: Duration = Duration::from_secs(60);
 
@@ -54,9 +60,22 @@ pub fn validate_token(
     Err("access token validation failed")
 }
 
-pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
-    let mut response = respond(&state, &body).await;
-    let headers = response.headers_mut();
+pub async fn post_init(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let client = Arc::new(Client::default());
+    let _watch = client.watch();
+    serve(&state, request.into_body(), client).await
+}
+
+pub async fn serve(state: &Arc<AppState>, body: Body, presence: Arc<dyn Presence>) -> Response {
+    let mut headers = entry_headers(state);
+    let entry_generation = state.freezer.freeze_generation().await;
+    let mut response = respond(state, body, entry_generation, presence, &mut headers).await;
+    response.headers_mut().extend(headers);
+    response
+}
+
+fn entry_headers(state: &AppState) -> HeaderMap {
+    let mut headers = HeaderMap::new();
     headers.insert(VERSION_HEADER, HeaderValue::from_static(env!("CARGO_PKG_VERSION")));
     if let Some(memory) = serde_json::to_string(&state.memory)
         .ok()
@@ -68,21 +87,34 @@ pub async fn post_init(State(state): State<Arc<AppState>>, body: Bytes) -> Respo
     if let Some(report) = handover.and_then(|report| serde_json::to_string(&report).ok()?.parse().ok()) {
         headers.insert(HANDOVER_HEADER, report);
     }
-    response
+    headers
 }
 
-async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
-    let request = match body.is_empty() {
-        true => Ok(InitRequest::default()),
-        false => request::parse(body),
+async fn respond(
+    state: &Arc<AppState>,
+    body: Body,
+    entry_generation: u64,
+    presence: Arc<dyn Presence>,
+    headers: &mut HeaderMap,
+) -> Response {
+    let body = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::error!("Failed to read request body: {e}");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     };
-    let request = match request {
+    let body_read = state.clock.now();
+    let mut request = match decode(&body) {
         Ok(request) => request,
         Err(e) => {
             tracing::error!("Failed to decode request: {e}");
             return StatusCode::BAD_REQUEST.into_response();
         }
     };
+    if presence.gone() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let _guard = state.init_lock.lock().await;
     let mmds_hash = mmds_hash(state).await;
     if let Err(e) = validate_token(
@@ -92,27 +124,79 @@ async fn respond(state: &Arc<AppState>, body: &[u8]) -> Response {
     ) {
         return (StatusCode::UNAUTHORIZED, e).into_response();
     }
-    let freeze_audit = resume_freeze::audit_header(state);
+    if let Some(audit) = resume_freeze::audit_header(state).and_then(|audit| audit.parse().ok()) {
+        headers.insert(resume_freeze::FREEZE_AUDIT_HEADER, audit);
+    }
+    let skip_thaw = request.thaw.as_deref() == Some(SKIP_THAW);
+    if skip_thaw {
+        headers.insert(THAW_HEADER, HeaderValue::from_static(SKIP_THAW));
+    }
+    request.timestamp = request
+        .timestamp
+        .map(|timestamp| correct_timestamp(state, timestamp, body_read, headers));
     let applied = match is_newest(state, request.timestamp) {
         true => apply(state, request).await,
         false => Ok(None),
     };
-    resume_freeze::unfreeze_user_cgroups(state).await;
-    let mut response = match applied {
-        Ok(cpu_rejection) => initialized(state, cpu_rejection),
+    if applied.is_ok() {
+        state.initialized.store(true, Ordering::SeqCst);
+    }
+    if !skip_thaw {
+        resume_freeze::thaw_workload(state, entry_generation, presence.clone()).await;
+    }
+    match applied {
+        Ok(cpu_rejection) => initialized(state, cpu_rejection, presence.as_ref(), headers),
         Err(e) => {
             tracing::error!("Failed to set data: {e}");
             (StatusCode::BAD_REQUEST, e).into_response()
         }
-    };
-    if let Some(audit) = freeze_audit.and_then(|audit| audit.parse().ok()) {
-        response.headers_mut().insert(resume_freeze::FREEZE_AUDIT_HEADER, audit);
     }
-    response
 }
 
-fn initialized(state: &Arc<AppState>, cpu_rejection: Option<String>) -> Response {
-    state.initialized.store(true, Ordering::SeqCst);
+fn decode(body: &[u8]) -> Result<InitRequest, String> {
+    match body.is_empty() {
+        true => Ok(InitRequest::default()),
+        false => request::parse(body),
+    }
+}
+
+fn correct_timestamp(
+    state: &AppState,
+    timestamp: DateTime<Utc>,
+    body_read: Instant,
+    headers: &mut HeaderMap,
+) -> DateTime<Utc> {
+    let correction = state.clock.now().saturating_duration_since(body_read);
+    headers.insert(
+        CLOCK_CORRECTION_HEADER,
+        HeaderValue::from(correction.as_millis() as u64),
+    );
+    tracing::info!(
+        clock_correction = milliseconds(correction),
+        "corrected the /init timestamp by the handler's delay"
+    );
+    chrono::Duration::from_std(correction)
+        .ok()
+        .and_then(|correction| timestamp.checked_add_signed(correction))
+        .unwrap_or(timestamp)
+}
+
+fn milliseconds(duration: Duration) -> f64 {
+    duration.as_nanos() as f64 / 1e6
+}
+
+fn initialized(
+    state: &Arc<AppState>,
+    cpu_rejection: Option<String>,
+    presence: &dyn Presence,
+    headers: &mut HeaderMap,
+) -> Response {
+    if !presence.gone() {
+        headers.insert(
+            UNOBSERVED_HEADER,
+            HeaderValue::from(state.freezer.take_unobserved_inits()),
+        );
+    }
     let poller = state.clone();
     tokio::spawn(async move {
         let opts = host::mmds::poll_for_opts(&poller.env_vars, Some(MMDS_POLL_LIMIT)).await;
@@ -195,7 +279,7 @@ fn is_newest(state: &AppState, timestamp: Option<DateTime<Utc>>) -> bool {
 
 async fn apply(state: &Arc<AppState>, request: InitRequest) -> Result<Option<String>, String> {
     if let Some(timestamp) = request.timestamp {
-        host::sync_clock(timestamp);
+        host::sync_clock(state.clock.as_ref(), timestamp);
     }
     if let Some(vars) = &request.env_vars {
         state.env_vars.replace_user_vars(vars);
@@ -260,6 +344,12 @@ fn setup_hyperloop(state: &AppState, address: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_logged_correction_is_the_exact_term_in_milliseconds() {
+        assert_eq!(milliseconds(Duration::from_micros(300_900)), 300.9);
+        assert_eq!(milliseconds(Duration::from_secs(1)), 1000.0);
+    }
 
     #[test]
     fn token_rules() {

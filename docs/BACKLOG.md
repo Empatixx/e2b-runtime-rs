@@ -65,6 +65,15 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | `build-kernel-cmdline-args`, `build-cpu-template`, `free-page-reporting` and `free-page-hinting-config` are read from LaunchDarkly but not applied to the VM (`balloon` stays `{"reporting":false,"hinting":false}`) | template build |
 
+## Orchestrator: peer chunk sharing
+
+| Item | Target |
+|---|---|
+| Peer reads record no `orchestrator.read.*` storage metrics yet, and peer channels carry no otelgrpc client stats | perf |
+| Headers go on the wire as V3 bytes; upstream sends V5 with `IncompletePendingUpload`, so a Go orchestrator cannot read a Rust peer header | later |
+| A peer transition re-reads from storage without reloading the header, because Rust headers have no V4 compression | later |
+| The wait for a parent that a peer still uploads polls storage on a timer; upstream also subscribes to a Redis upload-done channel | perf |
+
 ## Orchestrator: volumes
 
 | Item | Target |

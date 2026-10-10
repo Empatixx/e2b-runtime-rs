@@ -21,6 +21,7 @@ An audit compared `crates/envd` with upstream `packages/envd` at commit `bfd9179
 | `/envs` Go encoder, DeadlineExceeded start errors | done | |
 | `cpuCount` on `/init`, `X-Envd-Cpus`, CPU hotplug worker, helper children handed over on upgrade (upstream `e7b859b`) | done | `cpus/`, `reaper.rs`, `reexec.rs`, `controllers/init.rs` |
 | Process starts kept out of the cgroup freeze window: spawn barrier, pre-spawn probe, `unavailable` refusal (upstream `21e78ef`) | done | `cgroups/spawn.rs`, `controllers/process/spawn.rs`, `port/forward.rs` |
+| `/init` thaw that is freeze-aware and skippable, clock correction, `X-Envd-Thaw`, `X-Envd-Init-Clock-Correction`, `X-Envd-Init-Unobserved` (upstream `b999fd6`) | done | `controllers/init.rs`, `controllers/init/`, `cgroups/freeze.rs` |
 | Version | `0.9.0` as upstream | |
 
 Not ported on purpose:
@@ -182,7 +183,7 @@ G's encoder appends `\n`; R's axum `Json` does not.
 
 ### Behaviour
 
-- **Deferred workload thaw:** G thaws the workload on every authenticated `/init`. R does not.
+- **Workload thaw:** see section 5d.
 - **Token decoding:** G's `SecureToken.UnmarshalJSON` rejects `"accessToken": ""` and any backslash escape with 400. R treats an empty token as unset.
 - **Timestamp ordering:**
   - G's `AtomicMax` starts at 0 and accepts `>=`. An identical timestamp is applied again, and pre-1970 timestamps are rejected.
@@ -320,6 +321,15 @@ R parses `cgroup_root` and `no_cgroups` but ignores them. G:
 - **System tag and socat:** `_system` stays in envd's own cgroup and never meets the barrier. The socat cgroup gets the probe only. A forward refused by the probe is not recorded, so the next scan tries it again.
 - **Lowering:** a sweep that opened no window lowers the barrier. A thaw lowers it when `user` and `ptys` thawed, or vanished. A handover raises it again in the new image.
 - **Not ported:** the Go context errors (a caller that went away) have no counterpart, a dropped request just drops the wait.
+
+## 5d. The `/init` thaw (upstream `b999fd6`, G `internal/api/init.go`)
+
+- **Order in the handler:** read the freeze generation, read the body, decode, take the `/init` lock, check the token, write the freeze audit header, decide the thaw, correct the timestamp, apply the data, mark initialized, thaw, then decide the headers.
+- **Freeze generation:** it starts at a random value below 2^52 and moves by one on every freeze, also on one the spawn drain refuses. A handler reads it before it reads the body, so under `Expect: 100-continue` the read comes before the 100 Continue goes out. It thaws only while the generation is unchanged, checked with the freeze lock held. A handler that a freeze overtook answers 204 and logs `a freeze came after this /init entered; not thawing the workload` with `entry_freeze_generation` and `current_freeze_generation`.
+- **`thaw`:** only the exact value `skip` skips. The handler thaws nothing, answers `X-Envd-Thaw: skip` (error responses after auth carry it too) and leaves the watchdog armed. Absent, `inline` and unknown strings thaw before the answer. A value that is not a string is a 400.
+- **Clock correction:** the timestamp is the host's time when it sent the body. envd adds the time from the end of the body read to the gate (lock, token check, audit) before the newest-wins check and the clock bands. `X-Envd-Init-Clock-Correction` holds whole milliseconds, truncated, on every 204 to a request with a timestamp. The log line `corrected the /init timestamp by the handler's delay` has `clock_correction` in milliseconds.
+- **`X-Envd-Init-Unobserved`:** the number of handlers whose thaw finished when their client was already gone, since the last 204 that carried the header or the last freeze. It is set, zero included, on a 204 whose client is still connected when the headers are decided. A skipping handler, one a freeze overtook and one refused at the lock are never counted. A freeze zeroes the count.
+- **Client gone:** a request that is already gone when it would take the `/init` lock answers 503. R sees the client leave when its handler is dropped; the thaw itself runs in its own task, so it finishes either way.
 
 ## 6. `/files`
 

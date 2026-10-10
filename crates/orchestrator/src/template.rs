@@ -86,6 +86,10 @@ impl Template {
         }
     }
 
+    pub fn loaded_build(&self) -> Option<Build> {
+        self.build.get().and_then(|build| build.as_ref().ok()).cloned()
+    }
+
     pub fn build_id(&self) -> Uuid {
         self.build_id
     }

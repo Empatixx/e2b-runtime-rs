@@ -152,11 +152,24 @@ impl TemplateCache {
             .iter()
             .filter_map(|build_id| entries.remove(build_id))
             .for_each(|entry| remove_dir(&entry.template));
+        drop(entries);
+        expired.iter().for_each(|build_id| self.purge_peer_routing(*build_id));
+    }
+
+    fn purge_peer_routing(&self, build_id: Uuid) {
+        let superseded = self
+            .retired
+            .lock()
+            .iter()
+            .any(|template| template.build_id() == build_id);
+        if !superseded && let Some(peers) = self.storage.peers() {
+            peers.purge(&build_id.to_string());
+        }
     }
 
     fn fetched(&self, build_id: Uuid) -> Arc<Template> {
         let template = Arc::new(Template::new(
-            self.storage.clone(),
+            self.storage.for_template(),
             build_id,
             self.instance_dir(build_id),
         ));

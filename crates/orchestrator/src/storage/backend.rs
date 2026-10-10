@@ -3,6 +3,7 @@ pub mod azure;
 mod blocking;
 mod credential_cache;
 pub mod gcs;
+mod peered;
 pub(crate) mod pem;
 mod providers;
 
@@ -30,6 +31,7 @@ use tokio::io::AsyncWriteExt;
 use super::header::Header;
 use super::local_upload::UploadSigner;
 use super::spec::{Provider, StorageSpec};
+use crate::peer::switch::PeerSwitch;
 use aws::sse::ServerSideEncryption;
 use azure::{AzureBackend, AzureEnv, AzureSigner};
 use gcs::ServiceAccountSigner;
@@ -78,6 +80,8 @@ pub struct UploadUrl {
 pub struct Storage {
     store: Arc<dyn ObjectStore>,
     signing: Signing,
+    peers: Option<Arc<PeerSwitch>>,
+    peer_routed: bool,
 }
 
 #[derive(Clone)]
@@ -175,6 +179,8 @@ impl Storage {
         Self {
             store: Arc::new(store),
             signing,
+            peers: None,
+            peer_routed: false,
         }
     }
 
@@ -182,6 +188,8 @@ impl Storage {
         Self {
             store: store.clone(),
             signing: signing(store),
+            peers: None,
+            peer_routed: false,
         }
     }
 
@@ -194,6 +202,8 @@ impl Storage {
                 root: root.to_path_buf(),
                 upload,
             },
+            peers: None,
+            peer_routed: false,
         })
     }
 
@@ -253,7 +263,7 @@ impl Storage {
         }
     }
 
-    pub async fn get(&self, path: &str) -> Result<Bytes, String> {
+    pub(crate) async fn get_direct(&self, path: &str) -> Result<Bytes, String> {
         let object = self
             .store
             .get(&ObjectPath::from(path))
@@ -262,7 +272,7 @@ impl Storage {
         object.bytes().await.map_err(|e| format!("read {path}: {e}"))
     }
 
-    pub async fn find(&self, path: &str) -> Result<Option<Bytes>, String> {
+    pub(crate) async fn find_direct(&self, path: &str) -> Result<Option<Bytes>, String> {
         match self.store.get(&ObjectPath::from(path)).await {
             Ok(object) => object.bytes().await.map(Some).map_err(|e| format!("read {path}: {e}")),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
@@ -270,7 +280,7 @@ impl Storage {
         }
     }
 
-    pub async fn get_stream(
+    pub(crate) async fn get_stream_direct(
         &self,
         path: &str,
         range: Range<u64>,
@@ -291,7 +301,7 @@ impl Storage {
             .boxed())
     }
 
-    pub async fn write_to(&self, path: &str, destination: &Path) -> Result<(), String> {
+    pub(crate) async fn write_to_direct(&self, path: &str, destination: &Path) -> Result<(), String> {
         let mut chunks = self.blob_stream(path).await?;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -343,7 +353,7 @@ impl Storage {
         }
     }
 
-    pub async fn get_range(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
+    pub(crate) async fn get_range_direct(&self, path: &str, range: Range<u64>) -> Result<Bytes, String> {
         let bytes = self
             .store
             .get_range(&ObjectPath::from(path), range.clone())
@@ -356,7 +366,7 @@ impl Storage {
         Ok(bytes)
     }
 
-    pub async fn size(&self, path: &str) -> Result<u64, String> {
+    pub(crate) async fn size_direct(&self, path: &str) -> Result<u64, String> {
         self.store
             .head(&ObjectPath::from(path))
             .await
@@ -364,7 +374,7 @@ impl Storage {
             .map_err(|e| format!("head {path}: {e}"))
     }
 
-    pub async fn exists(&self, path: &str) -> Result<bool, String> {
+    pub(crate) async fn exists_direct(&self, path: &str) -> Result<bool, String> {
         match self.store.head(&ObjectPath::from(path)).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
