@@ -23,6 +23,7 @@ const HUGE_PAGES_2M: &str = "2M";
 
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone)]
 pub struct FirecrackerClient {
     socket: PathBuf,
     timeout: Duration,
@@ -88,6 +89,12 @@ impl FirecrackerClient {
                 .map_err(|e| format!("error installing balloon device: error installing balloon device: {e}")),
             false => Ok(()),
         }
+    }
+
+    pub async fn flush_metrics(&self) -> Result<(), String> {
+        self.put("/actions", json!({ "action_type": "FlushMetrics" }))
+            .await
+            .map_err(|e| format!("error flushing fc metrics: {e}"))
     }
 
     pub async fn set_rate_limits(&self) -> Result<(), String> {

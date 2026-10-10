@@ -283,6 +283,7 @@ impl Node {
         self.network.start();
         self.upload_limiter.start_refresh();
         self.envd_upgrades.start_warm();
+        crate::telemetry::fc::start_dirty_page_monitor();
         tokio::spawn(self.templates.clone().run_eviction());
         let runtime_flags = self.runtime_flags.clone();
         tokio::spawn(

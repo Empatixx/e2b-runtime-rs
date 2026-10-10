@@ -8,7 +8,8 @@ use tokio::time::Instant;
 use crate::firecracker::client::{
     BalloonCaps, FirecrackerClient, HintingCallError, HintingStart, HintingStatus, HintingStop,
 };
-use crate::telemetry::hinting::{record_hint_run, record_hint_stop};
+use crate::firecracker::metrics::FirecrackerMetrics;
+use crate::telemetry::hinting::{record_hint_freed, record_hint_run, record_hint_stop};
 
 const HINT_STOP: i64 = 0;
 const HINT_DONE: i64 = 1;
@@ -21,6 +22,7 @@ const MAX_BACKOFF: Duration = Duration::from_millis(50);
 const EXIT_CHECKS: usize = 5;
 const EXIT_CHECK_INTERVAL: Duration = Duration::from_millis(20);
 const PHASE_PRE_PAUSE: &str = "pre-pause";
+const FREED_READ_TIMEOUT: Duration = Duration::from_millis(500);
 pub const USE_CASE_PAUSE: &str = "pause";
 pub const USE_CASE_BUILD: &str = "build";
 
@@ -29,23 +31,44 @@ pub trait HintingApi: Sync {
     fn start(&self) -> impl Future<Output = Result<HintingStart, HintingCallError>> + Send;
     fn stop(&self) -> impl Future<Output = Result<HintingStop, HintingCallError>> + Send;
     fn status(&self) -> impl Future<Output = Result<HintingStatus, HintingCallError>> + Send;
+    fn hint_freed(&self) -> u64;
+    fn flush_hint_freed(&self) -> impl Future<Output = Result<u64, String>> + Send;
 }
 
-impl HintingApi for FirecrackerClient {
+pub struct VmHinting<'a> {
+    pub client: FirecrackerClient,
+    pub metrics: Option<&'a FirecrackerMetrics>,
+}
+
+impl HintingApi for VmHinting<'_> {
     async fn caps(&self) -> Result<BalloonCaps, String> {
-        self.balloon_caps().await
+        self.client.balloon_caps().await
     }
 
     async fn start(&self) -> Result<HintingStart, HintingCallError> {
-        self.start_balloon_hinting().await
+        self.client.start_balloon_hinting().await
     }
 
     async fn stop(&self) -> Result<HintingStop, HintingCallError> {
-        self.stop_balloon_hinting().await
+        self.client.stop_balloon_hinting().await
     }
 
     async fn status(&self) -> Result<HintingStatus, HintingCallError> {
-        self.balloon_hinting_status().await
+        self.client.balloon_hinting_status().await
+    }
+
+    fn hint_freed(&self) -> u64 {
+        self.metrics.map_or(0, |metrics| metrics.balloon().hint_freed)
+    }
+
+    async fn flush_hint_freed(&self) -> Result<u64, String> {
+        match self.metrics {
+            Some(metrics) => metrics
+                .flush_and_read_balloon(&self.client)
+                .await
+                .map(|balloon| balloon.hint_freed),
+            None => Err("firecracker metrics are not being read".to_owned()),
+        }
     }
 }
 
@@ -279,6 +302,7 @@ pub struct PrePauseDrain<'a, A: HintingApi> {
 impl<A: HintingApi> PrePauseDrain<'_, A> {
     pub async fn run(&self) {
         let started = Instant::now();
+        let freed_before = self.api.hint_freed();
         let drained = drain(
             self.api,
             self.state,
@@ -288,7 +312,11 @@ impl<A: HintingApi> PrePauseDrain<'_, A> {
         .await;
         let took = started.elapsed();
         match drained {
-            Ok(()) => record_hint_run(PHASE_PRE_PAUSE, "ok", took),
+            Ok(()) => {
+                record_hint_run(PHASE_PRE_PAUSE, "ok", took);
+                let freed_after = self.freed_after().await;
+                record_hint_freed(PHASE_PRE_PAUSE, freed_after.saturating_sub(freed_before));
+            }
             Err(DrainFailure::NotConfigured) => record_hint_run(PHASE_PRE_PAUSE, "not-configured", Duration::ZERO),
             Err(DrainFailure::InFlight { outcome, message }) => {
                 self.stop_abandoned().await;
@@ -303,6 +331,13 @@ impl<A: HintingApi> PrePauseDrain<'_, A> {
                 record_hint_run(PHASE_PRE_PAUSE, "failed", took);
                 tracing::error!(sandbox.id = self.sandbox_id, error = %message, "balloon hinting drain failed (continuing pause)");
             }
+        }
+    }
+
+    async fn freed_after(&self) -> u64 {
+        match tokio::time::timeout(FREED_READ_TIMEOUT, self.api.flush_hint_freed()).await {
+            Ok(Ok(freed)) => freed,
+            _ => self.api.hint_freed(),
         }
     }
 
@@ -361,11 +396,14 @@ impl super::Sandbox {
         let Some(vm) = self.resources.vm.as_ref().filter(|_| !hint.timeout.is_zero()) else {
             return;
         };
-        let client = vm.client();
+        let api = VmHinting {
+            client: vm.client(),
+            metrics: vm.metrics(),
+        };
         let pid = vm.pid();
         let exited = move || pid.is_none_or(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists());
         PrePauseDrain {
-            api: &client,
+            api: &api,
             state: &self.hinting,
             hint,
             sandbox_id: &self.config.id,
@@ -425,6 +463,14 @@ mod tests {
 
         async fn stop(&self) -> Result<HintingStop, HintingCallError> {
             self.stop.clone()
+        }
+
+        fn hint_freed(&self) -> u64 {
+            0
+        }
+
+        async fn flush_hint_freed(&self) -> Result<u64, String> {
+            Ok(0)
         }
 
         async fn status(&self) -> Result<HintingStatus, HintingCallError> {

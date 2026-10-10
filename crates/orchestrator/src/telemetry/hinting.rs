@@ -29,6 +29,16 @@ static STOPS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static FREED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    METER
+        .u64_counter("orchestrator.sandbox.fph.freed_bytes")
+        .with_description(
+            "Bytes discarded by completed free-page-hinting drains and runs (FC free_page_hint_freed before the drain and after a metrics flush that follows it), labeled by phase",
+        )
+        .with_unit("By")
+        .build()
+});
+
 static RUN_DURATION: LazyLock<Histogram<u64>> = LazyLock::new(|| {
     METER
         .u64_histogram("orchestrator.sandbox.fph.duration")
@@ -49,6 +59,12 @@ pub fn record_hint_run(phase: &'static str, outcome: &'static str, took: Duratio
     RUNS.add(1, &[KeyValue::new("phase", phase), KeyValue::new("outcome", outcome)]);
     if outcome == "ok" {
         RUN_DURATION.record(took.as_millis() as u64, &[KeyValue::new("phase", phase)]);
+    }
+}
+
+pub fn record_hint_freed(phase: &'static str, freed: u64) {
+    if freed > 0 {
+        FREED.add(freed, &[KeyValue::new("phase", phase)]);
     }
 }
 

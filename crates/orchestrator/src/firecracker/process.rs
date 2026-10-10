@@ -13,6 +13,7 @@ use super::client::FirecrackerClient;
 use super::console::ConsoleTap;
 use super::exit::ExitInfo;
 use super::launch::Launch;
+use super::metrics::FirecrackerMetrics;
 
 const READY_POLLS: u32 = 5000;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -28,6 +29,7 @@ pub struct FirecrackerProcess {
     socket: PathBuf,
     console_tap: ConsoleTap,
     drained: Option<JoinHandle<()>>,
+    metrics: Option<FirecrackerMetrics>,
 }
 
 impl FirecrackerProcess {
@@ -42,6 +44,7 @@ impl FirecrackerProcess {
             socket: launch.socket.clone(),
             console_tap,
             drained,
+            metrics: None,
         };
         process.wait_until_ready().await?;
         Ok(process)
@@ -68,6 +71,16 @@ impl FirecrackerProcess {
 
     pub fn client(&self) -> FirecrackerClient {
         FirecrackerClient::new(self.socket.clone())
+    }
+
+    pub async fn start_metrics(&mut self, fifo: &Path, sandbox_id: &str) -> Result<(), String> {
+        let metrics = FirecrackerMetrics::start(fifo, self.client(), sandbox_id).await?;
+        self.metrics = Some(metrics);
+        Ok(())
+    }
+
+    pub fn metrics(&self) -> Option<&FirecrackerMetrics> {
+        self.metrics.as_ref()
     }
 
     pub async fn kill(mut self) -> Result<(), String> {

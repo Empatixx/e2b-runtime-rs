@@ -6,6 +6,7 @@ pub mod exit;
 pub mod kernel_args;
 pub mod launch;
 pub mod memory_info;
+pub mod metrics;
 pub mod mmds;
 #[cfg(target_os = "linux")]
 pub mod process;

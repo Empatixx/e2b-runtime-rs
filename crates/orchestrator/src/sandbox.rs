@@ -48,6 +48,8 @@ pub struct Death {
     pub exit: Option<ExitInfo>,
 }
 
+const METRICS_FIFO: &str = "fc-metrics.fifo";
+
 pub struct Sandbox {
     config: SandboxConfig,
     resources: Resources,
@@ -253,9 +255,16 @@ impl Sandbox {
             .kernel(self.config.kernel.clone().unwrap_or_else(|| PathBuf::from("/dev/null")))
             .maybe_cgroup(cgroup)
             .build();
-        let vm = FirecrackerProcess::spawn(&launch).await?;
+        let mut vm = FirecrackerProcess::spawn(&launch).await?;
         if let Some(console) = self.config.console.clone() {
             forward_console(vm.console_lines(), console);
+        }
+        let started = vm
+            .start_metrics(&self.config.work_dir.join(METRICS_FIFO), &self.config.id)
+            .await;
+        if let Err(e) = started {
+            let _ = vm.kill().await;
+            return Err(e);
         }
         self.balloon.install_reader(balloon::cached_reader(vm.client()));
         Ok(self.resources.vm.insert(vm).client())
