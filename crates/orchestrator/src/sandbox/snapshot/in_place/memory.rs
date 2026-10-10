@@ -14,7 +14,7 @@ use crate::block::build_file::{Ready, ready_now};
 use crate::memory::dedup::config::DedupConfig;
 use crate::memory::snapshot::diff_metadata;
 use crate::sandbox::Sandbox;
-use crate::sandbox::snapshot::{Exported, LocalSnapshot, MemoryPages, Snapshot, SnapshotFiles, exported};
+use crate::sandbox::snapshot::{DiskExport, Exported, LocalSnapshot, MemoryPages, Snapshot, SnapshotFiles, exported};
 use crate::storage::build::Build;
 use crate::telemetry::server::in_place::ProcessMemoryOutcome;
 use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
@@ -34,6 +34,7 @@ pub struct MemoryCheckpointRequest {
     pub balloon_mode: String,
     pub defer_export: bool,
     pub tracker_dirty: bool,
+    pub defer_rootfs: bool,
 }
 
 pub struct MemoryCheckpoint {
@@ -60,7 +61,7 @@ struct Exports {
     tracked_writes: bool,
     ready: Ready,
     pending: Option<Pending>,
-    rootfs: Exported,
+    rootfs: DiskExport,
 }
 
 impl Sandbox {
@@ -68,6 +69,7 @@ impl Sandbox {
         &self,
         request: &MemoryCheckpointRequest,
     ) -> Result<MemoryCheckpoint, InPlaceFailure> {
+        self.wait_for_rootfs_seal().await.map_err(InPlaceFailure::alive)?;
         self.wait_for_memory_seal()
             .await
             .map_err(|e| InPlaceFailure::alive(format!("previous memory capture did not complete: {e}")))?;
@@ -230,7 +232,10 @@ impl Sandbox {
             team_id: request.team_id.clone(),
         }
         .record(started.elapsed());
-        let rootfs = match self.export_disk(&files.rootfs, request.build_id).await {
+        let rootfs = match self
+            .export_disk_in_place(&files.rootfs, request.build_id, request.defer_rootfs)
+            .await
+        {
             Ok(rootfs) => rootfs,
             Err(e) => {
                 return Err(Box::new(ExportFailure {
@@ -311,17 +316,17 @@ impl Sandbox {
                     build: Build {
                         build_id: request.build_id,
                         memfile: exports.memfile.header,
-                        rootfs: exports.rootfs.header,
+                        rootfs: exports.rootfs.exported.header,
                     },
                     memfile_bytes: exports.memfile.bytes,
                     memory_bytes: exports.memory_bytes,
-                    rootfs_bytes: exports.rootfs.bytes,
+                    rootfs_bytes: exports.rootfs.exported.bytes,
                     tracked_writes: exports.tracked_writes,
                     vm_vcpus: self.resolved_vm_vcpus,
                 },
                 files,
                 memfile_ready: exports.ready,
-                rootfs_ready: ready_now(),
+                rootfs_ready: exports.rootfs.sealed.clone(),
             },
             deferred,
         })

@@ -560,6 +560,7 @@ async fn a_memory_checkpoint_in_place_keeps_the_sandbox_running() {
             balloon_mode: String::new(),
             defer_export: false,
             tracker_dirty: false,
+            defer_rootfs: true,
         })
         .await
         .map_err(|failure| failure.message)
@@ -571,7 +572,14 @@ async fn a_memory_checkpoint_in_place_keeps_the_sandbox_running() {
         .await
         .unwrap();
     write_file(&running, "/dev/shm/e2b/state", "after checkpoint").await;
+    write_file(&running, "/home/user/after.txt", "disk after checkpoint").await;
+    run_in_guest(&running, "sync").await;
+    running.wait_for_rootfs_seal().await.unwrap();
     let still_running = (health(&running).await, read_file(&running, "/dev/shm/e2b/state").await);
+    let disk_after_fold = [
+        read_file(&running, "/home/user/disk.txt").await,
+        read_file(&running, "/home/user/after.txt").await,
+    ];
     running.stop().await.unwrap();
 
     let restored = templates
@@ -595,6 +603,10 @@ async fn a_memory_checkpoint_in_place_keeps_the_sandbox_running() {
         exported.memfile_bytes, exported.memory_bytes, exported.tracked_writes, exported.rootfs_bytes
     );
     assert_eq!(still_running, (204, (200, "after checkpoint".to_owned())));
+    assert_eq!(
+        disk_after_fold,
+        ["disk before checkpoint", "disk after checkpoint"].map(|text| (200, text.to_owned()))
+    );
     assert_eq!(
         restored_files,
         ["before checkpoint", "disk before checkpoint", "alive\n"].map(|text| (200, text.to_owned()))

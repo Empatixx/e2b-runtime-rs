@@ -11,7 +11,7 @@ use super::route::BalloonMode;
 use super::{CheckpointRequest, object_metadata, trace};
 use crate::events::{CHECKPOINTED, KILLED, SandboxEvent};
 use crate::featureflags::{
-    DEFER_MEMORY_EXPORT, FS_FREEZE_VIA_EXEC, GUEST_SYNC_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
+    DEFER_MEMORY_EXPORT, DEFER_ROOTFS_EXPORT, FS_FREEZE_VIA_EXEC, GUEST_SYNC_TIMEOUT_MS, PEER_TO_PEER_ASYNC_CHECKPOINT,
     SYNC_WP_TRACKER_DIRTY,
 };
 use crate::proto::SchedulingMetadata;
@@ -101,6 +101,7 @@ impl Node {
             balloon_mode: balloon_mode.as_str().to_owned(),
             defer_export: self.feature_flags.get(&DEFER_MEMORY_EXPORT, &contexts),
             tracker_dirty: parent.use_sync_wp && self.feature_flags.get(&SYNC_WP_TRACKER_DIRTY, &contexts),
+            defer_rootfs: self.feature_flags.get(&DEFER_ROOTFS_EXPORT, &contexts),
         };
         let checkpoint = self
             .take_memory_checkpoint(handle, memory_request)
@@ -220,7 +221,7 @@ impl Node {
             },
             team_id: parent.config.team_id.clone(),
             balloon_mode: balloon_mode.as_str().to_owned(),
-            defer_rootfs: false,
+            defer_rootfs: self.feature_flags.get(&DEFER_ROOTFS_EXPORT, &contexts),
         };
         let (reply, checkpoint) = oneshot::channel();
         let stopped = || InPlaceFailure {

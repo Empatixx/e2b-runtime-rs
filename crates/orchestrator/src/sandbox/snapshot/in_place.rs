@@ -121,6 +121,7 @@ impl Sandbox {
         &self,
         request: &FilesystemCheckpointRequest,
     ) -> Result<FilesystemCheckpoint, InPlaceFailure> {
+        self.wait_for_rootfs_seal().await.map_err(InPlaceFailure::alive)?;
         let quiesce = self.guest_quiesce(request.flags);
         let prepared = self.quiesce_guest(&quiesce, request).await?;
         let mut freeze = Freeze {
@@ -146,6 +147,7 @@ impl Sandbox {
         &self,
         request: &FilesystemCheckpointRequest,
     ) -> Result<FilesystemCheckpoint, InPlaceFailure> {
+        self.wait_for_rootfs_seal().await.map_err(InPlaceFailure::alive)?;
         let quiesce = self.guest_quiesce(request.flags);
         let prepared = self.quiesce_guest(&quiesce, request).await?;
         let exported = match self.pause_vm().await {
@@ -217,8 +219,11 @@ impl Sandbox {
             .await
             .map_err(|e| format!("error creating snapshot: {e}"))?;
         let started = Instant::now();
-        let defer = request.defer_rootfs && !in_place;
-        let exported = self.export_disk_with(&files.rootfs, request.build_id, defer).await;
+        let defer = request.defer_rootfs;
+        let exported = match in_place {
+            true => self.export_disk_in_place(&files.rootfs, request.build_id, defer).await,
+            false => self.export_disk_with(&files.rootfs, request.build_id, defer).await,
+        };
         drop(std::fs::remove_file(&files.snapfile));
         ProcessRootfsOutcome {
             fs_only: true,
@@ -357,7 +362,8 @@ async fn within_state_flip(call: impl std::future::Future<Output = Result<(), St
 
 fn export_failure(in_place: bool, deferred: bool, error: String) -> String {
     match (in_place, deferred) {
-        (true, _) => format!("synchronous in-place rootfs export failed: {error}"),
+        (true, true) => format!("in-place rootfs export setup failed: {error}"),
+        (true, false) => format!("synchronous in-place rootfs export failed: {error}"),
         (false, true) => format!("deferred rootfs export setup failed: {error}"),
         (false, false) => format!("synchronous rootfs export failed: {error}"),
     }

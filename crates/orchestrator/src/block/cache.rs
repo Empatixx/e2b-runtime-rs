@@ -141,6 +141,41 @@ impl BlockCache {
         Ok(())
     }
 
+    pub fn fill_missing_from(&self, frozen: &BlockCache) -> io::Result<()> {
+        let (data, zero) = {
+            let tracker = frozen.tracker.read();
+            (tracker.data().clone(), tracker.zero().clone())
+        };
+        let mut block = vec![0; self.block_size as usize];
+        data.iter()
+            .try_for_each(|index| self.fill_block_from(frozen, index, &mut block))?;
+        zero.iter().try_for_each(|index| self.zero_block_if_missing(index))
+    }
+
+    fn fill_block_from(&self, frozen: &BlockCache, index: u32, block: &mut [u8]) -> io::Result<()> {
+        let offset = u64::from(index) * self.block_size;
+        let length = self.clamp(offset, self.block_size) as usize;
+        let mut tracker = self.tracker.write();
+        if tracker.is_present(index..index + 1) {
+            return Ok(());
+        }
+        frozen.file.read_at(offset, &mut block[..length])?;
+        self.file.write_at(offset, &block[..length])?;
+        tracker.set(index..index + 1, BlockState::Data);
+        Ok(())
+    }
+
+    fn zero_block_if_missing(&self, index: u32) -> io::Result<()> {
+        let offset = u64::from(index) * self.block_size;
+        let mut tracker = self.tracker.write();
+        if tracker.is_present(index..index + 1) {
+            return Ok(());
+        }
+        self.file.punch_hole(offset, self.clamp(offset, self.block_size))?;
+        tracker.set(index..index + 1, BlockState::Zero);
+        Ok(())
+    }
+
     fn punch(&self, offset: u64, length: u64) -> Result<(), String> {
         if length == 0 {
             return Ok(());
@@ -264,6 +299,25 @@ mod tests {
 
         assert_eq!(metadata.dirty.iter().collect::<Vec<_>>(), vec![0, 3]);
         assert_eq!(contents(&mut out), [vec![9; 4096], vec![3; 4096]].concat());
+    }
+
+    #[test]
+    fn a_fold_fills_only_the_blocks_the_live_cache_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen = BlockCache::create(&dir.path().join("frozen"), 4 * 4096, 4096).unwrap();
+        let live = BlockCache::create(&dir.path().join("live"), 4 * 4096, 4096).unwrap();
+        frozen.write_at(0, &[1; 4096]).unwrap();
+        frozen.write_at(4096, &[2; 4096]).unwrap();
+        frozen.write_zeroes_at(2 * 4096, 4096).unwrap();
+        live.write_at(4096, &[9; 4096]).unwrap();
+
+        live.fill_missing_from(&frozen).unwrap();
+
+        let mut out = tempfile::tempfile().unwrap();
+        let diff = live.export_diff(&mut out).unwrap();
+        assert_eq!(diff.dirty.iter().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(diff.empty.iter().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(contents(&mut out), [vec![1; 4096], vec![9; 4096]].concat());
     }
 
     #[test]

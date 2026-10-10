@@ -69,6 +69,8 @@ With `defer-rootfs-export` on, a pause only records which overlay blocks changed
 
 A checkpoint is a pause followed by an immediate resume of the new build. The sandbox keeps running, and the API can later resume it from that moment.
 
+An in-place checkpoint with `defer-rootfs-export` on swaps a fresh write cache into the overlay while the VM is paused. The guest resumes and writes to the new cache. The old cache is written to the rootfs diff in the background and then folded back: only blocks the new cache does not have yet are copied, so newer guest writes win. The next pause or checkpoint waits for that fold to finish.
+
 ## Kill
 
 Delete stops the lifecycle task, which kills Firecracker, stops the memory server, detaches the NBD device, returns the network slot (after a 3 s delay, like upstream), removes the cgroup and deletes the work files.

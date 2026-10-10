@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::Sandbox;
 use super::config::Rootfs;
 use crate::block::build_file::{BuildFile, Ready, ready_now};
+use crate::block::cache::BlockCache;
 use crate::block::file_diff::export_file_diff;
 use crate::block::overlay::Overlay;
 use crate::firecracker::client::FirecrackerClient;
@@ -163,6 +164,7 @@ impl Sandbox {
         build_id: Uuid,
         options: SnapshotOptions,
     ) -> Result<LocalSnapshot, String> {
+        self.wait_for_rootfs_seal().await?;
         let vm = self.resources.vm.as_ref().ok_or("firecracker is not running")?;
         let pid = vm.pid().ok_or("firecracker has exited")?;
         let client = vm.client();
@@ -241,6 +243,54 @@ impl Sandbox {
                 deferred: false,
             }),
         }
+    }
+
+    pub async fn wait_for_rootfs_seal(&self) -> Result<(), String> {
+        let seal = self.rootfs_seal.lock().clone();
+        match seal {
+            Some(seal) => seal
+                .await
+                .map_err(|e| format!("previous rootfs seal did not complete: {e}")),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn export_disk_in_place(&self, path: &Path, build_id: Uuid, defer: bool) -> Result<DiskExport, String> {
+        let deferrable = match (&self.config.rootfs, defer) {
+            (Rootfs::Overlay(overlay), true) => Some(overlay.clone()),
+            _ => None,
+        };
+        let Some(overlay) = deferrable else {
+            return self.export_disk_with(path, build_id, false).await;
+        };
+        self.flush_disk().await?;
+        let frozen = overlay.swap_for_seal()?;
+        let parent = overlay.base().header().clone();
+        let metadata = frozen.diff_metadata();
+        record_snapshot_diff(&self.config.team_id, "rootfs", &metadata, &parent);
+        let exported = match exported(&metadata, &parent, build_id) {
+            Ok(exported) => exported,
+            Err(e) => {
+                return Err(match overlay.fold_seal() {
+                    Ok(()) => e,
+                    Err(fold) => format!("{e}; folding the seal back also failed: {fold}"),
+                });
+            }
+        };
+        let seal = InPlaceSeal {
+            overlay,
+            frozen,
+            path: path.to_path_buf(),
+            metadata,
+            team_id: self.config.team_id.clone(),
+        };
+        let (sealed, folded) = seal.start();
+        *self.rootfs_seal.lock() = Some(folded);
+        Ok(DiskExport {
+            exported,
+            sealed,
+            deferred: true,
+        })
     }
 
     fn seal_in_background(&self, overlay: Arc<Overlay>, path: &Path, build_id: Uuid) -> Result<DiskExport, String> {
@@ -500,6 +550,54 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|e| format!("{what}: {e}"))?
         .map_err(|e| format!("{what}: {e}"))
+}
+
+struct InPlaceSeal {
+    overlay: Arc<Overlay>,
+    frozen: Arc<BlockCache>,
+    path: PathBuf,
+    metadata: DiffMetadata,
+    team_id: String,
+}
+
+impl InPlaceSeal {
+    fn start(self) -> (Ready, Ready) {
+        let (exported, exported_now) = tokio::sync::oneshot::channel();
+        let folded = tokio::spawn(self.run(exported))
+            .map(|joined| joined.map_err(|e| format!("in-place rootfs export: {e}"))?)
+            .boxed()
+            .shared();
+        let sealed = exported_now
+            .map(|sent| sent.unwrap_or_else(|_| Err("in-place rootfs export stopped".to_owned())))
+            .boxed()
+            .shared();
+        (sealed, folded)
+    }
+
+    async fn run(self, exported: tokio::sync::oneshot::Sender<Result<(), String>>) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let InPlaceSeal {
+            overlay,
+            frozen,
+            path,
+            metadata,
+            team_id,
+        } = self;
+        let sealed = blocking("export rootfs diff", move || {
+            File::create(&path).and_then(|mut out| frozen.export_with(&mut out, &metadata))
+        })
+        .await
+        .map_err(|e| format!("in-place rootfs export failed: {e}"));
+        record_rootfs_seal(true, sealed.is_ok(), &team_id, started.elapsed());
+        if let Err(e) = &sealed {
+            tracing::error!(error = %e, "in-place rootfs export failed");
+        }
+        let _ = exported.send(sealed);
+        tokio::task::spawn_blocking(move || overlay.fold_seal())
+            .await
+            .map_err(|e| format!("fold the sealed rootfs cache back: {e}"))?
+            .inspect_err(|e| tracing::error!(error = %e, "in-place rootfs export fold-back failed"))
+    }
 }
 
 struct RootfsSeal {

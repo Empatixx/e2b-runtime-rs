@@ -1,15 +1,28 @@
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use parking_lot::RwLock;
 
 use super::build_file::BuildFile;
 use super::cache::BlockCache;
 use crate::storage::header::DiffMetadata;
 
+const SEAL_RUNNING: &str = "a rootfs seal is already running";
+
 pub struct Overlay {
     base: Arc<BuildFile>,
-    cache: BlockCache,
+    cache_path: PathBuf,
+    swaps: AtomicU32,
+    layers: RwLock<Layers>,
+}
+
+#[derive(Clone)]
+struct Layers {
+    writable: Arc<BlockCache>,
+    sealing: Option<Arc<BlockCache>>,
 }
 
 impl Overlay {
@@ -20,15 +33,23 @@ impl Overlay {
 
     pub fn with_size(base: Arc<BuildFile>, cache_path: &Path, size: u64) -> io::Result<Self> {
         let cache = BlockCache::create(cache_path, size, base.block_size())?;
-        Ok(Self { base, cache })
+        Ok(Self {
+            base,
+            cache_path: cache_path.to_path_buf(),
+            swaps: AtomicU32::new(0),
+            layers: RwLock::new(Layers {
+                writable: Arc::new(cache),
+                sealing: None,
+            }),
+        })
     }
 
     pub fn size(&self) -> u64 {
-        self.cache.size()
+        self.writable().size()
     }
 
     pub fn block_size(&self) -> u64 {
-        self.cache.block_size()
+        self.writable().block_size()
     }
 
     pub fn base(&self) -> &Arc<BuildFile> {
@@ -37,40 +58,75 @@ impl Overlay {
 
     pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         self.check_aligned(offset, buf.len() as u64)?;
-        let block_size = self.cache.block_size();
+        let layers = self.layers.read().clone();
+        let block_size = layers.writable.block_size();
         for (block, block_offset) in buf
             .chunks_mut(block_size as usize)
             .zip((offset..).step_by(block_size as usize))
         {
-            self.read_block(block_offset, block).await?;
+            self.read_block(&layers, block_offset, block).await?;
         }
         Ok(())
     }
 
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String> {
-        self.cache.write_at(offset, data)
+        self.writable().write_at(offset, data)
     }
 
     pub fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String> {
-        self.cache.write_zeroes_at(offset, length)
+        self.writable().write_zeroes_at(offset, length)
     }
 
     pub fn export_diff(&self, out: &mut File) -> io::Result<DiffMetadata> {
-        self.cache.export_diff(out)
+        self.writable().export_diff(out)
     }
 
     pub fn diff_metadata(&self) -> DiffMetadata {
-        self.cache.diff_metadata()
+        self.writable().diff_metadata()
     }
 
     pub fn export_with(&self, out: &mut File, metadata: &DiffMetadata) -> io::Result<()> {
-        self.cache.export_with(out, metadata)
+        self.writable().export_with(out, metadata)
     }
 
-    async fn read_block(&self, offset: u64, block: &mut [u8]) -> Result<(), String> {
-        let cached = self
-            .cache
-            .read_if_present(offset, block)
+    pub fn swap_for_seal(&self) -> Result<Arc<BlockCache>, String> {
+        let mut layers = self.layers.write();
+        if layers.sealing.is_some() {
+            return Err(SEAL_RUNNING.to_owned());
+        }
+        let generation = self.swaps.fetch_add(1, Ordering::SeqCst) + 1;
+        let path = self.cache_path.with_extension(format!("swap-{generation}"));
+        let fresh = BlockCache::create(&path, layers.writable.size(), layers.writable.block_size())
+            .map_err(|e| format!("create swapped rootfs cache {}: {e}", path.display()))?;
+        let frozen = std::mem::replace(&mut layers.writable, Arc::new(fresh));
+        layers.sealing = Some(frozen.clone());
+        Ok(frozen)
+    }
+
+    pub fn fold_seal(&self) -> Result<(), String> {
+        let layers = self.layers.read().clone();
+        let Some(frozen) = layers.sealing else {
+            return Ok(());
+        };
+        layers
+            .writable
+            .fill_missing_from(&frozen)
+            .map_err(|e| format!("fold the sealed rootfs cache back: {e}"))?;
+        self.layers.write().sealing = None;
+        Ok(())
+    }
+
+    fn writable(&self) -> Arc<BlockCache> {
+        self.layers.read().writable.clone()
+    }
+
+    async fn read_block(&self, layers: &Layers, offset: u64, block: &mut [u8]) -> Result<(), String> {
+        let cached = [Some(&layers.writable), layers.sealing.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|cache| cache.read_if_present(offset, block))
+            .find(|read| !matches!(read, Ok(false)))
+            .unwrap_or(Ok(false))
             .map_err(|e| format!("read overlay cache at {offset}: {e}"))?;
         if cached {
             return Ok(());
@@ -79,7 +135,7 @@ impl Overlay {
     }
 
     fn check_aligned(&self, offset: u64, length: u64) -> Result<(), String> {
-        let block_size = self.cache.block_size();
+        let block_size = self.block_size();
         if offset.is_multiple_of(block_size) && length.is_multiple_of(block_size) {
             return Ok(());
         }
@@ -155,6 +211,34 @@ mod tests {
         let resumed = BuildFile::new(header, Artifact::Rootfs, store);
         let after_resume = read_all(async |bytes| resumed.read_at(0, bytes).await).await;
         assert_eq!(after_resume, before_pause);
+    }
+
+    #[tokio::test]
+    async fn a_swapped_overlay_reads_through_the_sealing_cache_and_folds_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, template) = template(dir.path()).await;
+        let store = Arc::new(DiffStore::new(storage, dir.path().join("cache")));
+        let base = BuildFile::new(template, Artifact::Rootfs, store);
+        let overlay = Overlay::new(Arc::new(base), &dir.path().join("overlay")).unwrap();
+        overlay.write_at(0, &[7; 4096]).unwrap();
+        overlay.write_at(4096, &[8; 4096]).unwrap();
+
+        let frozen = overlay.swap_for_seal().unwrap();
+        overlay.write_at(4096, &[9; 4096]).unwrap();
+        let while_sealing = read_all(async |bytes| overlay.read_at(0, bytes).await).await;
+        let second_swap = overlay.swap_for_seal().err();
+        overlay.fold_seal().unwrap();
+        let after_fold = read_all(async |bytes| overlay.read_at(0, bytes).await).await;
+        let mut diff_file = tempfile::tempfile().unwrap();
+        let diff = overlay.export_diff(&mut diff_file).unwrap();
+
+        let expected = [vec![7; 4096], vec![9; 4096], vec![3; 4096], vec![4; 4096]].concat();
+        assert_eq!(while_sealing, expected);
+        assert_eq!(after_fold, expected);
+        assert_eq!(second_swap.as_deref(), Some("a rootfs seal is already running"));
+        assert_eq!(frozen.diff_metadata().dirty.iter().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(diff.dirty.iter().collect::<Vec<_>>(), vec![0, 1]);
+        assert!(overlay.swap_for_seal().is_ok(), "the fold frees the sealing slot");
     }
 
     #[tokio::test]

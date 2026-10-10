@@ -60,6 +60,7 @@ pub struct Sandbox {
     memory_export: self::snapshot::in_place::memory::MemoryExport,
     balloon: Arc<balloon::BalloonProbe>,
     hinting: hinting::HintingState,
+    rootfs_seal: parking_lot::Mutex<Option<crate::block::build_file::Ready>>,
     startup_recorded: std::sync::atomic::AtomicBool,
 }
 
@@ -159,6 +160,7 @@ impl Sandbox {
             memory_export: Default::default(),
             balloon: Default::default(),
             hinting: Default::default(),
+            rootfs_seal: parking_lot::Mutex::default(),
             startup_recorded: Default::default(),
         }
     }

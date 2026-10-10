@@ -69,6 +69,8 @@ Se zapnutým `defer-rootfs-export` pause jen zaznamená, které bloky overlaye s
 
 Checkpoint je pause, po které hned následuje probuzení nového buildu. Sandbox běží dál a API ho může později probudit z toho okamžiku.
 
+Checkpoint na místě se zapnutým `defer-rootfs-export` vymění během pozastavení VM zapisovací cache overlaye za novou. Host pokračuje a zapisuje do nové cache. Stará cache se na pozadí zapíše do rozdílu rootfs a pak se vrátí zpět: zkopírují se jen bloky, které nová cache ještě nemá, takže novější zápisy hosta vyhrají. Další pause nebo checkpoint počká, až je tohle vrácení hotové.
+
 ## Kill
 
 Delete zastaví úlohu životního cyklu, ta ukončí Firecracker, zastaví paměťový server, odpojí NBD zařízení, vrátí síťový slot (po 3 s, stejně jako Go), smaže cgroupu a pracovní soubory.
