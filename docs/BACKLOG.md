@@ -42,7 +42,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Matters from |
 |---|---|
-| A failed upload is only logged; upstream also counts it in a metric and keeps the template marked for the superseded-release logic | API |
 | A process that exits during forced shutdown before starting sandboxes finish leaves their slots and cgroups to the next startup sweep | API |
 
 ## Orchestrator: template builder (M13 to M16)
@@ -54,7 +53,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Metrics keep the SDK default cardinality limit of 2000 series per interval: the Rust SDK preallocates by the limit, so it is not lifted for delta counters and histograms as upstream does | perf |
+| Delta counters and histograms keep up to 20 000 series per export interval; upstream lifts the cap entirely, but the Rust SDK preallocates its maps by the limit and rejects an unbounded one | later |
 | No per-sandbox LaunchDarkly log routing (`logs-write-config`), mutual TLS, gRPC server credentials or connection age | later |
 
 ## Orchestrator: vCPU hotplug and filesystem boot

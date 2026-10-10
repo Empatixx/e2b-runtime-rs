@@ -12,6 +12,7 @@ use super::server::network::{EGRESS_RETIREMENT_DURATION, SLOT_RETURN_DURATION};
 const METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(15);
 const SANDBOX_METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(5);
 const HISTOGRAM_MAX_BUCKETS: u32 = 160;
+const LIFTED_CARDINALITY_LIMIT: usize = 20_000;
 const HISTOGRAM_MAX_SCALE: i8 = 20;
 const EXPLICIT_HISTOGRAMS: [&str; 2] = [SLOT_RETURN_DURATION, EGRESS_RETIREMENT_DURATION];
 const EXPLICIT_BOUNDARIES: [f64; 14] = [
@@ -31,7 +32,7 @@ pub fn meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMete
     Ok(SdkMeterProvider::builder()
         .with_reader(reader)
         .with_resource(resource)
-        .with_view(exponential_histograms)
+        .with_view(low_memory_streams)
         .build())
 }
 
@@ -48,23 +49,27 @@ pub fn sandbox_meter_provider(endpoint: &Endpoint, resource: Resource) -> Result
     Ok(SdkMeterProvider::builder()
         .with_reader(reader)
         .with_resource(resource)
-        .with_view(unlimited_cardinality)
+        .with_view(lifted_cardinality)
         .build())
 }
 
-fn unlimited_cardinality(_: &Instrument) -> Option<Stream> {
-    Stream::builder().with_cardinality_limit(usize::MAX).build().ok()
+fn lifted_cardinality(_: &Instrument) -> Option<Stream> {
+    Stream::builder()
+        .with_cardinality_limit(LIFTED_CARDINALITY_LIMIT)
+        .build()
+        .ok()
 }
 
-fn exponential_histograms(instrument: &Instrument) -> Option<Stream> {
-    (instrument.kind() == InstrumentKind::Histogram)
-        .then(|| {
-            Stream::builder()
-                .with_aggregation(histogram_aggregation(instrument.name()))
-                .build()
-                .ok()
-        })
-        .flatten()
+fn low_memory_streams(instrument: &Instrument) -> Option<Stream> {
+    match instrument.kind() {
+        InstrumentKind::Histogram => Stream::builder()
+            .with_aggregation(histogram_aggregation(instrument.name()))
+            .with_cardinality_limit(LIFTED_CARDINALITY_LIMIT)
+            .build()
+            .ok(),
+        InstrumentKind::Counter => lifted_cardinality(instrument),
+        _ => None,
+    }
 }
 
 fn histogram_aggregation(name: &str) -> Aggregation {
@@ -90,11 +95,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delta_counters_keep_more_series_than_the_sdk_default_limit() {
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder::new()
+            .with_temporality(Temporality::LowMemory)
+            .build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .with_view(low_memory_streams)
+            .build();
+        let counter = provider.meter("test").u64_counter("per.team").build();
+        (0..3000).for_each(|team| counter.add(1, &[opentelemetry::KeyValue::new("team.id", team)]));
+
+        provider.force_flush().unwrap();
+
+        let finished = exporter.get_finished_metrics().unwrap();
+        let points = finished
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .map(|metric| match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => sum.data_points().count(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        assert_eq!(points, 3000);
+    }
+
+    #[test]
     fn the_network_release_histograms_export_explicit_buckets() {
         let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
             .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .with_view(exponential_histograms)
+            .with_view(low_memory_streams)
             .build();
         let meter = provider.meter("test");
         [SLOT_RETURN_DURATION, EGRESS_RETIREMENT_DURATION]
