@@ -490,7 +490,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deleting_a_running_build_cancels_it_without_a_step() {
         let fixture = fixture();
         fixture.server.template_create(create("bc", "hang")).await.unwrap();

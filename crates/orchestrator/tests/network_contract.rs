@@ -9,6 +9,8 @@ use std::time::Duration;
 use orchestrator::network::pool::{NetworkPool, RETURN_DELAY};
 use orchestrator::network::slot::{HostSlots, Slot, host_slot_storage};
 
+const SLOT_WAIT: Duration = Duration::from_secs(10);
+
 fn root() -> bool {
     nix::unistd::geteuid().is_root()
 }
@@ -263,6 +265,13 @@ async fn firecracker_that_exits_early_is_reported_not_awaited() {
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
 
+async fn next_slot(pool: &NetworkPool<HostSlots>) -> Slot {
+    tokio::time::timeout(SLOT_WAIT, pool.get())
+        .await
+        .expect("the pool made no slot in time")
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pool_recycles_a_returned_slot() {
     if !root() {
@@ -275,10 +284,10 @@ async fn pool_recycles_a_returned_slot() {
     let pool = NetworkPool::new(HostSlots, host_slot_storage(4020..=4021));
     pool.start();
 
-    let slot = pool.get().await.unwrap();
+    let slot = next_slot(&pool).await;
     pool.return_slot(slot);
     tokio::time::sleep(RETURN_DELAY + Duration::from_millis(500)).await;
-    let recycled = pool.get().await.unwrap();
+    let recycled = next_slot(&pool).await;
     let namespace = slot.namespace();
     let reachable = succeeds("ip", &["link", "show", &slot.host_veth()])
         && succeeds("ip", &["netns", "exec", &namespace, "ip", "link", "show", "tap0"])
