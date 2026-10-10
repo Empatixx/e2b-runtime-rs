@@ -3,7 +3,6 @@ use std::cmp::Ordering;
 use semver::Version;
 
 const MIN_FOR_SNAPSHOT: &str = "0.5.0";
-pub const MIN_FOR_UPGRADE: &str = "0.6.12";
 
 pub fn check_for_snapshot(envd_version: &str) -> Result<(), String> {
     is_at_least(envd_version, MIN_FOR_SNAPSHOT)

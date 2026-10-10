@@ -2,7 +2,6 @@ pub mod body;
 pub mod cpus;
 pub mod files;
 pub mod process;
-pub mod upgrade;
 pub mod version;
 
 use std::collections::BTreeMap;
