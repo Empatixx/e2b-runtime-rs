@@ -406,7 +406,7 @@ mod tests {
         );
         assert_eq!(
             error("s3://b?prefix=x"),
-            "storage URL \"s3://b?prefix=x\": unsupported query parameter \"prefix\" (want endpoint, s3ForcePathStyle, or region)"
+            "storage URL \"s3://b?prefix=x\": unsupported query parameter \"prefix\" (want endpoint, s3ForcePathStyle, region, ssetype, or kmskeyid)"
         );
         assert_eq!(
             error("file:x?y=1"),
