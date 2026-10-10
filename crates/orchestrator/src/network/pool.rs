@@ -1,20 +1,26 @@
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument;
 
 use super::firewall::EgressRules;
 use super::slot::Slot;
 use super::storage::SlotStorage;
+use crate::telemetry::server::network::{SlotReturn, SlotReturnResult};
 
 pub const NEW_SLOTS_POOL_SIZE: usize = 32;
 pub const REUSED_SLOTS_POOL_SIZE: usize = 100;
 pub const RETURN_DELAY: Duration = Duration::from_secs(3);
+fn closed() -> String {
+    "network pool is closed".to_owned()
+}
+
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub trait SlotFactory: Send + Sync + 'static {
@@ -50,23 +56,27 @@ impl<F: SlotFactory> Drop for SlotLease<F> {
 pub struct NetworkPool<F> {
     factory: F,
     storage: SlotStorage,
+    network_version: u8,
     new_slots: tokio::sync::Mutex<mpsc::Receiver<Slot>>,
     new_sender: mpsc::Sender<Slot>,
     reused: Mutex<VecDeque<Slot>>,
+    reused_added: Notify,
     custom_rules: Mutex<HashSet<u32>>,
     tasks: TaskTracker,
     done: CancellationToken,
 }
 
 impl<F: SlotFactory> NetworkPool<F> {
-    pub fn new(factory: F, storage: SlotStorage) -> Arc<Self> {
+    pub fn new(factory: F, storage: SlotStorage, network_version: u8) -> Arc<Self> {
         let (new_sender, new_slots) = mpsc::channel(NEW_SLOTS_POOL_SIZE - 1);
         Arc::new(Self {
             factory,
             storage,
+            network_version,
             new_slots: tokio::sync::Mutex::new(new_slots),
             new_sender,
             reused: Mutex::default(),
+            reused_added: Notify::new(),
             custom_rules: Mutex::default(),
             tasks: TaskTracker::new(),
             done: CancellationToken::new(),
@@ -78,12 +88,15 @@ impl<F: SlotFactory> NetworkPool<F> {
     }
 
     pub async fn get(&self) -> Result<Slot, String> {
-        if let Some(slot) = self.reused.lock().pop_front() {
-            return Ok(slot);
-        }
-        tokio::select! {
-            slot = async { self.new_slots.lock().await.recv().await } => slot.ok_or_else(|| "network pool is closed".to_owned()),
-            () = self.done.cancelled() => Err("network pool is closed".to_owned()),
+        loop {
+            if let Some(slot) = self.reused.lock().pop_front() {
+                return Ok(slot);
+            }
+            tokio::select! {
+                slot = async { self.new_slots.lock().await.recv().await } => return slot.ok_or_else(closed),
+                () = self.reused_added.notified() => {}
+                () = self.done.cancelled() => return Err(closed()),
+            }
         }
     }
 
@@ -127,17 +140,37 @@ impl<F: SlotFactory> NetworkPool<F> {
 
     pub fn discard_slot(self: &Arc<Self>, slot: Slot) {
         let pool = self.clone();
-        self.tasks.spawn(async move { pool.cleanup(slot).await });
+        self.tasks.spawn(async move { pool.destroy(slot).await });
     }
 
     fn return_after(self: &Arc<Self>, slot: Slot, delay: Duration) {
         let pool = self.clone();
-        self.tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(delay) => pool.recycle(slot).await,
-                () = pool.done.cancelled() => pool.cleanup(slot).await,
-            }
-        });
+        self.tasks.spawn(
+            async move { pool.return_timed(slot, delay).await }.instrument(tracing::info_span!(
+                "clean network-slot",
+                network_version = self.network_version
+            )),
+        );
+    }
+
+    async fn return_timed(&self, slot: Slot, delay: Duration) {
+        let started = Instant::now();
+        let shutdown = tokio::select! {
+            () = tokio::time::sleep(delay) => false,
+            () = self.done.cancelled() => true,
+        };
+        let cleanup_started = Instant::now();
+        let returned = match shutdown {
+            true => self.cleanup(slot).await,
+            false => self.recycle(slot).await,
+        };
+        SlotReturn {
+            network_version: self.network_version,
+            result: slot_return_result(shutdown, &returned),
+            total: started.elapsed(),
+            cleanup: cleanup_started.elapsed(),
+        }
+        .record();
     }
 
     pub async fn close(&self) {
@@ -147,11 +180,11 @@ impl<F: SlotFactory> NetworkPool<F> {
         let mut new_slots = self.new_slots.lock().await;
         new_slots.close();
         while let Ok(slot) = new_slots.try_recv() {
-            self.cleanup(slot).await;
+            self.destroy(slot).await;
         }
         let reused: Vec<Slot> = self.reused.lock().drain(..).collect();
         for slot in reused {
-            self.cleanup(slot).await;
+            self.destroy(slot).await;
         }
     }
 
@@ -178,40 +211,55 @@ impl<F: SlotFactory> NetworkPool<F> {
     async fn offer(&self, slot: Slot) {
         tokio::select! {
             sent = self.new_sender.send(slot) => if let Err(mpsc::error::SendError(unsent)) = sent {
-                self.cleanup(unsent).await;
+                self.destroy(unsent).await;
             },
-            () = self.done.cancelled() => self.cleanup(slot).await,
+            () = self.done.cancelled() => self.destroy(slot).await,
         }
     }
 
-    async fn recycle(&self, slot: Slot) {
+    async fn recycle(&self, slot: Slot) -> Result<(), String> {
         if self.custom_rules.lock().remove(&slot.index)
             && let Err(e) = self.factory.configure(slot, &EgressRules::default()).await
         {
             tracing::warn!(slot = slot.index, error = %e, "could not reset the slot firewall");
-            self.cleanup(slot).await;
-            return;
+            return self.cleanup(slot).await.and(Err(e));
         }
         let rejected = {
             let mut reused = self.reused.lock();
             match reused.len() < REUSED_SLOTS_POOL_SIZE {
                 true => {
                     reused.push_back(slot);
+                    self.reused_added.notify_one();
                     None
                 }
                 false => Some(slot),
             }
         };
-        if let Some(slot) = rejected {
-            self.cleanup(slot).await;
+        match rejected {
+            Some(slot) => self.cleanup(slot).await,
+            None => Ok(()),
         }
     }
 
-    async fn cleanup(&self, slot: Slot) {
-        if let Err(e) = self.factory.destroy(slot).await {
+    async fn destroy(&self, slot: Slot) {
+        drop(self.cleanup(slot).await);
+    }
+
+    async fn cleanup(&self, slot: Slot) -> Result<(), String> {
+        let destroyed = self.factory.destroy(slot).await;
+        if let Err(e) = &destroyed {
             tracing::warn!(slot = slot.index, error = %e, "could not remove a network slot");
         }
         self.storage.release(slot.index);
+        destroyed
+    }
+}
+
+fn slot_return_result(shutdown: bool, returned: &Result<(), String>) -> SlotReturnResult {
+    match (returned, shutdown) {
+        (Err(_), _) => SlotReturnResult::Error,
+        (Ok(()), true) => SlotReturnResult::Shutdown,
+        (Ok(()), false) => SlotReturnResult::Success,
     }
 }
 
@@ -267,7 +315,7 @@ mod tests {
 
     fn pool(indices: std::ops::RangeInclusive<u32>) -> (Arc<NetworkPool<Arc<FakeSlots>>>, Arc<FakeSlots>) {
         let slots = Arc::new(FakeSlots::default());
-        let pool = NetworkPool::new(slots.clone(), SlotStorage::new(indices, Box::new(|_| false)));
+        let pool = NetworkPool::new(slots.clone(), SlotStorage::new(indices, Box::new(|_| false)), 1);
         (pool, slots)
     }
 
@@ -285,6 +333,64 @@ mod tests {
         assert_eq!(pool.get().await.unwrap().index, 1);
         settle().await;
         assert_eq!(slots.created.lock().len(), NEW_SLOTS_POOL_SIZE + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_prefers_an_initially_reused_slot() {
+        let (pool, _) = pool(1..=100);
+        pool.start();
+        settle().await;
+        let reused = pool.get().await.unwrap();
+        pool.reused.lock().push_back(reused);
+
+        assert_eq!(pool.get().await.unwrap(), reused);
+        assert!(pool.reused.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_makes_progress_with_only_a_new_slot() {
+        let (pool, _) = pool(1..=100);
+        pool.start();
+
+        assert_eq!(pool.get().await.unwrap().index, 1);
+        assert!(pool.reused.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_returns_closed_when_the_new_slots_are_closed() {
+        let (pool, _) = pool(1..=100);
+        pool.new_slots.lock().await.close();
+
+        assert_eq!(pool.get().await, Err("network pool is closed".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_unblocks_a_get_waiting_for_a_slot() {
+        let (pool, _) = pool(1..=100);
+        let waiting = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.get().await }
+        });
+        settle().await;
+
+        pool.close().await;
+
+        assert_eq!(waiting.await.unwrap(), Err("network pool is closed".to_owned()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_get_receives_a_slot_returned_in_the_meantime() {
+        let (pool, _) = pool(1..=100);
+        let waiting = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.get().await }
+        });
+        settle().await;
+        let returned = Slot::new(42).unwrap();
+
+        pool.return_slot(returned);
+
+        assert_eq!(waiting.await.unwrap(), Ok(returned));
     }
 
     #[tokio::test(start_paused = true)]

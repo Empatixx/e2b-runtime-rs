@@ -181,7 +181,11 @@ impl Node {
             templates: Arc::new(TemplateCache::new(storage.clone(), config.template_cache_dir.clone())),
             storage,
             registry: Registry::new(),
-            network: NetworkPool::new(HostSlots, host_slot_storage(config.slots.clone())),
+            network: NetworkPool::new(
+                HostSlots,
+                host_slot_storage(config.slots.clone()),
+                config.network_version,
+            ),
             local_expiry: config.local_expiry,
             binaries: config.binaries.clone(),
             build_kernel_version: config.builder.kernel_version.clone(),
