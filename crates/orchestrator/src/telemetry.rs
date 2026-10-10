@@ -9,6 +9,7 @@ pub mod reads;
 pub mod report;
 pub mod server;
 pub mod traces;
+pub mod uffd;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
