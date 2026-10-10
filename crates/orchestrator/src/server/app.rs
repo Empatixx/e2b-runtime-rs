@@ -22,7 +22,9 @@ use crate::proto::info_service_server::InfoServiceServer;
 use crate::proto::sandbox_service_server::SandboxServiceServer;
 use crate::proto::template_service_server::TemplateServiceServer;
 use crate::telemetry::grpc::trace_grpc;
+use crate::proto::volume_service_server::VolumeServiceServer;
 
+use crate::volumes::VolumeServer;
 const CONSUMER_STATUS_CHECK_GRACE: Duration = Duration::from_secs(15);
 
 pub const COMMIT: &str = match option_env!("E2B_COMMIT") {
@@ -88,6 +90,9 @@ impl App {
             .add_service(InfoServiceServer::new(self.info()))
             .add_service(grpc_health);
         let routes = match &self.templates {
+            .add_service(VolumeServiceServer::new(VolumeServer::new(
+                self.node.volume_mounts.clone(),
+            )))
             Some(templates) => routes.add_service(TemplateServiceServer::from_arc(templates.clone())),
             None => routes,
         };

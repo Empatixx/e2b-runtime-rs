@@ -31,15 +31,31 @@ fn user_error_status(code: Code, message: String, user_code: UserErrorCode, http
         message: message.clone(),
         http_status,
     };
+    wrapped_user_error_status(code, message, detail)
+}
+
+pub fn wrapped_user_error_status(code: Code, status_message: String, detail: UserError) -> Status {
     let details = RpcStatus {
         code: code.into(),
-        message: message.clone(),
+        message: status_message.clone(),
         details: vec![prost_types::Any {
             type_url: USER_ERROR_TYPE.to_owned(),
             value: detail.encode_to_vec(),
         }],
     };
-    Status::with_details(code, message, details.encode_to_vec().into())
+    Status::with_details(code, status_message, details.encode_to_vec().into())
+}
+
+pub fn user_error_of(status: &Status) -> Option<UserError> {
+    RpcStatus::decode(status.details())
+        .ok()
+        .and_then(|details| {
+            details
+                .details
+                .into_iter()
+                .find(|detail| detail.type_url == USER_ERROR_TYPE)
+        })
+        .and_then(|detail| UserError::decode(detail.value.as_slice()).ok())
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub mod go_exec;
 pub mod go_gzip;
 pub mod go_humanize;
 pub mod go_os;
+pub mod go_path;
 pub mod go_strconv;
 pub mod go_tar;
 pub mod go_time;
@@ -34,6 +35,8 @@ pub mod telemetry;
 pub mod template;
 
 pub fn version() -> &'static str {
+#[cfg(target_os = "linux")]
+pub mod volumes;
     env!("CARGO_PKG_VERSION")
 }
 

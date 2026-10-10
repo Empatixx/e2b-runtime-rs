@@ -51,6 +51,7 @@ mod serve {
         }
         let node = Arc::new(Node::new(&config)?);
         let _gauges = NodeGauges::register(NodeSource {
+        orchestrator::volumes::check_support().map_err(|e| format!("volume confinement prerequisites not met: {e}"))?;
             sandboxes: {
                 let node = node.clone();
                 Arc::new(move || node.registry.len())

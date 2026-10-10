@@ -20,6 +20,7 @@ use super::build_id;
 use super::config::NodeConfig;
 use super::config::binaries::Binaries;
 use super::config::runtime::RuntimeFlags;
+use super::config::volume_mounts::VolumeMounts;
 use super::lifecycle::{self, Command, SandboxHandle, SandboxInfo};
 use super::metrics::count_failed_snapshot_upload;
 use super::oom_monitor::SharedWatermark;
@@ -94,6 +95,7 @@ pub struct Node {
     runtime_flags: RuntimeFlags,
     orchestrator_ip: String,
 }
+    pub volume_mounts: VolumeMounts,
 
 struct ResumeRequest<'a> {
     config: &'a SandboxConfig,
@@ -194,6 +196,7 @@ impl Node {
             runtime_flags: config.runtime_flags.clone(),
             orchestrator_ip: config.orchestrator_ip.clone(),
         })
+            volume_mounts: config.volume_mounts.clone(),
     }
 
     pub(super) fn with_init_request_timeout(&self, init: EnvdInit) -> EnvdInit {

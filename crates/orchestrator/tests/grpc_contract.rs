@@ -195,6 +195,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         redis: None,
         clickhouse: None,
         clickhouse_additional: Vec::new(),
+        volume_mounts: Default::default(),
     };
     let node = Arc::new(Node::new(&config).unwrap());
     let setup = config.open_build_storage().unwrap().map(|build| TemplateManagerSetup {

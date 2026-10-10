@@ -54,6 +54,8 @@ fn go_errno_text(code: i32) -> Option<&'static str> {
     match code {
         nix::libc::EOPNOTSUPP => Some("operation not supported"),
         nix::libc::EXDEV => Some("invalid cross-device link"),
+        nix::libc::EIO => Some("input/output error"),
+        nix::libc::ESTALE => Some("stale NFS file handle"),
         _ => None,
     }
 }
@@ -70,5 +72,16 @@ mod tests {
             path_error("mkdir", Path::new("/x"), &error),
             "mkdir /x: permission denied"
         );
+    }
+
+    #[test]
+    fn reads_like_the_go_errno_table() {
+        for (code, text) in [
+            (nix::libc::EIO, "input/output error"),
+            (nix::libc::ESTALE, "stale NFS file handle"),
+            (nix::libc::EXDEV, "invalid cross-device link"),
+        ] {
+            assert_eq!(reason(&io::Error::from_raw_os_error(code)), text);
+        }
     }
 }

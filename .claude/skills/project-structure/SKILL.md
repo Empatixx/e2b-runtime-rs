@@ -24,7 +24,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        whiteouts, export.rs layers top-first, overlay_mount.rs new mount API, copy.rs rsync),
                        rootfs.rs (+ unpack.rs CreateExt4Filesystem), provision.rs (console marker scan),
                        phases.rs (BuildEnv) + phases/base.rs (+ build.rs), pipeline.rs (PhasePipeline)
-  src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text)
+  src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text);
+                       go_path.rs (path.Clean, Join, Dir, Base)
   src/go_gzip.rs       Go compress/gzip + flate BestSpeed port (layer digests byte for byte); go_tar.rs (Go archive/tar
                        writer: USTAR prefix split, PAX records); go_time.rs + go_time/parse.rs (time.ParseDuration)
   src/featureflags.rs  LaunchDarkly client (featureflags/client.rs: offline fallbacks, overrides), contexts.rs (sandbox,
@@ -67,6 +68,14 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/cgroup.rs        cgroup v2 per sandbox, named sbx-<id>-<random>; CgroupStats with memory.peak reset
   src/firecracker/     config (VmConfig builder), kernel_args.rs (Go buildKernelArgs), console.rs (FC output to tracing with a
                        2000-byte tail and the FlushMetrics filter), client (API over unix socket), launch.rs (unshare -m script, /fc-vm paths),
+  src/volumes.rs       VolumeService (upstream pkg/volumes): service.rs (VolumeServer, volume and path confinement, gRPC
+                       trait), one file per RPC (volume.rs, dir_create.rs, dir_list.rs, file_create.rs FileUpload,
+                       file_get.rs FileDownload, path_delete.rs, path_stat.rs, path_update.rs), parents.rs (ensure_dirs),
+                       entry.rs (EntryInfo, symlinks resolved inside the volume), failure.rs (processError mapping),
+                       api_error.rs (UserError status details), spans.rs, test_support.rs;
+                       chrooted.rs + chrooted/ (upstream pkg/chrooted: Chrooted confined by openat2 RESOLVE_IN_ROOT
+                       through rustix; resolve.rs symlink walk, remove.rs, names.rs, info.rs, file.rs, metrics.rs);
+                       the PERSISTENT_VOLUME_MOUNTS config is server/config/volume_mounts.rs
                        memory_info.rs (GET /memory, /memory/mappings), mmds.rs, process
   src/memory/          userfaultfd: region.rs (handshake regions, address <-> memfile offset), uffd.rs (safe uffd fd),
                        handshake.rs (SCM_RIGHTS listener, uffd + optional memfd), server.rs (page-fault loop, installed

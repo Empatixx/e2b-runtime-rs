@@ -64,3 +64,11 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Matters from |
 |---|---|
 | `build-kernel-cmdline-args`, `build-cpu-template`, `free-page-reporting` and `free-page-hinting-config` are read from LaunchDarkly but not applied to the VM (`balloon` stays `{"reporting":false,"hinting":false}`) | template build |
+
+## Orchestrator: volumes
+
+| Item | Target |
+|---|---|
+| `Chrooted` has only what the volume service uses; upstream also has rename, remove, symlink, readlink, chtimes, temp files and the trailing-slash rules for them, which only the NFS proxy needs | NFS proxy |
+| `chmod` goes through `/proc/self/fd` (upstream tries `fchmodat2` first); a host without procfs cannot chmod | later |
+| `CreateVolume` reports the full volume path in a mkdir failure; Go reports the first path component that failed | later |

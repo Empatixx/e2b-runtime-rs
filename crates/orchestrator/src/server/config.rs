@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub mod binaries;
 pub mod runtime;
 mod storage;
+pub mod volume_mounts;
 
 use super::services::Services;
 use super::upload::UploadHandler;
@@ -24,6 +25,7 @@ use crate::telemetry::identity::service_name;
 use binaries::Binaries;
 use runtime::RuntimeFlags;
 use storage::StorageEnv;
+use volume_mounts::VolumeMounts;
 
 const DEFAULT_GRPC_PORT: u16 = 5008;
 const DEFAULT_NODE_ID: &str = "local";
@@ -71,6 +73,7 @@ pub struct NodeConfig {
     pub clickhouse_additional: Vec<String>,
 }
 
+    pub volume_mounts: VolumeMounts,
 impl NodeConfig {
     pub fn from_env() -> Result<Self, String> {
         Self::from_vars(&std::env::vars().collect())
@@ -148,6 +151,7 @@ impl NodeConfig {
         })
     }
 
+            volume_mounts: VolumeMounts::from_vars(vars)?,
     pub fn feature_flags_builder(
         &self,
         commit: &str,

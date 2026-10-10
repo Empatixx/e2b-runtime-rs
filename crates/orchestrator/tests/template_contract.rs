@@ -192,6 +192,7 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         redis: None,
         clickhouse: None,
         clickhouse_additional: Vec::new(),
+        volume_mounts: Default::default(),
     }
 }
 
