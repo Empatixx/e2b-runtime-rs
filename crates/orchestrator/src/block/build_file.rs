@@ -328,7 +328,10 @@ impl BuildFile {
         }
         if let Some(inflight) = self.store.inflight(location.build_id, self.artifact) {
             let mut bytes = vec![0; length];
-            if serve_inflight(&inflight, location.storage_offset, &mut bytes)? {
+            if self
+                .read_inflight(&inflight, location.storage_offset, &mut bytes)
+                .await?
+            {
                 return Ok(PageData::Owned(bytes));
             }
         }
@@ -375,7 +378,7 @@ impl BuildFile {
 impl BuildFile {
     async fn read_stored(&self, build_id: Uuid, storage_offset: u64, target: &mut [u8]) -> Result<(), String> {
         let served = match self.store.inflight(build_id, self.artifact) {
-            Some(inflight) => serve_inflight(&inflight, storage_offset, target)?,
+            Some(inflight) => self.read_inflight(&inflight, storage_offset, target).await?,
             None => false,
         };
         if served {
@@ -389,10 +392,19 @@ impl BuildFile {
     }
 }
 
-fn serve_inflight(inflight: &Inflight, storage_offset: u64, target: &mut [u8]) -> Result<bool, String> {
-    match inflight {
-        Inflight::Identity(memfd) => memfd.serve_identity(storage_offset, target).map(|()| true),
-        Inflight::Packed(memfd) => Ok(memfd.serve_packed(storage_offset, target).is_some()),
+impl BuildFile {
+    async fn read_inflight(&self, inflight: &Inflight, storage_offset: u64, target: &mut [u8]) -> Result<bool, String> {
+        match inflight {
+            Inflight::Packed(memfd) => Ok(memfd.serve_packed(storage_offset, target).is_some()),
+            Inflight::Identity(memfd) => match (memfd.serve_identity(storage_offset, target), memfd.durable()) {
+                (Ok(()), _) => Ok(true),
+                (Err(_), Some(durable)) => {
+                    let deduped = BuildFile::new(durable, self.artifact, self.store.clone());
+                    Box::pin(deduped.read_at(storage_offset, target)).await.map(|()| true)
+                }
+                (Err(e), None) => Err(e),
+            },
+        }
     }
 }
 

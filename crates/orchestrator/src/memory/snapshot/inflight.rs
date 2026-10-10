@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use roaring::RoaringBitmap;
 
-use crate::storage::header::PAGE_SIZE;
+use crate::storage::header::{Header, PAGE_SIZE};
 use crate::telemetry::memfd::{ServePhase, record_inflight_serve};
 
 pub const BYTES_NOT_AVAILABLE: &str = "bytes not available";
@@ -70,6 +70,7 @@ struct Mapped {
 
 pub struct InflightMemfd {
     mapped: RwLock<Mapped>,
+    durable: std::sync::OnceLock<Header>,
     drained: std::sync::atomic::AtomicBool,
     free_index: bool,
 }
@@ -82,8 +83,17 @@ impl InflightMemfd {
                 index: None,
             }),
             drained: std::sync::atomic::AtomicBool::new(false),
+            durable: std::sync::OnceLock::new(),
             free_index,
         }
+    }
+
+    pub fn set_durable(&self, header: Header) {
+        let _ = self.durable.set(header);
+    }
+
+    pub fn durable(&self) -> Option<Header> {
+        self.durable.get().cloned()
     }
 
     pub fn install_index(&self, index: PackedIndex) {

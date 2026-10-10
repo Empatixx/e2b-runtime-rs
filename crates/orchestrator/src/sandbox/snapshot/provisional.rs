@@ -137,7 +137,11 @@ impl InflightDedup {
             self.dedup.best_effort,
         );
         inflight.install_index(PackedIndex::of_pages(&plan.diff.dirty));
-        let _ = header_tx.send(self.deduped(&plan.diff));
+        let deduped = self.deduped(&plan.diff);
+        if let Ok(deduped) = &deduped {
+            inflight.set_durable(deduped.header.clone());
+        }
+        let _ = header_tx.send(deduped);
         let drained = File::create(&self.path)
             .and_then(|file| {
                 let mut out = BufWriter::new(file);
@@ -316,6 +320,11 @@ mod tests {
         })
         .await
         .expect("the memfd is released once the swap is signalled");
+        assert_eq!(
+            read_all(store, &provisional.header).await,
+            pipeline.guest,
+            "a sandbox still on the provisional header reads the deduped data after the release"
+        );
     }
 
     #[tokio::test(start_paused = true)]
