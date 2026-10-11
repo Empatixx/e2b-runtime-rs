@@ -15,7 +15,7 @@ An opus audit compared our Rust orchestrator with upstream E2B Go, covering RPCs
 
 ## Closed by the parity milestone
 
-Plan: `docs/superpowers/plans/2026-10-18-orchestrator-parity.md`. Every row of the original audit table is now done:
+Every row of the original audit table is now done:
 
 | # | Difference | Now |
 |---|---|---|
