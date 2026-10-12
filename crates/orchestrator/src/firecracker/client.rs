@@ -37,6 +37,10 @@ impl FirecrackerClient {
         }
     }
 
+    fn without_timeout(&self) -> Self {
+        self.clone().timeout(Duration::MAX)
+    }
+
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -120,11 +124,12 @@ impl FirecrackerClient {
     }
 
     pub async fn create_snapshot(&self, snapfile: &Path) -> Result<(), String> {
-        self.put(
-            "/snapshot/create",
-            json!({ "snapshot_type": "Full", "snapshot_path": snapfile }),
-        )
-        .await
+        self.without_timeout()
+            .put(
+                "/snapshot/create",
+                json!({ "snapshot_type": "Full", "snapshot_path": snapfile }),
+            )
+            .await
     }
 
     pub async fn load_snapshot(
@@ -141,16 +146,17 @@ impl FirecrackerClient {
         if use_sync_wp {
             backend["use_sync_wp"] = json!(true);
         }
-        self.put(
-            "/snapshot/load",
-            json!({
-                "snapshot_path": snapfile,
-                "enable_diff_snapshots": false,
-                "resume_vm": false,
-                "mem_backend": backend,
-            }),
-        )
-        .await
+        self.without_timeout()
+            .put(
+                "/snapshot/load",
+                json!({
+                    "snapshot_path": snapfile,
+                    "enable_diff_snapshots": false,
+                    "resume_vm": false,
+                    "mem_backend": backend,
+                }),
+            )
+            .await
     }
 
     pub async fn memory_mappings(&self) -> Result<Vec<GuestRegion>, String> {
@@ -814,6 +820,31 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, "PUT /boot-source: timed out after 100ms");
+    }
+
+    #[tokio::test]
+    async fn snapshot_calls_wait_beyond_the_client_timeout_like_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("fc.sock");
+        let faults = Faults {
+            hang: Some("/snapshot/load"),
+            ..Faults::default()
+        };
+        let _calls = fake_firecracker(socket.clone(), faults).await;
+        let client = FirecrackerClient::new(socket).timeout(Duration::from_millis(100));
+
+        let load = client.load_snapshot(
+            Path::new("/run/sbx/snapfile"),
+            Path::new("/run/sbx/uffd.sock"),
+            false,
+            false,
+        );
+        let outcome = tokio::time::timeout(Duration::from_millis(500), load).await;
+
+        assert!(
+            outcome.is_err(),
+            "the load gave up before the caller's deadline: {outcome:?}"
+        );
     }
 
     async fn calls_after(faults: Faults, call: impl AsyncFnOnce(FirecrackerClient)) -> Vec<Call> {

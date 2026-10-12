@@ -40,6 +40,7 @@ impl ProxyClient {
         };
         let client = Client::builder(TokioExecutor::new())
             .pool_timer(TokioTimer::new())
+            .http1_title_case_headers(true)
             .pool_idle_timeout(settings.idle_timeout)
             .pool_max_idle_per_host(max_idle_per_host)
             .build(connector);

@@ -44,14 +44,16 @@ pub mod template;
 #[cfg(target_os = "linux")]
 pub mod volumes;
 
+const UPSTREAM_VERSION: &str = "0.16.1";
+
 pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    option_env!("ORCHESTRATOR_VERSION").unwrap_or(UPSTREAM_VERSION)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn version_is_the_crate_version() {
-        assert_eq!(super::version(), "0.1.0");
+    fn version_is_the_upstream_release_it_matches() {
+        assert_eq!(super::version(), "0.16.1");
     }
 }

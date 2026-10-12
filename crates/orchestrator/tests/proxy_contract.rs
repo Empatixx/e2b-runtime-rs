@@ -368,6 +368,45 @@ async fn masks_the_request_host_and_keeps_the_inbound_one_in_x_forwarded_host() 
     assert_eq!(body["headers"]["e2b-testing"], "test123");
 }
 
+async fn raw_head_backend() -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sent, head) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let received = read_head(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        sent.send(received).ok();
+    });
+    (address, head)
+}
+
+#[tokio::test]
+async fn writes_header_names_in_go_canonical_form() {
+    let (address, head) = raw_head_backend().await;
+    let masked = orchestrator::proxy::destination::Destination {
+        mask_request_host: Some("masked.example:1234".to_owned()),
+        ..destination(address, "canonical")
+    };
+    let proxy = start_proxy(fixed(masked), None).await;
+
+    client()
+        .get(proxy.url("/"))
+        .header("host", "localhost:5007")
+        .header("e2b-testing", "test123")
+        .send()
+        .await
+        .unwrap();
+    let head = head.await.unwrap();
+
+    assert!(head.contains("\r\nHost: masked.example:1234\r\n"), "{head}");
+    assert!(head.contains("\r\nX-Forwarded-Host: localhost:5007\r\n"), "{head}");
+    assert!(head.contains("\r\nE2b-Testing: test123\r\n"), "{head}");
+}
+
 #[tokio::test]
 async fn forwards_the_inbound_host_and_strips_forwarding_and_hop_by_hop_headers() {
     let (address, _backend) = spawn_echo_backend().await;

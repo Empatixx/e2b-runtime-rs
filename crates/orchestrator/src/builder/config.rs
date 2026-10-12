@@ -18,6 +18,9 @@ const DEFAULT_BUSYBOX_DIR: &str = "/fc-busybox";
 const DEFAULT_ENVD_PATH: &str = "/fc-envd/envd";
 const DEFAULT_BASE_PATH: &str = "/orchestrator";
 const DEFAULT_TEMPLATES_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/build-templates";
+const DEFAULT_CACHE_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/build";
+const DEFAULT_SANDBOX_CACHE_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/sandbox";
+const DEFAULT_TEMPLATE_CACHE_DIR: &str = "${ORCHESTRATOR_BASE_PATH}/template";
 const DEFAULT_PROVIDER: &str = "gcp";
 const DEFAULT_DOCKERHUB_PROVIDER: &str = "GCP_REMOTE_REPOSITORY";
 const DEFAULT_KERNEL_VERSION: &str = "vmlinux-6.1.158";
@@ -29,6 +32,9 @@ pub struct BuilderConfig {
     pub envd: PathBuf,
     pub base_path: PathBuf,
     pub templates_dir: PathBuf,
+    pub default_cache_dir: PathBuf,
+    pub sandbox_cache_dir: PathBuf,
+    pub template_cache_dir: PathBuf,
     pub provider: String,
     pub target_arch: String,
     pub dockerhub_provider: String,
@@ -66,6 +72,9 @@ impl BuilderConfig {
             envd: absolute(var("HOST_ENVD_PATH", DEFAULT_ENVD_PATH).into()),
             base_path: var("ORCHESTRATOR_BASE_PATH", DEFAULT_BASE_PATH).into(),
             templates_dir: absolute(with_base("TEMPLATES_DIR", DEFAULT_TEMPLATES_DIR).into()),
+            default_cache_dir: absolute(with_base("DEFAULT_CACHE_DIR", DEFAULT_CACHE_DIR).into()),
+            sandbox_cache_dir: absolute(with_base("SANDBOX_CACHE_DIR", DEFAULT_SANDBOX_CACHE_DIR).into()),
+            template_cache_dir: absolute(with_base("TEMPLATE_CACHE_DIR", DEFAULT_TEMPLATE_CACHE_DIR).into()),
             provider: var("PROVIDER", DEFAULT_PROVIDER),
             target_arch: target_arch(vars.get("TARGET_ARCH").map(String::as_str)),
             dockerhub_provider: var("DOCKERHUB_REMOTE_REPOSITORY_PROVIDER", DEFAULT_DOCKERHUB_PROVIDER),

@@ -141,8 +141,9 @@ fn node_vars(storage: &Path, work: &Path) -> HashMap<String, String> {
             ),
             ("FIRECRACKER_VERSIONS_DIR".to_owned(), path(storage.join("fc-versions"))),
             ("HOST_KERNELS_DIR".to_owned(), path(storage.join("kernels"))),
-            ("E2B_WORK_DIR".to_owned(), path(work.join("sandboxes"))),
-            ("E2B_CACHE_DIR".to_owned(), path(work.join("cache"))),
+            ("SANDBOX_CACHE_DIR".to_owned(), path(work.join("sandboxes"))),
+            ("DEFAULT_CACHE_DIR".to_owned(), path(work.join("cache"))),
+            ("TEMPLATE_CACHE_DIR".to_owned(), path(work.join("cache/template"))),
         ])
         .collect()
 }

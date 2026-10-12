@@ -89,9 +89,6 @@ impl NodeConfig {
             .map(|port| port.parse().map_err(|_| format!("GRPC_PORT is not a port: {port}")))
             .transpose()?
             .unwrap_or(DEFAULT_GRPC_PORT);
-        let cache_dir: PathBuf = var("E2B_CACHE_DIR")
-            .unwrap_or_else(|| "/var/lib/e2b/cache".to_owned())
-            .into();
         let clickhouse = Endpoint::parse_list(
             var("CLICKHOUSE_CONNECTION_STRING").as_deref(),
             var("CLICKHOUSE_CONNECTION_STRINGS").as_deref(),
@@ -120,12 +117,10 @@ impl NodeConfig {
             template_storage,
             build_cache_storage,
             local_upload_base_url: var("LOCAL_UPLOAD_BASE_URL").unwrap_or_default(),
+            work_dir: builder.sandbox_cache_dir.clone(),
+            cache_dir: builder.default_cache_dir.clone(),
+            template_cache_dir: builder.template_cache_dir.clone(),
             builder,
-            work_dir: var("E2B_WORK_DIR")
-                .unwrap_or_else(|| "/var/lib/e2b/sandboxes".to_owned())
-                .into(),
-            template_cache_dir: var("E2B_TEMPLATE_CACHE_DIR").map_or_else(|| cache_dir.join("template"), PathBuf::from),
-            cache_dir,
             slots: 1..=MAX_SLOT,
             local_expiry: var("E2B_LOCAL_EXPIRY").is_some_and(|value| value == "1" || value == "true"),
             labels: var("NODE_LABELS")
@@ -284,7 +279,14 @@ mod tests {
         assert_eq!(config.grpc_port, 5008);
         assert_eq!(config.node_id, "local");
         assert!(!config.local_expiry, "expiry belongs to the API unless asked for");
-        assert_eq!(config.template_cache_dir, PathBuf::from("/var/lib/e2b/cache/template"));
+        assert_eq!(
+            (&config.work_dir, &config.cache_dir, &config.template_cache_dir),
+            (
+                &PathBuf::from("/orchestrator/sandbox"),
+                &PathBuf::from("/orchestrator/build"),
+                &PathBuf::from("/orchestrator/template")
+            )
+        );
         assert!(!config.local && !config.force_stop);
         assert_eq!(
             (config.orchestrator_ip.as_str(), config.hyperloop_port),
@@ -296,6 +298,20 @@ mod tests {
         assert_eq!(config.build_cache_storage, None);
         assert_eq!(config.upload_base_url(), "http://localhost:5008");
         assert_eq!(config.rootfs_exposure, Transport::Nbd);
+    }
+
+    #[test]
+    fn cache_dirs_follow_the_go_variables_under_the_base_path() {
+        let config = NodeConfig::from_vars(&vars(&[
+            ("STORAGE_PROVIDER", "Local"),
+            ("ORCHESTRATOR_BASE_PATH", "/data/orch"),
+            ("TEMPLATE_CACHE_DIR", "/fast/template"),
+        ]))
+        .unwrap();
+
+        assert_eq!(config.work_dir, PathBuf::from("/data/orch/sandbox"));
+        assert_eq!(config.cache_dir, PathBuf::from("/data/orch/build"));
+        assert_eq!(config.template_cache_dir, PathBuf::from("/fast/template"));
     }
 
     #[test]

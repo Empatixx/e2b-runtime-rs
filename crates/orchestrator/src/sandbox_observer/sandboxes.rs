@@ -66,8 +66,9 @@ mod tests {
         let vars = [
             ("STORAGE_PROVIDER", "Local".to_owned()),
             ("LOCAL_TEMPLATE_STORAGE_BASE_PATH", path("store")),
-            ("E2B_CACHE_DIR", path("cache")),
-            ("E2B_WORK_DIR", path("sandboxes")),
+            ("DEFAULT_CACHE_DIR", path("cache")),
+            ("TEMPLATE_CACHE_DIR", path("cache/template")),
+            ("SANDBOX_CACHE_DIR", path("sandboxes")),
             ("E2B_FIRECRACKER", "/unused".to_owned()),
             ("E2B_KERNEL", "/unused".to_owned()),
         ]
