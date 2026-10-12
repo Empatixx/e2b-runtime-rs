@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs a command in the Linux test image: privileged for netns, nbd and uffd; /tmp on tmpfs so mknod works.
+# Runs a command in the Linux test image: privileged for netns, nbd, ublk and uffd; host /dev so ublk devices appear; /tmp on tmpfs so mknod works.
 # One run at a time: parallel runs share the target volume, the netns slot indexes and the nbd devices.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,6 +16,6 @@ done
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 docker build -q -t envd-rs-test -f docker/test.Dockerfile docker >/dev/null
-docker run --rm --privileged --tmpfs /tmp:exec -e CARGO_INCREMENTAL=0 \
+docker run --rm --privileged -v /dev:/dev --tmpfs /tmp:exec -e CARGO_INCREMENTAL=0 \
   -v "$PWD":/src -v envd-rs-target:/src/target -v envd-rs-cargo:/usr/local/cargo/registry \
   -w /src envd-rs-test "$@"

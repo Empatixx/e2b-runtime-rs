@@ -1,5 +1,7 @@
 pub mod block_device;
 pub mod nbd;
+#[cfg(target_os = "linux")]
+pub mod ublk;
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -30,10 +32,21 @@ impl Transport {
 
 pub fn use_transport(transport: Transport) -> Result<(), String> {
     available(transport, Path::new(UBLK_CONTROL))?;
-    let chosen = *TRANSPORT.get_or_init(|| transport);
+    let chosen = *TRANSPORT.get_or_init(|| prepared(transport));
     (chosen == transport)
         .then_some(())
         .ok_or_else(|| format!("rootfs exposure is already {chosen:?}"))
+}
+
+fn prepared(transport: Transport) -> Transport {
+    #[cfg(target_os = "linux")]
+    if transport == Transport::Ublk {
+        let removed = ublk::device::remove_orphans();
+        if !removed.is_empty() {
+            tracing::info!(?removed, "removed orphaned ublk devices");
+        }
+    }
+    transport
 }
 
 pub fn transport() -> Transport {
@@ -56,17 +69,18 @@ mod linux {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use super::{Transport, nbd, transport};
+    use super::{Transport, nbd, transport, ublk};
     use crate::block::overlay::Overlay;
 
     pub enum Exposure {
         Nbd(nbd::Exposure),
+        Ublk(ublk::Exposure),
     }
 
     pub async fn expose(overlay: Arc<Overlay>) -> io::Result<Exposure> {
         match transport() {
             Transport::Nbd => nbd::expose(overlay).await.map(Exposure::Nbd),
-            Transport::Ublk => Err(io::Error::other("ublk exposure is not built yet")),
+            Transport::Ublk => ublk::expose(overlay).await.map(Exposure::Ublk),
         }
     }
 
@@ -74,24 +88,28 @@ mod linux {
         pub fn path(&self) -> PathBuf {
             match self {
                 Exposure::Nbd(exposure) => exposure.path(),
+                Exposure::Ublk(exposure) => exposure.path(),
             }
         }
 
         pub async fn flush(&self) -> Result<(), String> {
             match self {
                 Exposure::Nbd(exposure) => exposure.flush().await,
+                Exposure::Ublk(exposure) => exposure.flush().await,
             }
         }
 
         pub async fn ended(&self) {
             match self {
                 Exposure::Nbd(exposure) => exposure.ended().await,
+                Exposure::Ublk(exposure) => exposure.ended().await,
             }
         }
 
         pub async fn close(self) -> Result<(), String> {
             match self {
                 Exposure::Nbd(exposure) => exposure.close().await,
+                Exposure::Ublk(exposure) => exposure.close().await,
             }
         }
     }
