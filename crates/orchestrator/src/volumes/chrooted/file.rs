@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::FileExt;
 
 use rustix::io::Errno;
 
@@ -36,6 +37,25 @@ impl ConfinedFile {
         self.file
             .write_all(content)
             .map_err(|error| self.failed("write", &error))
+    }
+
+    pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize, PathError> {
+        loop {
+            match self.file.read_at(buffer, offset) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result.map_err(|error| self.failed("read", &error)),
+            }
+        }
+    }
+
+    pub fn write_all_at(&self, content: &[u8], offset: u64) -> Result<(), PathError> {
+        self.file
+            .write_all_at(content, offset)
+            .map_err(|error| self.failed("write", &error))
+    }
+
+    pub fn set_len(&self, size: u64) -> Result<(), PathError> {
+        self.file.set_len(size).map_err(|error| self.failed("truncate", &error))
     }
 
     pub fn sync(&self) -> Result<(), PathError> {

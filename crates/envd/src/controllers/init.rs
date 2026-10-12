@@ -307,10 +307,12 @@ async fn apply(state: &Arc<AppState>, request: InitRequest) -> Result<Option<Str
             .map_err(|e| format!("failed to install CA bundle: {e}"))?;
     }
     if let Some(mounts) = request.volume_mounts {
-        state
-            .nfs
-            .setup(request.lifecycle_id.as_deref(), &mounts)
+        let mounting = state.clone();
+        let lifecycle_id = request.lifecycle_id.clone();
+        tokio::spawn(async move { mounting.nfs.setup(lifecycle_id.as_deref(), &mounts).await })
             .await
+            .map_err(|e| e.to_string())
+            .and_then(|mounted| mounted)
             .map_err(|e| format!("failed to setup NFS volumes: {e}"))?;
     }
     Ok(request.cpu_count.and_then(|count| set_cpu_target(state, count)))

@@ -1,16 +1,22 @@
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader;
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, InstrumentKind, SdkMeterProvider, Stream, Temporality};
+use opentelemetry_sdk::metrics::reader::MetricReader;
+use opentelemetry_sdk::metrics::{
+    Aggregation, Instrument, InstrumentKind, ManualReader, Pipeline, SdkMeterProvider, Stream, Temporality,
+};
 use opentelemetry_sdk::runtime::Tokio;
 
 use super::endpoint::Endpoint;
 use super::server::network::{EGRESS_RETIREMENT_DURATION, SLOT_RETURN_DURATION};
 
 const METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(15);
-const SANDBOX_METRIC_EXPORT_PERIOD: Duration = Duration::from_secs(5);
 const HISTOGRAM_MAX_BUCKETS: u32 = 160;
 const LIFTED_CARDINALITY_LIMIT: usize = 20_000;
 const HISTOGRAM_MAX_SCALE: i8 = 20;
@@ -36,21 +42,83 @@ pub fn meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMete
         .build())
 }
 
-pub fn sandbox_meter_provider(endpoint: &Endpoint, resource: Resource) -> Result<SdkMeterProvider, String> {
-    let exporter = MetricExporter::builder()
+pub struct SandboxExport<E = MetricExporter> {
+    reader: Arc<ManualReader>,
+    exporter: Arc<E>,
+}
+
+impl<E> Clone for SandboxExport<E> {
+    fn clone(&self) -> Self {
+        Self {
+            reader: self.reader.clone(),
+            exporter: self.exporter.clone(),
+        }
+    }
+}
+
+impl<E: PushMetricExporter> SandboxExport<E> {
+    pub async fn push(&self) -> Result<(), String> {
+        let mut metrics = ResourceMetrics::default();
+        self.reader
+            .collect(&mut metrics)
+            .map_err(|e| format!("failed to collect sandbox metrics: {e}"))?;
+        self.exporter
+            .export(&metrics)
+            .await
+            .map_err(|e| format!("failed to export sandbox metrics: {e}"))
+    }
+}
+
+#[derive(Debug)]
+struct SharedReader(Arc<ManualReader>);
+
+impl MetricReader for SharedReader {
+    fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+        self.0.register_pipeline(pipeline);
+    }
+
+    fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
+        self.0.collect(rm)
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.0.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self, kind: InstrumentKind) -> Temporality {
+        self.0.temporality(kind)
+    }
+}
+
+pub fn sandbox_meter_provider(
+    endpoint: &Endpoint,
+    resource: Resource,
+) -> Result<(SdkMeterProvider, SandboxExport), String> {
+    MetricExporter::builder()
         .with_tonic()
         .with_temporality(Temporality::Delta)
         .with_endpoint(endpoint.url())
         .build()
-        .map_err(|e| format!("failed to create sandbox metrics exporter: {e}"))?;
-    let reader = PeriodicReader::builder(exporter, Tokio)
-        .with_interval(SANDBOX_METRIC_EXPORT_PERIOD)
-        .build();
-    Ok(SdkMeterProvider::builder()
-        .with_reader(reader)
+        .map_err(|e| format!("failed to create sandbox metrics exporter: {e}"))
+        .map(|exporter| on_demand_provider(exporter, resource))
+}
+
+fn on_demand_provider<E: PushMetricExporter>(exporter: E, resource: Resource) -> (SdkMeterProvider, SandboxExport<E>) {
+    let reader = Arc::new(ManualReader::builder().with_temporality(Temporality::Delta).build());
+    let provider = SdkMeterProvider::builder()
+        .with_reader(SharedReader(reader.clone()))
         .with_resource(resource)
         .with_view(lifted_cardinality)
-        .build())
+        .build();
+    let export = SandboxExport {
+        reader,
+        exporter: Arc::new(exporter),
+    };
+    (provider, export)
 }
 
 fn lifted_cardinality(_: &Instrument) -> Option<Stream> {
@@ -93,6 +161,28 @@ mod tests {
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader};
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_sandbox_push_exports_what_the_gauges_observe_at_that_moment() {
+        let exporter = InMemoryMetricExporter::default();
+        let (provider, export) = on_demand_provider(exporter.clone(), Resource::builder_empty().build());
+        let _gauge = provider
+            .meter("test")
+            .i64_observable_gauge("e2b.sandbox.cpu.total")
+            .with_callback(|observer| observer.observe(2, &[]))
+            .build();
+
+        export.push().await.unwrap();
+
+        let finished = exporter.get_finished_metrics().unwrap();
+        let names: Vec<String> = finished
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .map(|metric| metric.name().to_owned())
+            .collect();
+        assert_eq!(names, vec!["e2b.sandbox.cpu.total"]);
+    }
 
     #[test]
     fn delta_counters_keep_more_series_than_the_sdk_default_limit() {

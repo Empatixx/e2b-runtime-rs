@@ -20,6 +20,14 @@ pub struct VolumeMount {
     pub path: String,
 }
 
+struct MountingFlag<'a>(&'a AtomicBool);
+
+impl Drop for MountingFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 pub struct NfsMounts {
     mounting: AtomicBool,
@@ -47,6 +55,7 @@ impl NfsMounts {
             tracing::debug!("NFS volumes already mounting");
             return Ok(());
         }
+        let _mounting = MountingFlag(&self.mounting);
         tracing::debug!("Setting up NFS volumes");
         let started = Instant::now();
         let deadline = started + NFS_MOUNT_TIMEOUT;
@@ -62,7 +71,6 @@ impl NfsMounts {
         )
         .await
         .map(|_| ());
-        self.mounting.store(false, Ordering::SeqCst);
         if mounted.is_ok() {
             tracing::info!(
                 volumes = mounts.len(),
@@ -235,6 +243,24 @@ mod tests {
             failed.starts_with("`mkdir -p /proc/version/nope` failed: exit status 1\n"),
             "{failed}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cancelled_setup_lets_the_next_one_mount() {
+        use futures::FutureExt;
+
+        let mounts = NfsMounts::default();
+        let dir = tempfile::tempdir().unwrap();
+        let volume = VolumeMount {
+            nfs_target: "192.0.2.1:/v".to_owned(),
+            path: dir.path().join("v").display().to_string(),
+        };
+
+        let polled_once = mounts.setup(Some("l1"), std::slice::from_ref(&volume)).now_or_never();
+
+        assert!(polled_once.is_none(), "the setup should wait for its first command");
+        assert!(!mounts.mounting.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

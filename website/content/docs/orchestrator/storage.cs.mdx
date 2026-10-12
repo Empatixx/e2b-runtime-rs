@@ -49,3 +49,9 @@ Každý snapshot si pamatuje svůj původ, stejně jako v Go. Pause nebo checkpo
 ## Build cache pro rozdíly
 
 Lokální rozdílové soubory se drží 25 hodin, jsou připíchnuté, dokud nedoběhne jejich upload, a mažou se dřív, když je disk cache plnější než `build-cache-max-usage-percentage`.
+
+## Volumes
+
+Sandbox si může připojit trvalé volumes. Každý volume je adresář na nodu, pod adresářem svého typu z `PERSISTENT_VOLUME_MOUNTS`, v cestě `team-<id týmu>/vol-<id volume>`. envd ho připojí přes NFS verze 3 z `192.0.2.1:/<jméno volume>`. Node tuto adresu přesměruje na svou NFS proxy na portu 5011 a portmapper na portu 5012, stejně jako v Go.
+
+Proxy pozná sandbox podle zdrojové adresy spojení, takže sandbox vidí jen své volumes. Každý volume je uzavřený ve svém adresáři a file handly platí, dokud sandbox žije. Proxy běží na crate nfsserve s malým patchem, který je v `vendor/nfsserve`.

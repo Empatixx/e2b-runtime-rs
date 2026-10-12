@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use self::gauges::SandboxGauges;
 use self::poll::{Observation, Sandboxes};
+use crate::telemetry::metrics::SandboxExport;
 
 pub struct SandboxObserver {
     poller: JoinHandle<()>,
@@ -18,11 +19,11 @@ pub struct SandboxObserver {
 }
 
 impl SandboxObserver {
-    pub fn start(meter: &Meter, sandboxes: Sandboxes) -> Self {
+    pub fn start(meter: &Meter, sandboxes: Sandboxes, export: Option<SandboxExport>) -> Self {
         let snapshot: Arc<Mutex<Vec<Observation>>> = Arc::default();
         Self {
             _gauges: SandboxGauges::register(meter, snapshot.clone()),
-            poller: tokio::spawn(poll::run(sandboxes, snapshot)),
+            poller: tokio::spawn(poll::run(sandboxes, snapshot, export)),
         }
     }
 }

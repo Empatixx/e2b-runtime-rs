@@ -998,6 +998,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytestream"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04f720842a717d6afaf69fee2dc69b771edc165f12cc3eb1b0e8eeef53a86454"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3357,6 +3366,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfsserve"
+version = "0.10.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "byteorder",
+ "bytestream",
+ "filetime",
+ "futures",
+ "num-derive",
+ "num-traits",
+ "smallvec",
+ "tokio",
+ "tracing",
+ "tracing-attributes",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3510,6 +3537,17 @@ name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+
+[[package]]
+name = "num-derive"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "num-integer"
@@ -3754,6 +3792,7 @@ dependencies = [
  "lz4",
  "moka",
  "netns-rs",
+ "nfsserve",
  "nix 0.29.0",
  "object_store",
  "opentelemetry",

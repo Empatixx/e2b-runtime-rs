@@ -3,6 +3,7 @@ mod contexts;
 mod flags;
 mod log_routing;
 mod prefetch;
+mod test_overrides;
 #[cfg(test)]
 mod testing;
 
@@ -34,3 +35,4 @@ pub use log_routing::{
     logs_write_config, resolve_log_write_config,
 };
 pub use prefetch::ScopedPrefetchFlags;
+pub use test_overrides::apply_test_overrides;

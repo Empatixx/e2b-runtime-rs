@@ -20,6 +20,19 @@ Every final review ends with minors and deferred rulings. They are collected her
 |---|---|
 | A rate-limited GCS write is recognised by object_store's `Server returned non-2xx status code: 429` text, because its error types are private | later |
 
+## Orchestrator: volumes over NFS
+
+| Item | Target |
+|---|---|
+| The NFS proxy runs on nfsserve (vendored with a small patch), not go-nfs; the `NFS_PROXY_*` logging, tracing, metrics, handle cache limit and directory verifier settings are not read, and the handle table has no size limit | API |
+| The portmapper answers 2049 for every program; Go answers 2049 only for NFS and mountd over TCP and 0 otherwise | later |
+
+## Orchestrator: shared chunk cache
+
+| Item | Target |
+|---|---|
+| `SHARED_CHUNK_CACHE_PATH` and the `use-nfs-for-snapshots`, `use-nfs-for-templates` and `use-nfs-for-building-templates` flags (a chunk cache on a shared filestore) are not ported | perf |
+
 ## Orchestrator: cold boot (M5)
 
 | Item | Target |

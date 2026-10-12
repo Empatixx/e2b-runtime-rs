@@ -59,6 +59,7 @@ use crate::memory::prefetch::source::PrefetchSettings;
 use crate::network::firewall::EgressRules;
 use crate::network::pool::NetworkPool;
 use crate::network::slot::{HostSlots, Slot, host_slot_storage};
+use crate::nfsproxy::{MountingSandbox, VolumeMount as NfsVolumeMount};
 use crate::peer::parents::PeerParents;
 use crate::peer::server::ChunkServer;
 use crate::peer::server::resolve::PeerCache;
@@ -118,6 +119,7 @@ pub struct Node {
     pub status: Arc<NodeStatus>,
     pub uploads: Arc<Uploads>,
     build_network: Arc<Mutex<HashMap<Ipv4Addr, BuildSandbox>>>,
+    sandbox_network: Arc<Mutex<HashMap<Ipv4Addr, NetworkedSandbox>>>,
     pub routing: RoutingPublisher,
     pub events: EventsService,
     pub host_stats: OnceLock<Arc<ClickhouseHostStats>>,
@@ -214,6 +216,24 @@ impl Drop for BuildNetwork {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkedSandbox {
+    pub config: SandboxConfig,
+    pub lifecycle_id: String,
+    pub started_at: SystemTime,
+}
+
+pub struct NetworkAssignment {
+    map: Arc<Mutex<HashMap<Ipv4Addr, NetworkedSandbox>>>,
+    host_ip: Ipv4Addr,
+}
+
+impl Drop for NetworkAssignment {
+    fn drop(&mut self) {
+        self.map.lock().remove(&self.host_ip);
+    }
+}
+
 pub struct Lifetime {
     pub start: SystemTime,
     pub end: SystemTime,
@@ -249,6 +269,7 @@ impl Node {
             status: Arc::default(),
             uploads,
             build_network: Arc::default(),
+            sandbox_network: Arc::default(),
             events: EventsService::default(),
             host_stats: OnceLock::new(),
             proxy: OnceLock::new(),
@@ -498,18 +519,51 @@ impl Node {
     }
 
     pub fn source_of(&self, ip: IpAddr) -> Option<SourceSandbox> {
-        self.registry
+        self.networked(ip).map(|sandbox| SourceSandbox {
+            sandbox_id: sandbox.config.sandbox_id,
+            template_id: sandbox.config.template_id,
+            team_id: sandbox.config.team_id,
+            build_id: sandbox.config.build_id,
+            lifecycle_started_at: Some(sandbox.started_at),
+        })
+    }
+
+    pub fn assign_network(
+        &self,
+        host_ip: Ipv4Addr,
+        config: &SandboxConfig,
+        lifecycle: &Lifecycle,
+    ) -> NetworkAssignment {
+        self.sandbox_network.lock().insert(
+            host_ip,
+            NetworkedSandbox {
+                config: config.clone(),
+                lifecycle_id: lifecycle.lifecycle_id.clone(),
+                started_at: SystemTime::now(),
+            },
+        );
+        NetworkAssignment {
+            map: self.sandbox_network.clone(),
+            host_ip,
+        }
+    }
+
+    fn networked(&self, ip: IpAddr) -> Option<NetworkedSandbox> {
+        let running = self
+            .registry
             .running()
             .iter()
             .map(|handle| handle.info.lock().clone())
             .find(|info| IpAddr::V4(info.host_ip) == ip)
-            .map(|info| SourceSandbox {
-                sandbox_id: info.config.sandbox_id,
-                template_id: info.config.template_id,
-                team_id: info.config.team_id,
-                build_id: info.config.build_id,
-                lifecycle_started_at: Some(info.started_at),
-            })
+            .map(|info| NetworkedSandbox {
+                config: info.config,
+                lifecycle_id: info.lifecycle.lifecycle_id,
+                started_at: info.started_at,
+            });
+        running.or_else(|| match ip {
+            IpAddr::V4(v4) => self.sandbox_network.lock().get(&v4).cloned(),
+            IpAddr::V6(_) => None,
+        })
     }
 
     pub fn building(&self) -> Vec<(Ipv4Addr, BuildSandbox)> {
@@ -539,15 +593,39 @@ impl Node {
                 egress: None,
             });
         }
-        self.registry
-            .running()
-            .iter()
-            .map(|handle| handle.info.lock().clone())
-            .find(|info| IpAddr::V4(info.host_ip) == ip)
-            .map(|info| FirewallSandbox {
-                egress: info.config.network.and_then(|network| network.egress),
-                sandbox_id: info.config.sandbox_id,
+        self.networked(ip).map(|sandbox| FirewallSandbox {
+            egress: sandbox.config.network.and_then(|network| network.egress),
+            sandbox_id: sandbox.config.sandbox_id,
+        })
+    }
+
+    pub fn mounting_sandbox(&self, ip: IpAddr) -> Option<MountingSandbox> {
+        self.networked(ip).and_then(|sandbox| {
+            Some(MountingSandbox {
+                lifecycle_id: sandbox.lifecycle_id,
+                team_id: Uuid::parse_str(&sandbox.config.team_id).ok()?,
+                volumes: sandbox
+                    .config
+                    .volume_mounts
+                    .iter()
+                    .filter_map(|mount| {
+                        Some(NfsVolumeMount {
+                            name: mount.name.clone(),
+                            id: Uuid::parse_str(&mount.id).ok().filter(|id| !id.is_nil())?,
+                            volume_type: mount.r#type.clone(),
+                        })
+                    })
+                    .collect(),
             })
+        })
+    }
+
+    pub fn live_lifecycles(&self) -> Vec<String> {
+        self.sandbox_network
+            .lock()
+            .values()
+            .map(|sandbox| sandbox.lifecycle_id.clone())
+            .collect()
     }
 
     pub fn running_configs(&self) -> Vec<SandboxConfig> {
@@ -755,6 +833,7 @@ impl Node {
         let lease = lease.map_err(StartFailure::Failed)?;
         let (build, snapfile) = files.map_err(StartFailure::Template)?;
         let slot = lease.slot().ok_or_else(slot_taken_back)?;
+        let network = self.assign_network(slot.host_ip(), &config, &lifecycle);
         let metadata = template
             .metadata()
             .await
@@ -837,6 +916,7 @@ impl Node {
         Ok(lifecycle::spawn(
             sandbox,
             slot,
+            network,
             SandboxInfo {
                 config,
                 start: lifetime.start,

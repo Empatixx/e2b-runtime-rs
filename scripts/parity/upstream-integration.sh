@@ -8,6 +8,7 @@ RUST_REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 RESULTS="${RESULTS:-/mnt/work/results}/$IMPL-$SHARD"
 LOGS="$RESULTS/logs"
 BUCKET="https://storage.googleapis.com/e2b-artifact-binaries"
+SCRATCH="${SCRATCH:-/mnt/e2b-scratch}"
 
 export PATH="/usr/local/go/bin:$HOME/go/bin:$HOME/.cargo/bin:$PATH"
 export RACE_FLAG="" DEBUG_GCFLAGS=""
@@ -36,7 +37,11 @@ stop_everything() {
   docker rm -f postgres redis clickhouse otel-collector >/dev/null 2>&1 || true
   while docker ps -a --format '{{.Names}}' | grep -qE '^(postgres|redis|clickhouse|otel-collector)$'; do sleep 1; done
   sudo pkill -f firecracker || true
-  sudo rm -rf /tmp/templates /tmp/build-cache /orchestrator /var/lib/e2b /fc-vm/* "$UPSTREAM/.e2b-chunk-cache" /mnt/snapshot-cache/* || true
+  local dir
+  for dir in /tmp/templates /tmp/build-cache /orchestrator; do
+    mountpoint -q "$dir" && sudo umount -l "$dir"
+  done
+  sudo rm -rf /tmp/templates /tmp/build-cache /orchestrator /var/lib/e2b /fc-vm/* "$UPSTREAM/.e2b-chunk-cache" /mnt/snapshot-cache/* "$SCRATCH" || true
 }
 
 start_databases() {
@@ -76,8 +81,17 @@ fetch_artifact() {
   sudo chmod 755 "$dest"
 }
 
+bind_to_scratch() {
+  local dir
+  for dir in /tmp/templates /tmp/build-cache /orchestrator; do
+    sudo mkdir -p "$SCRATCH$dir" "$dir"
+    sudo mount --bind "$SCRATCH$dir" "$dir"
+  done
+}
+
 host_init() {
   log "initialising the host with $IMPL envd"
+  bind_to_scratch
   sudo mkdir -p /orchestrator/sandbox /orchestrator/template /orchestrator/build /fc-vm /fc-envd /mnt/snapshot-cache
   if [ -z "$(sudo swapon --show --noheadings 2>/dev/null)" ]; then
     sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile

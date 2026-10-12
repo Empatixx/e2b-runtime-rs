@@ -2,6 +2,7 @@ mod directory;
 mod entries;
 pub mod error;
 pub mod file;
+mod handles;
 pub mod info;
 pub mod metrics;
 mod names;

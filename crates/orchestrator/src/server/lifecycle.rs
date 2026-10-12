@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::host_stats::HostStatsCollector;
 use super::node::prefetch::PausedBuild;
 use super::node::reclaim::{PausePreparation, reclaim_contexts};
-use super::node::{Node, event_sandbox, execution, stats_identity};
+use super::node::{NetworkAssignment, Node, event_sandbox, execution, stats_identity};
 use super::oom_monitor::{OomMonitor, SharedWatermark};
 use super::pause_disk::PauseDiskReservation;
 use super::registry::Lifecycle;
@@ -217,6 +217,7 @@ fn log_crash(sandbox_id: &str, death: &Death) {
 struct Running {
     sandbox: Sandbox,
     slot: Slot,
+    _network: NetworkAssignment,
     info: Arc<Mutex<SandboxInfo>>,
     cleanup: Arc<AtomicBool>,
     commands: mpsc::Receiver<Command>,
@@ -248,7 +249,14 @@ pub fn detached_handle(info: SandboxInfo) -> (SandboxHandle, mpsc::Receiver<Comm
     (handle, receiver)
 }
 
-pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, throwaway: bool) -> SandboxHandle {
+pub fn spawn(
+    sandbox: Sandbox,
+    slot: Slot,
+    network: NetworkAssignment,
+    info: SandboxInfo,
+    node: Arc<Node>,
+    throwaway: bool,
+) -> SandboxHandle {
     let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
     let health = (!throwaway).then(|| {
         HealthCheck::new(
@@ -307,6 +315,7 @@ pub fn spawn(sandbox: Sandbox, slot: Slot, info: SandboxInfo, node: Arc<Node>, t
         throwaway,
         sandbox,
         slot,
+        _network: network,
         info: handle.info.clone(),
         cleanup: handle.cleanup.clone(),
         commands: receiver,

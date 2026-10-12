@@ -55,6 +55,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 struct Providers {
     meters: SdkMeterProvider,
     sandbox_meters: SdkMeterProvider,
+    sandbox_export: metrics::SandboxExport,
     traces: SdkTracerProvider,
     logs: SdkLoggerProvider,
 }
@@ -83,6 +84,12 @@ impl Telemetry {
             Some(providers) => providers.sandbox_meters.meter(SANDBOX_METER_NAME),
             None => global::meter(SANDBOX_METER_NAME),
         }
+    }
+
+    pub fn sandbox_export(&self) -> Option<metrics::SandboxExport> {
+        self.providers
+            .as_ref()
+            .map(|providers| providers.sandbox_export.clone())
     }
 
     pub fn install_subscriber(&self) {
@@ -135,9 +142,11 @@ fn shut_down(providers: &Providers) -> Result<(), String> {
 
 fn providers(endpoint: &Endpoint, identity: &Identity) -> Result<Providers, String> {
     let resource = identity.resource();
+    let (sandbox_meters, sandbox_export) = metrics::sandbox_meter_provider(endpoint, resource.clone())?;
     Ok(Providers {
         meters: metrics::meter_provider(endpoint, resource.clone())?,
-        sandbox_meters: metrics::sandbox_meter_provider(endpoint, resource.clone())?,
+        sandbox_meters,
+        sandbox_export,
         traces: traces::tracer_provider(endpoint, resource.clone())?,
         logs: logs::logger_provider(endpoint, resource, BaseFields::current(&identity.service_name))?,
     })

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
+use futures::future::OptionFuture;
 use opentelemetry::KeyValue;
 use parking_lot::Mutex;
 
@@ -15,6 +16,7 @@ use super::metrics::{
 };
 use crate::envd::body::decode_result;
 use crate::envd::version::is_at_least;
+use crate::telemetry::metrics::SandboxExport;
 
 const EXPORT_PERIOD: Duration = Duration::from_secs(5);
 const GET_METRICS_TIMEOUT: Duration = Duration::from_millis(100);
@@ -59,7 +61,7 @@ pub struct Observation {
     pub cpu_hotplug: bool,
 }
 
-pub async fn run(sandboxes: Sandboxes, snapshot: Arc<Mutex<Vec<Observation>>>) {
+pub async fn run(sandboxes: Sandboxes, snapshot: Arc<Mutex<Vec<Observation>>>, export: Option<SandboxExport>) {
     let client = reqwest::Client::new();
     let mut stuck: HashMap<String, bool> = HashMap::new();
     let mut ticks = tokio::time::interval(EXPORT_PERIOD);
@@ -73,6 +75,9 @@ pub async fn run(sandboxes: Sandboxes, snapshot: Arc<Mutex<Vec<Observation>>>) {
             .filter_map(|(sandbox, metrics)| observation(&sandbox, metrics, &mut stuck))
             .collect();
         *snapshot.lock() = observed;
+        if let Some(Err(e)) = OptionFuture::from(export.as_ref().map(SandboxExport::push)).await {
+            tracing::error!(error = %e, "error exporting sandbox metrics");
+        }
     }
 }
 

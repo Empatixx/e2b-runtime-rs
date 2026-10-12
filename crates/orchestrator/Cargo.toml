@@ -70,7 +70,7 @@ tokio-util = { version = "0.7", features = ["rt", "io", "io-util"] }
 opentelemetry = { version = "0.31", features = ["metrics", "trace", "logs"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "gzip-tonic", "metrics", "trace", "logs"] }
 opentelemetry-appender-tracing = { version = "0.31", features = ["experimental_use_tracing_span_context"] }
-opentelemetry_sdk = { version = "0.31", features = ["metrics", "trace", "logs", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_logs_batch_log_processor_with_async_runtime", "spec_unstable_metrics_views"] }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "trace", "logs", "rt-tokio", "experimental_metrics_periodicreader_with_async_runtime", "experimental_metrics_custom_reader", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_logs_batch_log_processor_with_async_runtime", "spec_unstable_metrics_views"] }
 tonic = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
@@ -101,6 +101,7 @@ io-uring = "0.7"
 iptables = "0.6"
 libublk = "0.4"
 netns-rs = "0.2"
+nfsserve = "0.10"
 rtnetlink = "0.23"
 rustix = { version = "1", features = ["fs", "std", "termios"] }
 smol = "2"

@@ -20,6 +20,8 @@ mod serve {
     use orchestrator::clickhouse::sinks::Clickhouse;
     use orchestrator::events::EventSink;
     use orchestrator::featureflags::SANDBOX_MAX_INCOMING_CONNECTIONS;
+    use orchestrator::network::settings::NetworkSettings;
+    use orchestrator::nfsproxy::NfsProxy;
     use orchestrator::proxy::sandbox::SandboxProxy;
     use orchestrator::routing::redis::Redis;
     use orchestrator::sandbox_observer::SandboxObserver;
@@ -52,6 +54,7 @@ mod serve {
             .connect()
             .await
             .map_err(|e| format!("failed to create feature flags client: {e}"))?;
+        orchestrator::featureflags::apply_test_overrides(&feature_flags, |name| std::env::var(name).ok());
         let config = config.with_feature_flags(feature_flags.clone());
         orchestrator::sandbox_logs::install_external(
             &config.logs_collector,
@@ -78,10 +81,14 @@ mod serve {
             version: orchestrator::version().to_owned(),
             commit: orchestrator::server::app::COMMIT.to_owned(),
         });
-        let _sandbox_observer = SandboxObserver::start(&telemetry.sandbox_meter(), {
-            let node = node.clone();
-            Arc::new(move || running(&node))
-        });
+        let _sandbox_observer = SandboxObserver::start(
+            &telemetry.sandbox_meter(),
+            {
+                let node = node.clone();
+                Arc::new(move || running(&node))
+            },
+            telemetry.sandbox_export(),
+        );
         let mut event_sinks: Vec<Arc<dyn EventSink>> = Vec::new();
         match &config.redis {
             Some(settings) => {
@@ -144,8 +151,11 @@ mod serve {
             )
             .into_future(),
         );
+        let settings = NetworkSettings::current();
+        if !config.volume_mounts.is_empty() {
+            start_nfs_proxy(&node, &config, settings).await?;
+        }
         let firewall_node = node.clone();
-        let settings = orchestrator::network::settings::NetworkSettings::current();
         orchestrator::tcpfirewall::proxy::TcpFirewall::new(
             Arc::new(move |ip| firewall_node.firewall_source(ip)),
             settings,
@@ -200,6 +210,29 @@ mod serve {
             tokio::join!(events.stop(), host_stats.stop());
         }
         served
+    }
+
+    async fn start_nfs_proxy(node: &Arc<Node>, config: &NodeConfig, settings: &NetworkSettings) -> Result<(), String> {
+        let portmap = listen(settings.portmapper_port)
+            .await
+            .map_err(|e| format!("failed to listen on portmapper port: {e}"))?;
+        let nfs = listen(settings.nfs_proxy_port)
+            .await
+            .map_err(|e| format!("failed to listen on nfs port: {e}"))?;
+        let mounting = node.clone();
+        let live = node.clone();
+        let proxy = NfsProxy::new(
+            Arc::new(move |ip| mounting.mounting_sandbox(ip)),
+            Arc::new(move || live.live_lifecycles()),
+            config.volume_mounts.clone(),
+        );
+        tokio::spawn(proxy.clone().serve_portmap(portmap));
+        tokio::spawn(proxy.serve(nfs));
+        Ok(())
+    }
+
+    async fn listen(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+        tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await
     }
 
     fn no_delay(tcp: &mut TcpStream) {

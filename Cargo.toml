@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/nfsserve"]
+
+[patch.crates-io]
+nfsserve = { path = "vendor/nfsserve" }
 
 [profile.release]
 lto = true

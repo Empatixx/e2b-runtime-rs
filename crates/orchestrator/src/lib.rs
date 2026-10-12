@@ -23,6 +23,8 @@ pub mod hoststats;
 pub mod hyperloop;
 pub mod memory;
 pub mod network;
+#[cfg(target_os = "linux")]
+pub mod nfsproxy;
 pub mod oom;
 pub mod peer;
 pub mod phases;

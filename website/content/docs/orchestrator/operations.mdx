@@ -15,6 +15,8 @@ The orchestrator is configured with environment variables, the same names as ups
 | `TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` | | Where builds are stored. |
 | `FIRECRACKER_VERSIONS_DIR`, `HOST_KERNELS_DIR` | `/fc-versions`, `/fc-kernels` | VMM and kernel binaries. |
 | `NBD_POOL_SIZE` | `64` | Ready NBD devices. |
+| `ORCHESTRATOR_BASE_PATH` | `/orchestrator` | Base of the local dirs: `sandbox/` (`SANDBOX_CACHE_DIR`), `template/` (`TEMPLATE_CACHE_DIR`) and `build/` (`DEFAULT_CACHE_DIR`). |
+| `PERSISTENT_VOLUME_MOUNTS` | | Volume types and their host dirs, for example `nfs:/data/volumes`. When set, the node serves volumes over NFS. |
 | `LAUNCH_DARKLY_API_KEY` | | Feature flags; without it, upstream's fallbacks. |
 | `OTEL_COLLECTOR_GRPC_ENDPOINT` | | Enables OTLP metrics, traces and logs. |
 
