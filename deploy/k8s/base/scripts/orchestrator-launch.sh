@@ -16,7 +16,12 @@ resolve_service_names() {
   done
 }
 
+keep_the_pod_alive_on_single_oom_kills() {
+  echo 0 > /sys/fs/cgroup/memory.oom.group || log "cannot write memory.oom.group"
+}
+
 resolve_service_names
+keep_the_pod_alive_on_single_oom_kills
 nsenter -t 1 -m -u -i -n -C -w/ -- \
   /usr/bin/env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   /var/lib/e2b/bin/orchestrator &

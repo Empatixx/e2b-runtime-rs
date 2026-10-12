@@ -74,7 +74,7 @@ The orchestrator pod has three steps:
 
 1. `host-setup` enters the host namespaces and installs `rsync`, `e2fsprogs`, `iproute2`, `iptables` and `nftables`. It loads `nbd` with the udev `nowatch` rule, reserves the huge pages and restarts the kubelet once so it advertises them.
 2. `install` copies the orchestrator, envd, Firecracker `v1.14-0.2.0`, the `vmlinux-6.1.177_5008931` kernel and busybox from the image to the host.
-3. `orchestrator` runs the binary in the host mount namespace, like upstream's launcher. It needs the host's systemd, `/dev`, cgroups and network namespaces. Service names in its environment are resolved to cluster IPs first, because the host does not use the cluster DNS.
+3. `orchestrator` turns off `memory.oom.group` for its container, so an out of memory kill takes one process and not the whole pod. Then it runs the binary in the host mount namespace, like upstream's launcher. It needs the host's systemd, `/dev`, cgroups and network namespaces. Service names in its environment are resolved to cluster IPs first, because the host does not use the cluster DNS.
 
 ## Upgrades
 
