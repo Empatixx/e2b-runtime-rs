@@ -11,6 +11,7 @@ use super::services::Services;
 use super::upload::UploadHandler;
 use crate::builder::config::BuilderConfig;
 use crate::clickhouse::endpoint::Endpoint;
+use crate::exposure::Transport;
 use crate::featureflags::feature_flags_builder::{
     SetApiKey, SetDeploymentEnvironment, SetServiceName, SetServiceVersion,
 };
@@ -74,6 +75,7 @@ pub struct NodeConfig {
     pub clickhouse: Option<String>,
     pub clickhouse_additional: Vec<String>,
     pub volume_mounts: VolumeMounts,
+    pub rootfs_exposure: Transport,
 }
 
 impl NodeConfig {
@@ -152,6 +154,7 @@ impl NodeConfig {
             clickhouse: clickhouse.0,
             clickhouse_additional: clickhouse.1,
             volume_mounts: VolumeMounts::from_vars(vars)?,
+            rootfs_exposure: Transport::parse(var("ROOTFS_EXPOSURE").as_deref())?,
         })
     }
 
@@ -292,6 +295,20 @@ mod tests {
         assert_eq!(config.template_storage, StorageSpec::local("/srv/builds"));
         assert_eq!(config.build_cache_storage, None);
         assert_eq!(config.upload_base_url(), "http://localhost:5008");
+        assert_eq!(config.rootfs_exposure, Transport::Nbd);
+    }
+
+    #[test]
+    fn rootfs_exposure_comes_from_the_node_vars() {
+        let config = |value: &str| {
+            NodeConfig::from_vars(&vars(&[("STORAGE_PROVIDER", "Local"), ("ROOTFS_EXPOSURE", value)]))
+                .map(|config| config.rootfs_exposure)
+        };
+        assert_eq!(config("ublk"), Ok(Transport::Ublk));
+        assert_eq!(
+            config("loop"),
+            Err("invalid ROOTFS_EXPOSURE \"loop\": want nbd or ublk".to_owned())
+        );
     }
 
     #[test]

@@ -95,6 +95,7 @@ async fn run(mut options: Options, cancel: CancellationToken) -> Result<(), Stri
     let config = NodeConfig::from_env()
         .map_err(|e| format!("config: {e}"))?
         .with_feature_flags(flags);
+    crate::exposure::use_transport(config.rootfs_exposure).map_err(|e| format!("config: {e}"))?;
     let template_storage = config.template_storage.clone();
     let node = Arc::new(Node::new(&config).map_err(|e| format!("node: {e}"))?);
     if options.run.console {

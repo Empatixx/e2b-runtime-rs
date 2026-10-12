@@ -61,6 +61,7 @@ mod serve {
         if config.network_version == 2 {
             orchestrator::network::prerequisites::require_v2_prerequisites()?;
         }
+        orchestrator::exposure::use_transport(config.rootfs_exposure)?;
         orchestrator::volumes::check_support().map_err(|e| format!("volume confinement prerequisites not met: {e}"))?;
         let node = Arc::new(Node::new(&config)?);
         let _gauges = NodeGauges::register(NodeSource {
