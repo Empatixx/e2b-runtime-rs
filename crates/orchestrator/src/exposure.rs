@@ -1,3 +1,4 @@
+pub mod block_device;
 pub mod nbd;
 
 use std::path::Path;

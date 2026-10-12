@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use super::ioctl;
 use super::pool::{DEFAULT_POOL_SIZE, DevicePool};
+use crate::exposure::block_device;
 
 const NOT_OPEN: &str = "no NBD device open to flush";
 const FLAGS: i32 = 1 | 32 | 64 | 256;
@@ -119,7 +120,7 @@ impl NbdDevice {
             .control
             .try_clone()
             .map_err(|e| format!("sync NBD device: {e}"))?;
-        tokio::task::spawn_blocking(move || flush_device(&control))
+        tokio::task::spawn_blocking(move || block_device::flush(&control, "NBD"))
             .await
             .map_err(|e| format!("flush NBD device: {e}"))?
     }
@@ -191,20 +192,6 @@ impl Drop for NbdDevice {
     }
 }
 
-fn flush_device(control: &File) -> Result<(), String> {
-    let synced = control.sync_all().map_err(|e| format!("sync NBD device: {e}"));
-    let invalidated = ioctl::flush_buffers(control).map_err(|e| format!("flush NBD device buffers: {e}"));
-    joined_failures([synced.err(), invalidated.err()])
-}
-
-fn joined_failures(failures: [Option<String>; 2]) -> Result<(), String> {
-    let failures: Vec<String> = failures.into_iter().flatten().collect();
-    match failures.is_empty() {
-        true => Ok(()),
-        false => Err(failures.join("\n")),
-    }
-}
-
 fn configure(control: &File, kernel_socket: &UnixStream, size: u64, block_size: u64) -> io::Result<()> {
     ioctl::set_block_size(control, block_size)?;
     ioctl::set_size_blocks(control, size / block_size)?;
@@ -255,25 +242,4 @@ fn sys_path(index: u32) -> PathBuf {
 
 fn pid_path(index: u32) -> PathBuf {
     sys_path(index).join("pid")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn flush_failures_join_like_go_errors_join() {
-        assert_eq!(joined_failures([None, None]), Ok(()));
-        assert_eq!(
-            joined_failures([Some("sync NBD device: EIO".to_owned()), None]),
-            Err("sync NBD device: EIO".to_owned())
-        );
-        assert_eq!(
-            joined_failures([
-                Some("sync NBD device: EIO".to_owned()),
-                Some("flush NBD device buffers: EBUSY".to_owned())
-            ]),
-            Err("sync NBD device: EIO\nflush NBD device buffers: EBUSY".to_owned())
-        );
-    }
 }

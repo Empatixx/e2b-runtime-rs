@@ -15,7 +15,6 @@ mod raw {
     ioctl_none_bad!(clear_sock, request_code_none!(0xab, 4));
     ioctl_none_bad!(disconnect, request_code_none!(0xab, 8));
     ioctl_write_int_bad!(set_flags, request_code_none!(0xab, 10));
-    ioctl_none_bad!(flush_buffers, request_code_none!(0x12, 97));
 }
 
 const SET_BLOCK_SIZE: libc::Ioctl = nix::request_code_none!(0xab, 1) as libc::Ioctl;
@@ -40,10 +39,6 @@ pub fn set_timeout(device: &File, seconds: u64) -> io::Result<()> {
 
 pub fn set_flags(device: &File, flags: i32) -> io::Result<()> {
     check(unsafe { raw::set_flags(device.as_raw_fd(), flags) })
-}
-
-pub fn flush_buffers(device: &File) -> io::Result<()> {
-    check(unsafe { raw::flush_buffers(device.as_raw_fd()) })
 }
 
 pub fn do_it(device: &File) -> io::Result<()> {

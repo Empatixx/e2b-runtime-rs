@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
@@ -9,27 +8,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use super::protocol::{BACKEND_ERROR, Command, MAX_WRITE, REPLY_SIZE, REQUEST_SIZE, Request, encode_reply};
-use crate::block::overlay::Overlay;
-
-pub trait BlockDevice: Send + Sync + 'static {
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> impl Future<Output = Result<(), String>> + Send;
-    fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String>;
-    fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String>;
-}
-
-impl BlockDevice for Overlay {
-    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        Overlay::read_at(self, offset, buf).await
-    }
-
-    fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String> {
-        Overlay::write_at(self, offset, data)
-    }
-
-    fn write_zeroes_at(&self, offset: u64, length: u64) -> Result<(), String> {
-        Overlay::write_zeroes_at(self, offset, length)
-    }
-}
+use crate::exposure::block_device::BlockDevice;
 
 struct Response {
     error: u32,
@@ -186,6 +165,7 @@ mod tests {
 
     use super::*;
     use crate::block::build_file::{Artifact, BuildFile, DiffStore};
+    use crate::block::overlay::Overlay;
     use crate::storage::backend::Storage;
     use crate::storage::header::{Header, Metadata};
 
