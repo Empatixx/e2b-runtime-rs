@@ -37,3 +37,54 @@ ACTION=="add|change", KERNEL=="nbd*", OPTIONS:="nowatch"
 ```
 
 Stejné pravidlo vyžaduje i upstream. Bez něj udev při každém zavření NBD zařízení spustí blkid, který ze zařízení čte. To se děje ve chvíli, kdy se připojuje další sandbox nebo odpojuje ten předchozí, takže to obojí zpomalí a požadavky se mohou zaseknout ([hlášení v LKML](https://lore.kernel.org/lkml/20220422054224.19527-1-matthew.ruffell@canonical.com/)). Skript `scripts/ci/nbd-host.sh` pravidlo nainstaluje a načte modul se 128 zařízeními.
+
+## ublk
+
+ublk je druhý způsob, jak overlay vystavit. **Upstream E2B ho nemá**, používá jen NBD. Na nodu ho zapne `ROOTFS_EXPOSURE=ublk`. Výchozí hodnota je `nbd`, takže node bez nastavení se chová stejně jako upstream.
+
+ublk je ovladač Linuxu pro bloková zařízení, která obsluhuje server v uživatelském prostoru. Jádro a server sdílejí paměť a komunikují přes io_uring, takže odpadá socket i protokol NBD.
+
+<Mermaid chart={`
+flowchart LR
+  G[ext4 v hostovi] --> U[/dev/ublkbN/]
+  U --> Q[vlákno fronty ublk]
+  Q --> T[tokio task]
+  T --> O{overlay}
+`} />
+
+- Každé zařízení má vlastní vlákno. To vlákno zařízení přidá, obsluhuje a smaže, protože libublk drží svůj řídicí ring pro každé vlákno zvlášť.
+- Zařízení má jednu frontu se 128 sloty. Firecracker posílá požadavky po jednom, takže víc front nepomůže.
+- Fronta předá každý požadavek do tokio, kde práci udělá overlay. Jeden eventfd na frontu probudí smyčku io_uring, když je odpověď hotová.
+- Čtení nebo zápis, který v overlay selže, odpoví `EIO` a zařízení dál obsluhuje další požadavky.
+- Bloky mají 4096 bajtů jako u NBD. Zařízení přijímá požadavky discard a write zeroes do 32 MiB.
+
+### Naměřený rozdíl
+
+Oba transporty jsme změřili 12. 10. 2026 nástrojem `fio` (libaio, přímé IO, 6 sekund na úlohu) ve VM Colima: aarch64, 12 CPU, jádro 6.8. Oba obsluhovaly stejný overlay nad lokálním buildem o velikosti 512 MiB. Rozhoduje hloubka fronty 1, protože Firecracker posílá požadavky po jednom.
+
+| | NBD | ublk |
+|---|---|---|
+| připojení zařízení, p50 | 12,4 ms | 2,0 ms |
+| náhodné čtení 4k, hloubka fronty 1 | 9 900 IOPS | 11 370 IOPS |
+| náhodné čtení 4k, hloubka fronty 1, p99 | 103 us | 80 us |
+| náhodný zápis 4k, hloubka fronty 1 | 8 106 IOPS | 10 086 IOPS |
+| sekvenční čtení 128k, hloubka fronty 1 | 1 097 MiB/s | 1 272 MiB/s |
+| náhodné čtení 4k, hloubka fronty 32 | 147 tisíc IOPS | 259 tisíc IOPS |
+
+Latence p50 čtení 4k při hloubce fronty 1 je nerozhodně: 57 us pro NBD a 60 us pro ublk. Většinu času zabere overlay a přechod do tokio, ne samotný transport. Uvnitř hosta ve Firecrackeru jsme zatím neměřili, protože VM nemá KVM.
+
+### Když server spadne
+
+Když orchestrator spadne, jádro ukončí každý požadavek, který server držel, chybou `EIO`. Firecracker dostane chybu disku a nezasekne se. Test `a_killed_server_fails_its_reads_and_leaves_an_orphan_to_remove` to ověřuje se serverem v samostatném procesu.
+
+Mrtvé zařízení zůstane v jádře. Když orchestrator startuje s `ROOTFS_EXPOSURE=ublk`, smaže všechna ublk zařízení, jejichž serverový proces už neběží.
+
+Jeden případ se pořád zasekne: proces, který zařízení obsluhuje a zároveň ho má otevřené. Při ukončení zavře zařízení dřív než svůj io_uring a zavření čeká na požadavek, který může zrušit jen ten io_uring. Orchestrator zařízení otevírá jen na krátký flush. Ze stejného důvodu testy čtou a zapisují přes samostatné procesy `dd`.
+
+### Nastavení hostitele pro ublk
+
+- Modul `ublk_drv`. Na Ubuntu je v balíku `linux-modules-extra-$(uname -r)`. `host-setup` balík nainstaluje a modul načte, i poté, co upgrade image nodu změní jádro.
+- Pravidlo pro udev, které systemd-udevd zakáže zařízení prohledávat, ze stejného důvodu jako u NBD: `ACTION=="add|change", KERNEL=="ublkb*", OPTIONS:="nowatch"`.
+- `libclang` při překladu, protože vazby libublk generuje bindgen.
+
+Otevřené věci jsou v `docs/BACKLOG.md`: zero copy (jádro 6.15 a novější), obnova zařízení po restartu orchestratoru a měření uvnitř Firecrackeru.

@@ -37,3 +37,54 @@ ACTION=="add|change", KERNEL=="nbd*", OPTIONS:="nowatch"
 ```
 
 Upstream requires the same rule. Without it, udev probes an NBD device with blkid every time the device is closed. The probe runs while the next sandbox connects or the last one disconnects, so it slows both down and can leave requests stuck ([LKML report](https://lore.kernel.org/lkml/20220422054224.19527-1-matthew.ruffell@canonical.com/)). `scripts/ci/nbd-host.sh` installs the rule and loads the module with 128 devices.
+
+## ublk
+
+ublk is a second way to expose the overlay. **Upstream E2B does not have it**: upstream uses NBD only. Set `ROOTFS_EXPOSURE=ublk` on a node to use it. The default is `nbd`, so a node without the setting behaves like upstream.
+
+ublk is a Linux driver for block devices that a user space server serves. The kernel and the server share memory and talk through io_uring, so there is no socket and no NBD protocol.
+
+<Mermaid chart={`
+flowchart LR
+  G[guest ext4] --> U[/dev/ublkbN/]
+  U --> Q[ublk queue thread]
+  Q --> T[tokio task]
+  T --> O{overlay}
+`} />
+
+- Each device has its own thread. The thread adds the device, serves it and deletes it, because libublk keeps its control ring per thread.
+- The device has one queue with 128 slots. Firecracker sends one request at a time, so more queues do not help.
+- The queue hands each request to tokio, where the overlay does the work. One eventfd per queue wakes the io_uring loop when an answer is ready.
+- A read or write that fails in the overlay answers `EIO`, and the device keeps serving.
+- Blocks are 4096 bytes, as with NBD. The device takes discard and write zeroes requests up to 32 MiB.
+
+### Measured difference
+
+We measured both transports on 2026-10-12 with `fio` (libaio, direct IO, 6 seconds per job) on a Colima VM: aarch64, 12 CPUs, kernel 6.8. Both served the same overlay over a local 512 MiB build. Queue depth 1 is the case that matters, because Firecracker sends one request at a time.
+
+| | NBD | ublk |
+|---|---|---|
+| attach a device, p50 | 12.4 ms | 2.0 ms |
+| 4k random read, queue depth 1 | 9,900 IOPS | 11,370 IOPS |
+| 4k random read, queue depth 1, p99 | 103 us | 80 us |
+| 4k random write, queue depth 1 | 8,106 IOPS | 10,086 IOPS |
+| 128k sequential read, queue depth 1 | 1,097 MiB/s | 1,272 MiB/s |
+| 4k random read, queue depth 32 | 147k IOPS | 259k IOPS |
+
+The p50 latency of a 4k read at queue depth 1 is a tie: 57 us for NBD and 60 us for ublk. Most of that time is the overlay and the hop to tokio, not the transport. We have not measured inside a Firecracker guest yet, because the VM has no KVM.
+
+### When the server dies
+
+If the orchestrator dies, the kernel fails every request the server held with `EIO`. Firecracker gets a disk error and does not hang. The test `a_killed_server_fails_its_reads_and_leaves_an_orphan_to_remove` checks this with the server in a separate process.
+
+The dead device stays in the kernel. When the orchestrator starts with `ROOTFS_EXPOSURE=ublk`, it removes every ublk device whose server process is gone.
+
+One case still hangs: a process that serves a device and also has it open. On exit it closes the device before its io_uring, and the close waits for a request that only the io_uring can cancel. The orchestrator opens the device only for a short flush. The tests read and write the device from separate `dd` processes for the same reason.
+
+### Host setup for ublk
+
+- The `ublk_drv` module. On Ubuntu it is in `linux-modules-extra-$(uname -r)`. `host-setup` installs the package and loads the module, also after a node image upgrade changes the kernel.
+- A udev rule that stops systemd-udevd from probing the devices, for the same reason as with NBD: `ACTION=="add|change", KERNEL=="ublkb*", OPTIONS:="nowatch"`.
+- `libclang` at build time, because the libublk bindings are generated with bindgen.
+
+Open items are in `docs/BACKLOG.md`: zero copy (kernel 6.15 and newer), recovery of devices after an orchestrator restart, and a measurement inside Firecracker.

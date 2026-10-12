@@ -11,7 +11,7 @@ Snapshot paměti může mít gigabajty. Orchestrator ho před startem hosta neko
 
 Šablony používají huge pages 2 MiB, stejně jako upstream. Jeden výpadek pak načte 2 MiB místo 4 KiB, takže probuzení potřebuje asi 60 výpadků místo asi 7000.
 
-Rootfs funguje stejně. Disk hosta je copy-on-write overlay a blok se z buildu čte, až když o něj host požádá. Viz [Bloková zařízení](../orchestrator/block-devices/).
+Rootfs funguje stejně. Disk hosta je copy-on-write overlay a blok se z buildu čte, až když o něj host požádá. Viz [Bloková zařízení](../../orchestrator/block-devices/).
 
 ## Probuzení: pomalé kroky spustit naráz
 
@@ -100,4 +100,4 @@ envd běží v každém sandboxu, takže jeho rychlost je součástí každého 
 
 Na Azure stroji s vnořenou virtualizací (4 vCPU) trvá probuzení p50 51 ms, orchestrator v Go na stejné šabloně 321 ms. Metodika a čísla jsou v [článku na blogu](../../../blog/orchestrator-resume-rust-vs-go/). gRPC server nastavuje `TCP_NODELAY` stejně jako Go, takže odpověď na `Create` nečeká na zpožděné ACK.
 
-NBD se připojuje přes ioctl, ne přes generic netlink jako upstream: připojení přes netlink hned po uvolnění zařízení čeká v jádře 100 až 250 ms. Otevřené věci, například NBD s více spojeními a test pauzy na místě se skutečným Firecrackerem, jsou v `docs/BACKLOG.md`.
+NBD se připojuje přes ioctl, ne přes generic netlink jako upstream: připojení přes netlink hned po uvolnění zařízení čeká v jádře 100 až 250 ms. S `ROOTFS_EXPOSURE=ublk` node místo toho připojí rootfs přes ublk. Upstream to nemá. Zařízení ublk se připojí za 2,0 ms proti 12,4 ms u NBD a nepotřebuje pool. Čísla jsou na stránce [Bloková zařízení](../../orchestrator/block-devices/). Otevřené věci, například NBD s více spojeními a test pauzy na místě se skutečným Firecrackerem, jsou v `docs/BACKLOG.md`.

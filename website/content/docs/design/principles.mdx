@@ -37,7 +37,7 @@ Every `unsafe` block, syscall, ioctl and byte layout lives behind a small type w
 
 - `memory::uffd` wraps userfaultfd: register a range, read events, copy a page, write-protect a page.
 - `block::sparse_file` and `block::tracker` hide the sparse cache file and its bitmap of present blocks.
-- `exposure::nbd` hides the NBD ioctls behind `expose(overlay)`, which returns a device path.
+- `exposure` hides the NBD ioctls and the ublk control and queue rings behind `expose(overlay)`, which returns a device path.
 - envd's `credentials` module switches the credentials of one thread to spawn a process as another user, and switches them back.
 
 The rest of the code calls these types and does not see a raw file descriptor.

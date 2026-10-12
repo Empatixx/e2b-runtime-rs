@@ -15,3 +15,8 @@ sudo udevadm trigger
 if [ ! -e /dev/nbd0 ]; then
   sudo modprobe nbd nbds_max="$NBDS_MAX"
 fi
+
+if ! modinfo ublk_drv >/dev/null 2>&1; then
+  sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+fi
+sudo modprobe ublk_drv

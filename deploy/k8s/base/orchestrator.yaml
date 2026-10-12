@@ -27,7 +27,8 @@ spec:
           securityContext: { privileged: true }
           env:
             - { name: HUGEPAGES, valueFrom: { configMapKeyRef: { name: e2b-cluster, key: HUGEPAGES } } }
-          command: ["/bin/sh", "-c", "exec nsenter -t 1 -m -u -i -n -p -- env HUGEPAGES=$HUGEPAGES /bin/bash -s < /opt/e2b/scripts/host-setup.sh"]
+            - { name: ROOTFS_EXPOSURE, valueFrom: { configMapKeyRef: { name: e2b-cluster, key: ROOTFS_EXPOSURE, optional: true } } }
+          command: ["/bin/sh", "-c", "exec nsenter -t 1 -m -u -i -n -p -- env HUGEPAGES=$HUGEPAGES ROOTFS_EXPOSURE=${ROOTFS_EXPOSURE:-nbd} /bin/bash -s < /opt/e2b/scripts/host-setup.sh"]
           volumeMounts:
             - { name: scripts, mountPath: /opt/e2b/scripts }
         - name: install

@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.98.0
 RUN apt-get update -qq \
-    && apt-get install -y -qq curl ca-certificates build-essential cmake clang pkg-config protobuf-compiler musl-tools \
+    && apt-get install -y -qq curl ca-certificates build-essential cmake clang libclang-dev pkg-config protobuf-compiler musl-tools \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
 ENV PATH=/root/.cargo/bin:$PATH

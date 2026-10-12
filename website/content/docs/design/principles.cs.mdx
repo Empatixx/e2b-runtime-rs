@@ -37,7 +37,7 @@ Každý blok `unsafe`, syscall, ioctl a rozložení bajtů je schované za malý
 
 - `memory::uffd` obaluje userfaultfd: registrace rozsahu, čtení událostí, kopie stránky, ochrana stránky proti zápisu.
 - `block::sparse_file` a `block::tracker` skrývají řídký soubor cache a bitmapu bloků, které obsahuje.
-- `exposure::nbd` skrývá NBD ioctly za `expose(overlay)`, které vrátí cestu k zařízení.
+- `exposure` skrývá NBD ioctly i řídicí a frontový ring ublk za `expose(overlay)`, které vrátí cestu k zařízení.
 - Modul `credentials` v envd přepne oprávnění jednoho vlákna, spustí proces jako jiný uživatel a oprávnění vrátí.
 
 Zbytek kódu volá tyto typy a holý deskriptor souboru nevidí.

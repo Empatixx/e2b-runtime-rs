@@ -91,6 +91,16 @@ variable "hugepages" {
   default     = 8192
 }
 
+variable "rootfs_exposure" {
+  description = "How the sandbox rootfs reaches Firecracker: nbd, as upstream does, or ublk, which needs the ublk_drv module from linux-modules-extra."
+  type        = string
+  default     = "nbd"
+  validation {
+    condition     = contains(["nbd", "ublk"], var.rootfs_exposure)
+    error_message = "rootfs_exposure must be nbd or ublk."
+  }
+}
+
 variable "orchestrator_image" {
   description = "Orchestrator image to run. Empty builds docker/orchestrator.Dockerfile in the registry Terraform creates."
   type        = string

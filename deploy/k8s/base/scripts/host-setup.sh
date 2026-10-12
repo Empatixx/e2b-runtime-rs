@@ -3,6 +3,7 @@ set -euo pipefail
 
 NBDS_MAX="${NBDS_MAX:-256}"
 HUGEPAGES="${HUGEPAGES:-4096}"
+ROOTFS_EXPOSURE="${ROOTFS_EXPOSURE:-nbd}"
 PACKAGES=(rsync e2fsprogs iproute2 iptables nftables)
 
 log() { echo "host-setup: $*"; }
@@ -36,6 +37,20 @@ EOF
   [ "$have" -ge "$NBDS_MAX" ] || die "nbd is loaded with nbds_max=$have, need $NBDS_MAX; reboot the node"
 }
 
+load_ublk() {
+  [ "$ROOTFS_EXPOSURE" = ublk ] || return 0
+  if ! modinfo ublk_drv >/dev/null 2>&1; then
+    log "installing linux-modules-extra-$(uname -r) for ublk_drv"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+  fi
+  echo ublk_drv >> /etc/modules-load.d/e2b.conf
+  echo 'ACTION=="add|change", KERNEL=="ublkb*", OPTIONS:="nowatch"' > /etc/udev/rules.d/97-ublk-device.rules
+  udevadm control --reload-rules
+  modprobe ublk_drv
+  [ -e /dev/ublk-control ] || die "/dev/ublk-control is missing after loading ublk_drv"
+}
+
 reserve_hugepages() {
   cat > /etc/sysctl.d/90-e2b.conf <<EOF
 vm.nr_hugepages=${HUGEPAGES}
@@ -63,6 +78,7 @@ advertise_hugepages() {
 install -d -m 0755 /var/lib/e2b/bin /fc-versions /fc-kernels /fc-busybox /fc-envd /fc-vm /orchestrator /var/run/netns
 install_packages
 load_modules
+load_ublk
 reserve_hugepages
 advertise_hugepages
 log "ok"

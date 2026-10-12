@@ -56,6 +56,7 @@ export E2B_API_KEY=$(terraform -chdir=deploy/terraform/azure output -raw e2b_api
 - **Removing a sandbox node:** the orchestrator gets `SIGTERM`, reports itself as draining and waits until the API has removed every sandbox (up to one hour).
 - **Control pool:** the API, the client proxy and Envoy scale on CPU. The cluster autoscaler adds control nodes between `control_min_count` and `control_max_count`.
 - **Huge pages:** each sandbox node reserves `hugepages` pages of 2 MiB (default 8192, 16 GiB). Keep it near half of the node's RAM.
+- **Rootfs transport:** `rootfs_exposure` is `nbd` by default, as upstream. `ublk` attaches a disk in about 2 ms instead of 12 ms and serves more IOPS, but upstream E2B does not have it. A node image upgrade changes the kernel, and `host-setup` installs the matching `linux-modules-extra` again on the next start.
 
 ## Other clusters
 
@@ -64,7 +65,7 @@ The base in `deploy/k8s/base` does not depend on Azure. Copy `deploy/k8s/overlay
 1. Label the sandbox nodes `e2b.dev/role=sandbox`, taint them `e2b.dev/role=sandbox:NoSchedule`, and label the other nodes `e2b.dev/role=control`. Sandbox nodes need x86-64, `/dev/kvm`, cgroup v2, kernel 6.8 or newer and `apt` (Ubuntu 24.04).
 2. Install Envoy Gateway and cert-manager, and create a `ClusterIssuer` named `e2b` that can issue a wildcard certificate.
 3. Create the Secret: `kubectl -n e2b create secret generic e2b-secrets --from-literal=POSTGRES_PASSWORD=... --from-literal=CLICKHOUSE_PASSWORD=... --from-literal=ADMIN_TOKEN=... --from-literal=SANDBOX_ACCESS_TOKEN_HASH_SEED=... --from-literal=TEAM_API_KEY=e2b_<40 hex characters>`.
-4. Set the domain, the huge pages and the storage in `cluster.env`. Storage takes the same variables as the orchestrator: `TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` and the credentials of the provider.
+4. Set the domain, the huge pages, the storage and `ROOTFS_EXPOSURE` in `cluster.env`. Storage takes the same variables as the orchestrator: `TEMPLATE_STORAGE_URL`, `BUILD_CACHE_STORAGE_URL` and the credentials of the provider.
 5. Build and push `docker/orchestrator.Dockerfile` and set its name under `images`.
 6. Run `kubectl apply --server-side -k` on your overlay.
 
@@ -72,7 +73,7 @@ The base in `deploy/k8s/base` does not depend on Azure. Copy `deploy/k8s/overlay
 
 The orchestrator pod has three steps:
 
-1. `host-setup` enters the host namespaces and installs `rsync`, `e2fsprogs`, `iproute2`, `iptables` and `nftables`. It loads `nbd` with the udev `nowatch` rule, reserves the huge pages and restarts the kubelet once so it advertises them.
+1. `host-setup` enters the host namespaces and installs `rsync`, `e2fsprogs`, `iproute2`, `iptables` and `nftables`. It loads `nbd` with the udev `nowatch` rule, and with `ROOTFS_EXPOSURE=ublk` also `ublk_drv`, installing `linux-modules-extra` for the running kernel when the module is missing. It reserves the huge pages and restarts the kubelet once so it advertises them.
 2. `install` copies the orchestrator, envd, Firecracker `v1.14-0.2.0`, the `vmlinux-6.1.177_5008931` kernel and busybox from the image to the host.
 3. `orchestrator` turns off `memory.oom.group` for its container, so an out of memory kill takes one process and not the whole pod. Then it runs the binary in the host mount namespace, like upstream's launcher. It needs the host's systemd, `/dev`, cgroups and network namespaces. Service names in its environment are resolved to cluster IPs first, because the host does not use the cluster DNS.
 

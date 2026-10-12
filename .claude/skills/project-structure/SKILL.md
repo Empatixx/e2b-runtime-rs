@@ -35,8 +35,13 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        spans, traceparent, rpc.server.duration with sandbox.resume and team.id from metadata), report.rs (span errors), server/ (upstream instruments; network.rs slot return duration)
   src/block/           sparse cache + tracker, chunker (storage-backed or local), build file (DiffStore: TTL, pins,
                        disk-pressure eviction), overlay
+  src/exposure.rs      Transport (ROOTFS_EXPOSURE: nbd or ublk), the Exposure enum and expose(overlay);
+                       block_device.rs (BlockDevice trait, device flush shared by both transports)
   src/exposure/nbd/    NBD server (concurrent dispatch over the BlockDevice trait), ioctls, device.rs (attach),
                        pool.rs (DevicePool: process-wide ready devices on std threads, NBD_POOL_SIZE)
+  src/exposure/ublk/   ublk (not in upstream): device.rs (one thread per device owns the libublk control ring,
+                       params, orphan removal), queue.rs (request to BlockDevice through tokio), wakeup.rs
+                       (one eventfd per queue wakes the io_uring loop)
   src/network/         slot.rs (slot addressing), slot/host.rs (Linux: netns, veth, tap via rtnetlink/tun,
                        iptables REDIRECTs; HostSlots), pool.rs (NetworkPool: 32 new, 100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
                        leaked namespaces), firewall.rs (nftables slot-firewall: sets, DSCP, EgressRules),

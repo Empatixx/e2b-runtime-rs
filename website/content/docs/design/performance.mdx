@@ -11,7 +11,7 @@ A memory snapshot can be gigabytes. The orchestrator does not copy it before the
 
 Templates use 2 MiB huge pages, like upstream. One fault then fills 2 MiB instead of 4 KiB, so a resume takes about 60 faults instead of about 7000.
 
-The rootfs works the same way. The guest disk is a copy-on-write overlay, and a block is read from the build only when the guest asks for it. See [Block devices](../orchestrator/block-devices/).
+The rootfs works the same way. The guest disk is a copy-on-write overlay, and a block is read from the build only when the guest asks for it. See [Block devices](../../orchestrator/block-devices/).
 
 ## Resume: start the slow steps at the same time
 
@@ -100,4 +100,4 @@ The [blog post](../../../blog/envd-rust-vs-go/) has the method, the numbers and 
 
 On an Azure node with nested virtualization (4 vCPUs), a resume takes p50 51 ms against 321 ms for the Go orchestrator on the same template. The method and the numbers are in the [blog post](../../../blog/orchestrator-resume-rust-vs-go/). The gRPC server sets `TCP_NODELAY`, as Go does, so a `Create` reply does not wait for a delayed ACK.
 
-NBD connects with ioctls, not with upstream's generic netlink: a netlink connect right after a device is released waits 100 to 250 ms in the kernel. Open items, such as multi-connection NBD and a real-Firecracker test of the in-place pause, are in `docs/BACKLOG.md`.
+NBD connects with ioctls, not with upstream's generic netlink: a netlink connect right after a device is released waits 100 to 250 ms in the kernel. With `ROOTFS_EXPOSURE=ublk`, a node attaches the rootfs through ublk instead. Upstream does not have this. A ublk device attaches in 2.0 ms against 12.4 ms for NBD and needs no pool. The numbers are on the [block devices](../../orchestrator/block-devices/) page. Open items, such as multi-connection NBD and a real-Firecracker test of the in-place pause, are in `docs/BACKLOG.md`.

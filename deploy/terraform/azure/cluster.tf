@@ -40,6 +40,7 @@ resource "local_file" "cluster_env" {
     "DOMAIN_NAME=${var.domain}",
     "HUGEPAGES=${var.hugepages}",
     "HUGEPAGES_MEMORY=${var.hugepages * 2}Mi",
+    "ROOTFS_EXPOSURE=${var.rootfs_exposure}",
     "TEMPLATE_STORAGE_URL=azblob://${azurerm_storage_container.templates.name}",
     "BUILD_CACHE_STORAGE_URL=azblob://${azurerm_storage_container.build_cache.name}",
     "AZURE_STORAGE_ACCOUNT_NAME=${azurerm_storage_account.this.name}",

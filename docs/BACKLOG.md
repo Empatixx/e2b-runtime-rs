@@ -86,3 +86,14 @@ Every final review ends with minors and deferred rulings. They are collected her
 | The memory in-place checkpoint is tested only with the synchronous copy. The deferred export needs a template built with `free-page-reporting` on, and no test builds one yet | perf |
 | No end-to-end test of the filesystem-only in-place checkpoint over gRPC (needs KVM and a cluster with `filesystem-only-checkpoint` on) | API |
 
+
+## Orchestrator: ublk rootfs exposure
+
+| Item | Target |
+|---|---|
+| Not measured inside a Firecracker guest yet (the Colima VM has no KVM); run `fio` at queue depth 1 in a guest on CI or AKS for both transports | perf |
+| Each request hops from the queue thread to tokio and copies its data once more; a 4k read at queue depth 1 ties with NBD at p50 (60 us against 57 us) | perf |
+| Zero copy (`UBLK_F_AUTO_BUF_REG`) needs kernel 6.15; AKS runs 6.8 | later |
+| Queue depth 128 with a 512 KiB buffer per slot can touch up to 64 MiB per device under heavy writeback | perf |
+| A process that serves a device and also has it open hangs on exit; the orchestrator opens the device only for the flush before a pause | later |
+| No recovery of devices after an orchestrator restart (`UBLK_F_USER_RECOVERY`); dead devices are removed at start instead | later |
