@@ -3,7 +3,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::cgroup::Cgroup;
-use crate::exposure::nbd::Exposure;
+use crate::exposure::Exposure;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::memory::server::MemoryServer;
 use crate::network::slot::Slot;

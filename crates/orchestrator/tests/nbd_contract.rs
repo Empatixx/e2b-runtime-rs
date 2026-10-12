@@ -7,7 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
-use orchestrator::exposure::nbd::expose;
+use orchestrator::exposure::expose;
 use orchestrator::storage::backend::Storage;
 use orchestrator::storage::header::{Header, Metadata};
 use uuid::Uuid;

@@ -30,7 +30,7 @@ use crate::cgroup::cpu_limit::set_sandbox_cpu_limit;
 use crate::envd::cpus::verify_envd_cpu_count;
 use crate::envd::report::EnvdReport;
 use crate::envd::{self, ENVD_PORT};
-use crate::exposure::nbd::expose;
+use crate::exposure::expose;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::config::VmConfig;
 use crate::firecracker::exit::{CrashCause, ExitInfo};

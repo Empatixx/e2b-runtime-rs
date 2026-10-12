@@ -10,7 +10,7 @@ use orchestrator::block::build_file::{Artifact, BuildFile, DiffStore};
 use orchestrator::block::overlay::Overlay;
 use orchestrator::builder::config::host_arch;
 use orchestrator::cgroup::Cgroup;
-use orchestrator::exposure::nbd::expose;
+use orchestrator::exposure::expose;
 use orchestrator::firecracker::config::VmConfig;
 use orchestrator::firecracker::kernel_args::BootOptions;
 use orchestrator::firecracker::launch::{GUEST_KERNEL, GUEST_ROOTFS, Launch};

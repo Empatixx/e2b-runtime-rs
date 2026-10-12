@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::deadline::{DEADLINE_EXCEEDED, Deadline};
 use crate::block::overlay::Overlay;
 use crate::builder::ext4::Ext4;
-use crate::exposure::nbd::{Exposure, expose};
+use crate::exposure::{Exposure, expose};
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 

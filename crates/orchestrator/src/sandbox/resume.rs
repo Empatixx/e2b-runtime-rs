@@ -11,7 +11,7 @@ use super::config::{START_RESUME, SandboxBuilder, sandbox_builder};
 use super::vcpu_limit::{limit_vcpus_before_resume, resolve_vm_vcpus, resume_vm_vcpus};
 use crate::block::build_file::BuildFile;
 use crate::block::overlay::Overlay;
-use crate::exposure::nbd::{Exposure, expose};
+use crate::exposure::{Exposure, expose};
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::process::FirecrackerProcess;
 use crate::firecracker::vcpus::{exceeds_snapshot_error, vcpu_cap_resume_error};

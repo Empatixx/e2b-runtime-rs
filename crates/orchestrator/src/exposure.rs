@@ -4,6 +4,9 @@ pub mod nbd;
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[cfg(target_os = "linux")]
+pub use linux::{Exposure, expose};
+
 const UBLK_CONTROL: &str = "/dev/ublk-control";
 
 static TRANSPORT: OnceLock<Transport> = OnceLock::new();
@@ -44,6 +47,53 @@ fn available(transport: Transport, control: &Path) -> Result<(), String> {
             control.display()
         )),
         false => Ok(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::io;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::{Transport, nbd, transport};
+    use crate::block::overlay::Overlay;
+
+    pub enum Exposure {
+        Nbd(nbd::Exposure),
+    }
+
+    pub async fn expose(overlay: Arc<Overlay>) -> io::Result<Exposure> {
+        match transport() {
+            Transport::Nbd => nbd::expose(overlay).await.map(Exposure::Nbd),
+            Transport::Ublk => Err(io::Error::other("ublk exposure is not built yet")),
+        }
+    }
+
+    impl Exposure {
+        pub fn path(&self) -> PathBuf {
+            match self {
+                Exposure::Nbd(exposure) => exposure.path(),
+            }
+        }
+
+        pub async fn flush(&self) -> Result<(), String> {
+            match self {
+                Exposure::Nbd(exposure) => exposure.flush().await,
+            }
+        }
+
+        pub async fn ended(&self) {
+            match self {
+                Exposure::Nbd(exposure) => exposure.ended().await,
+            }
+        }
+
+        pub async fn close(self) -> Result<(), String> {
+            match self {
+                Exposure::Nbd(exposure) => exposure.close().await,
+            }
+        }
     }
 }
 
