@@ -1,0 +1,36 @@
+---
+title: Deployment
+description: One orchestrator per node on Kubernetes, with Terraform for Azure.
+---
+
+## Layout
+
+We deploy to Kubernetes with two node pools.
+
+- **Sandbox pool:** one orchestrator per node, as a DaemonSet. Each node needs `/dev/kvm`, so it must be a size with nested virtualization or bare metal.
+- **Control pool:** upstream's API and client proxy, PostgreSQL, Redis, ClickHouse, Vector and the Envoy gateway.
+
+envd is not a separate deployment. The template builder copies it into every template, and it runs inside each microVM.
+
+| Part | Kind | Scales by |
+|---|---|---|
+| orchestrator | DaemonSet on sandbox nodes | adding sandbox nodes |
+| API, client proxy | Deployment with HPA | CPU |
+| Envoy gateway | Envoy Gateway with HPA | CPU |
+| PostgreSQL, Redis, ClickHouse | StatefulSet | one replica each |
+
+## Traffic
+
+Envoy Gateway terminates TLS for `*.<domain>`. It sends `api.<domain>` to the API and every other host to the client proxy. The client proxy reads the sandbox route from Redis and forwards to the orchestrator proxy on port 5007 of the right node.
+
+The API finds orchestrators through the Kubernetes API. It lists the pods labelled `app.kubernetes.io/name=orchestrator` and dials port 5008 on their host IP.
+
+## Azure
+
+`deploy/terraform/azure` creates the AKS cluster, both pools, the storage account, a registry with the orchestrator image, Envoy Gateway, cert-manager, the DNS record and the secrets. It also writes a kustomize overlay. You then apply it with `kubectl apply --server-side -k`.
+
+To add capacity, raise `sandbox_node_count` and apply again. A node that leaves drains its sandboxes first.
+
+## Other clusters
+
+The kustomize base in `deploy/k8s/base` does not depend on a cloud. Label the nodes, install Envoy Gateway and cert-manager, create the secret and fill in `cluster.env`. `deploy/README.md` lists the steps.

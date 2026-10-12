@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: api }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: api }
+    spec:
+      serviceAccountName: api
+      nodeSelector: { e2b.dev/role: control }
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: api
+          image: E2B_API_IMAGE
+          args: ["--port", "3000"]
+          env:
+            - { name: ADMIN_TOKEN, valueFrom: { secretKeyRef: { name: e2b-secrets, key: ADMIN_TOKEN } } }
+            - { name: SANDBOX_ACCESS_TOKEN_HASH_SEED, valueFrom: { secretKeyRef: { name: e2b-secrets, key: SANDBOX_ACCESS_TOKEN_HASH_SEED } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: CLICKHOUSE_PASSWORD } } }
+            - { name: NODE_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: ENVIRONMENT, value: prod }
+            - { name: SERVICE_DISCOVERY_PROVIDER, value: kubernetes }
+            - { name: K8S_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            - { name: K8S_ORCHESTRATOR_POD_LABEL_SELECTOR, value: app.kubernetes.io/name=orchestrator }
+            - { name: K8S_TEMPLATE_MANAGER_POD_LABEL_SELECTOR, value: e2b.dev/template-manager=true }
+            - { name: POSTGRES_CONNECTION_STRING, value: "postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/postgres?sslmode=disable" }
+            - { name: REDIS_URL, value: "redis:6379" }
+            - { name: CLICKHOUSE_CONNECTION_STRING, value: "clickhouse://clickhouse:$(CLICKHOUSE_PASSWORD)@clickhouse:9000/default" }
+            - { name: LOGS_COLLECTOR_ADDRESS, value: "http://vector:20006" }
+            - { name: LOGS_READ_CONFIG, value: "true" }
+            - { name: PAUSE_REFUSAL_RESTORE, value: "true" }
+            - { name: API_INTERNAL_GRPC_PORT, value: "5009" }
+            - { name: API_EDGE_GRPC_PORT, value: "5109" }
+            - { name: VOLUME_TOKEN_ENABLED, value: "false" }
+            - { name: AUTH_PROVIDER_CONFIG, value: '{"jwt":[]}' }
+            - { name: DEFAULT_KERNEL_VERSION, value: vmlinux-6.1.177_5008931 }
+            - { name: DEFAULT_FIRECRACKER_VERSION, value: v1.14-0.2.0 }
+          ports:
+            - { name: http, containerPort: 3000 }
+            - { name: internal-grpc, containerPort: 5009 }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector: { app.kubernetes.io/name: api }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+    - { name: internal-grpc, port: 5009, targetPort: internal-grpc, appProtocol: kubernetes.io/h2c }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: api }

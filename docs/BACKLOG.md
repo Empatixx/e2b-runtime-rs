@@ -5,6 +5,21 @@ Every final review ends with minors and deferred rulings. They are collected her
 - When an item is fixed, delete its line in the same commit.
 - "Target" is when the item starts to matter: `API` before the node serves the real E2B API, `perf` with performance work, `template build` with the template builder, `any` whenever convenient, `later` after that.
 
+## envd
+
+| Item | Target |
+|---|---|
+| Request headers are capped at 64 KiB by the hyper read buffer; Go allows 1 MiB (`MaxHeaderBytes`) | API |
+| `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
+| 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (64 KiB hyper buffer per connection plus chunks in flight) | perf |
+| Not yet compared with Go: gopsutil formulas in `/metrics`, the `txeh` hosts output, `Content-Type: ""` on 204, the `invalid signal` text, an invalid `Connect-Timeout-Ms`, filesystem RPC internals beyond spot checks | API |
+
+## Orchestrator: storage
+
+| Item | Target |
+|---|---|
+| A rate-limited GCS write is recognised by object_store's `Server returned non-2xx status code: 429` text, because its error types are private | later |
+
 ## Orchestrator: cold boot (M5)
 
 | Item | Target |
@@ -36,7 +51,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Matters from |
 |---|---|
 | Slot links, addresses and routes use `ip` execs; upstream uses netlink in-process (only matters for pool refill speed) | perf |
-| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn. A netlink port was measured and reverted, see [performance-resume.md](performance-resume.md#tried-and-dropped); the fixed port is kept outside the repository on the maintainer's machine | perf |
+| NBD connects with ioctls and one socket; upstream uses generic netlink and can do multi-conn. A netlink port was measured and reverted (a connect right after a device is released waits 100 to 250 ms in `blk_mq_freeze_queue_wait`, the ioctl connect takes about 17 ms); the fixed port is kept outside the repository on the maintainer's machine | perf |
 
 ## Orchestrator: async pause (M11)
 

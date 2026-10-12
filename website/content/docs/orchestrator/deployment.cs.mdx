@@ -1,0 +1,36 @@
+---
+title: Nasazení
+description: Jeden orchestrator na každém nodu v Kubernetes, s Terraformem pro Azure.
+---
+
+## Rozložení
+
+Nasazujeme do Kubernetes se dvěma pooly nodů.
+
+- **Sandbox pool:** na každém nodu jeden orchestrator jako DaemonSet. Každý node potřebuje `/dev/kvm`, takže musí mít vnořenou virtualizaci, nebo to musí být bare metal.
+- **Control pool:** API a client proxy z upstreamu, PostgreSQL, Redis, ClickHouse, Vector a Envoy gateway.
+
+envd se nenasazuje samostatně. Template builder ho nakopíruje do každé šablony a běží uvnitř každé microVM.
+
+| Část | Druh | Škáluje se |
+|---|---|---|
+| orchestrator | DaemonSet na sandbox nodech | přidáním sandbox nodů |
+| API, client proxy | Deployment s HPA | podle CPU |
+| Envoy gateway | Envoy Gateway s HPA | podle CPU |
+| PostgreSQL, Redis, ClickHouse | StatefulSet | jedna replika |
+
+## Provoz
+
+Envoy Gateway ukončuje TLS pro `*.<domain>`. `api.<domain>` posílá do API a všechny ostatní hosty do client proxy. Client proxy přečte trasu sandboxu z Redisu a pošle požadavek na proxy orchestratoru na portu 5007 správného nodu.
+
+API hledá orchestratory přes Kubernetes API. Vypíše pody s labelem `app.kubernetes.io/name=orchestrator` a volá port 5008 na jejich host IP.
+
+## Azure
+
+`deploy/terraform/azure` vytvoří AKS cluster, oba pooly, storage account, registry s image orchestratoru, Envoy Gateway, cert-manager, DNS záznam a secrety. Zapíše také kustomize overlay. Ten pak nasadíte příkazem `kubectl apply --server-side -k`.
+
+Kapacitu přidáte zvýšením `sandbox_node_count` a novým apply. Node, který odchází, nejdřív vyprázdní své sandboxy.
+
+## Jiné clustery
+
+Kustomize base v `deploy/k8s/base` nezávisí na cloudu. Označte nody labely, nainstalujte Envoy Gateway a cert-manager, vytvořte secret a vyplňte `cluster.env`. Kroky jsou v `deploy/README.md`.

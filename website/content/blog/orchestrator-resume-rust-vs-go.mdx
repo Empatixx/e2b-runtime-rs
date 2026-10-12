@@ -106,4 +106,4 @@ We ported Go's **NBD over generic netlink** and measured it. A connect right aft
 - Go runs without its gRPC layer and Rust with it, so the comparison slightly favours Go.
 - Go maps the whole guest memory from hugepages at resume. With the 4 GiB that upstream's guide reserves, 8 parallel 1 GiB sandboxes failed in 15 of 48 Go runs. Rust did not fail.
 
-The numbers and the setup are in [`docs/performance-resume.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance-resume.md), and the Rust benchmark is [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).
+The Rust benchmark is [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).

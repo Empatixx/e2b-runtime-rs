@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: orchestrator
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: orchestrator }
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 1 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orchestrator
+        e2b.dev/template-manager: "true"
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 3600
+      nodeSelector: { e2b.dev/role: sandbox }
+      tolerations:
+        - { key: e2b.dev/role, operator: Equal, value: sandbox, effect: NoSchedule }
+      initContainers:
+        - name: host-setup
+          image: E2B_ORCHESTRATOR_IMAGE
+          securityContext: { privileged: true }
+          env:
+            - { name: HUGEPAGES, valueFrom: { configMapKeyRef: { name: e2b-cluster, key: HUGEPAGES } } }
+          command: ["/bin/sh", "-c", "exec nsenter -t 1 -m -u -i -n -p -- env HUGEPAGES=$HUGEPAGES /bin/bash -s < /opt/e2b/scripts/host-setup.sh"]
+          volumeMounts:
+            - { name: scripts, mountPath: /opt/e2b/scripts }
+        - name: install
+          image: E2B_ORCHESTRATOR_IMAGE
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              cd /opt/e2b/host
+              find . -type f | while read -r file; do
+                install -D -m "$(stat -c %a "$file")" "$file" "/host/$file.new"
+                mv "/host/$file.new" "/host/$file"
+              done
+          volumeMounts:
+            - { name: host-root, mountPath: /host }
+      containers:
+        - name: orchestrator
+          image: E2B_ORCHESTRATOR_IMAGE
+          securityContext: { privileged: true }
+          command: ["/bin/bash", "/opt/e2b/scripts/orchestrator-launch.sh"]
+          envFrom:
+            - configMapRef: { name: e2b-cluster }
+          env:
+            - { name: NODE_ID, valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+            - { name: NODE_IP, valueFrom: { fieldRef: { fieldPath: status.hostIP } } }
+            - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: CLICKHOUSE_PASSWORD } } }
+            - { name: ORCHESTRATOR_SERVICES, value: "orchestrator,template-manager" }
+            - { name: ENVIRONMENT, value: prod }
+            - { name: GRPC_PORT, value: "5008" }
+            - { name: PROXY_PORT, value: "5007" }
+            - { name: REDIS_URL, value: "redis.e2b.svc.cluster.local:6379" }
+            - { name: CLICKHOUSE_CONNECTION_STRING, value: "clickhouse://clickhouse:$(CLICKHOUSE_PASSWORD)@clickhouse.e2b.svc.cluster.local:9000/default" }
+            - { name: LOGS_COLLECTOR_ADDRESS, value: "http://vector.e2b.svc.cluster.local:20006" }
+            - { name: FIRECRACKER_VERSIONS_DIR, value: /fc-versions }
+            - { name: HOST_KERNELS_DIR, value: /fc-kernels }
+            - { name: HOST_BUSYBOX_DIR, value: /fc-busybox }
+            - { name: BUSYBOX_VERSION, value: 1.36.1 }
+            - { name: HOST_ENVD_PATH, value: /fc-envd/envd }
+            - { name: ORCHESTRATOR_BASE_PATH, value: /orchestrator }
+            - { name: DEFAULT_KERNEL_VERSION, value: vmlinux-6.1.177_5008931 }
+            - { name: DEFAULT_FIRECRACKER_VERSION, value: v1.14-0.2.0 }
+          ports:
+            - { name: grpc, containerPort: 5008 }
+            - { name: proxy, containerPort: 5007 }
+          readinessProbe:
+            httpGet: { path: /health, port: grpc }
+            periodSeconds: 10
+          startupProbe:
+            httpGet: { path: /health, port: grpc }
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests: { memory: 2Gi, hugepages-2Mi: HUGEPAGES_MEMORY }
+            limits: { hugepages-2Mi: HUGEPAGES_MEMORY }
+          volumeMounts:
+            - { name: scripts, mountPath: /opt/e2b/scripts }
+      volumes:
+        - name: scripts
+          configMap: { name: e2b-scripts }
+        - name: host-root
+          hostPath: { path: /, type: Directory }

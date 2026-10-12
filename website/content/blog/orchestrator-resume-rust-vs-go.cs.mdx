@@ -106,4 +106,4 @@ Převedli jsme z Go i **NBD přes generic netlink** a změřili ho. Připojení 
 - Go běží bez své gRPC vrstvy a Rust s ní, takže srovnání mírně nahrává Go.
 - Go při probuzení mapuje celou paměť hosta z huge pages. Se 4 GiB, které rezervuje návod upstreamu, selhalo 8 souběžných sandboxů s 1 GiB v 15 ze 48 běhů Go. Rust neselhal.
 
-Čísla a nastavení jsou v [`docs/performance-resume.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance-resume.md) a benchmark v Rustu je [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).
+Benchmark v Rustu je [`resume_bench.rs`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/crates/orchestrator/examples/resume_bench.rs).

@@ -1,3 +1,9 @@
 /target
 .idea
 .superpowers
+/deploy/terraform/**/.terraform
+/deploy/terraform/**/.terraform.lock.hcl
+/deploy/terraform/**/terraform.tfstate*
+/deploy/terraform/**/*.tfvars
+/deploy/k8s/overlays/*
+!/deploy/k8s/overlays/example

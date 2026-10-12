@@ -2,7 +2,7 @@
 
 **The node side of the [E2B](https://e2b.dev) sandbox runtime, rewritten in Rust.** Firecracker microVMs that resume from a snapshot, run untrusted agent code and pause when the agent stops. Same APIs, file formats and behaviour as the [Go original](https://github.com/e2b-dev/runtime), so the official E2B SDKs work unchanged.
 
-[Documentation](https://empatixx.github.io/e2b-runtime-rs/) | [Blog](https://empatixx.github.io/e2b-runtime-rs/en/blog/) | [Running a node](docs/running-a-node.md) | [Go parity](docs/PARITY.md) | [Known gaps](docs/BACKLOG.md)
+[Documentation](https://empatixx.github.io/e2b-runtime-rs/) | [Blog](https://empatixx.github.io/e2b-runtime-rs/en/blog/) | [Deploying](deploy/README.md) | [Known gaps](docs/BACKLOG.md)
 
 ## What it is
 
@@ -16,16 +16,16 @@
 |---|---|---|
 | Language | Go | Rust (tokio, axum, tonic) |
 | Scope | the whole stack | envd and the orchestrator; API and proxy stay upstream's |
-| Infrastructure | Terraform for GCP, AWS and Azure | none yet: bring your own Linux nodes with KVM |
-| Deployment | Nomad, plus Kubernetes and Docker Compose | Kubernetes manifests (kustomize, envd and S3 so far) and Docker Compose, no Nomad |
-| NBD connect | generic netlink | ioctl, about 17 ms against netlink's 100 to 250 ms stall ([why](docs/performance-resume.md#tried-and-dropped)) |
+| Infrastructure | Terraform for GCP, AWS and Azure | Terraform for Azure (AKS) |
+| Deployment | Nomad, plus Kubernetes and Docker Compose | Kubernetes (one orchestrator per node, Envoy Gateway) with Terraform for Azure, no Nomad |
+| NBD connect | generic netlink | ioctl, about 17 ms against netlink's 100 to 250 ms stall |
 | Platform | Linux | Linux only |
 | Edges | | identical: routes, gRPC services, errors, snapshot formats, metrics, feature flags |
 
 ## Numbers
 
-- **Sandbox resume:** p50 **51 ms** against Go's 321 ms on the same node and template. See the [blog post](website/content/blog/orchestrator-resume-rust-vs-go.mdx) and [the data](docs/performance-resume.md).
-- **envd under load:** lower p99 latency in all seven tests and higher or equal throughput, idle RSS about 6 MB against Go's 11 MB. See the [blog post](website/content/blog/envd-rust-vs-go.mdx) and [the data](docs/performance.md).
+- **Sandbox resume:** p50 **51 ms** against Go's 321 ms on the same node and template. See the [blog post](website/content/blog/orchestrator-resume-rust-vs-go.mdx).
+- **envd under load:** lower p99 latency in all seven tests and higher or equal throughput, idle RSS about 6 MB against Go's 11 MB. See the [blog post](website/content/blog/envd-rust-vs-go.mdx).
 - **Compatibility:** the official E2B JS SDK sandbox tests pass against envd (105 passed, 9 skipped by the SDK).
 
 ## Status
@@ -46,7 +46,7 @@ docker compose up -d --build
 cd examples/sdk-playground && npm install && npm run demo
 ```
 
-Running the orchestrator and real microVMs needs a Linux host with KVM: see [Running a node](docs/running-a-node.md). Kubernetes manifests are in [`deploy/k8s`](deploy/k8s).
+Running the orchestrator and real microVMs needs Linux with KVM. To run a whole cluster, see [Deploying](deploy/README.md): one orchestrator per node on Kubernetes, with Terraform for Azure.
 
 ## Development
 

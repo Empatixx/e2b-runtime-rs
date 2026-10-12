@@ -8,10 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GLOBS = [
     "README.md",
     "docs/BACKLOG.md",
-    "docs/PARITY.md",
-    "docs/ENVD-PARITY.md",
-    "docs/performance.md",
-    "docs/sdk-tests.md",
+    "deploy/**/*.md",
     "website/content/**/*.mdx",
     ".claude/skills/writing-blogs/*.md",
 ]

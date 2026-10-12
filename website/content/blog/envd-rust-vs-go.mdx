@@ -213,4 +213,3 @@ The last one is a good example of why we profile instead of guessing: our first 
 - **Upload memory under load**: with 50 to 100 concurrent 1 MiB uploads, Rust peaks higher than Go because hyper buffers up to 64 KiB per connection.
 - **Header size**: the 64 KiB buffer also caps request headers at 64 KiB; Go allows 1 MiB. E2B tokens are far smaller, but it is a documented difference.
 
-The full numbers live in [`docs/performance.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance.md) in the repository.

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-proxy
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: client-proxy }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: client-proxy }
+    spec:
+      nodeSelector: { e2b.dev/role: control }
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: client-proxy
+          image: E2B_CLIENT_PROXY_IMAGE
+          env:
+            - { name: NODE_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: ENVIRONMENT, value: prod }
+            - { name: REDIS_URL, value: "redis:6379" }
+            - { name: API_INTERNAL_GRPC_ADDRESS, value: "api:5009" }
+            - { name: PROXY_PORT, value: "3002" }
+            - { name: HEALTH_PORT, value: "3003" }
+          ports:
+            - { name: proxy, containerPort: 3002 }
+            - { name: health, containerPort: 3003 }
+          readinessProbe:
+            httpGet: { path: /, port: health }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-proxy
+spec:
+  selector: { app.kubernetes.io/name: client-proxy }
+  ports:
+    - { name: proxy, port: 3002, targetPort: proxy }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: client-proxy
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: client-proxy }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: client-proxy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: client-proxy }

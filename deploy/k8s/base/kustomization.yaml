@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: e2b
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - stores.yaml
+  - migrate.yaml
+  - orchestrator.yaml
+  - api.yaml
+  - client-proxy.yaml
+  - gateway.yaml
+images:
+  - name: E2B_ORCHESTRATOR_IMAGE
+    newName: e2b-runtime-rs/orchestrator
+    newTag: dev
+  - name: E2B_API_IMAGE
+    newName: us-docker.pkg.dev/e2b-artifacts/api/api
+    newTag: v0.14.202610051633-d1cd3db3890
+  - name: E2B_DB_MIGRATOR_IMAGE
+    newName: us-docker.pkg.dev/e2b-artifacts/api/db-migrator
+    newTag: v0.14.202610051633-d1cd3db3890
+  - name: E2B_CLIENT_PROXY_IMAGE
+    newName: us-docker.pkg.dev/e2b-artifacts/client-proxy/client-proxy
+    newTag: v0.3.202610051633-d1cd3db3890
+  - name: E2B_CLICKHOUSE_MIGRATOR_IMAGE
+    newName: us-docker.pkg.dev/e2b-artifacts/clickhouse-migrator/clickhouse-migrator
+    newTag: v0.4.202610051633-d1cd3db3890
+  - name: E2B_SEED_IMAGE
+    newName: us-docker.pkg.dev/e2b-artifacts/embed/seed
+    newTag: v0.3.202609120109-ad1cddd091b
+configMapGenerator:
+  - name: e2b-config
+    files:
+      - config/clickhouse.xml
+      - config/vector.toml
+  - name: e2b-scripts
+    files:
+      - scripts/host-setup.sh
+      - scripts/orchestrator-launch.sh

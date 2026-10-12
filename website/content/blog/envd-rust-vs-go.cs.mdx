@@ -213,4 +213,3 @@ Ta poslední je dobrý příklad, proč profilujeme místo hádání: naše prvn
 - **Paměť při uploadu pod zátěží**: s 50 až 100 souběžnými uploady po 1 MiB má Rust vyšší špičku než Go, protože hyper drží až 64 KiB na spojení.
 - **Velikost hlaviček**: 64KiB buffer omezuje i hlavičky požadavku na 64 KiB; Go povoluje 1 MiB. Tokeny E2B jsou mnohem menší, ale je to zdokumentovaný rozdíl.
 
-Kompletní čísla jsou v repozitáři v [`docs/performance.md`](https://github.com/Empatixx/e2b-runtime-rs/blob/main/docs/performance.md).

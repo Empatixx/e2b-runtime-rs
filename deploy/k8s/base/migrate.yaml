@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector: { e2b.dev/role: control }
+      initContainers:
+        - name: db-migrator
+          image: E2B_DB_MIGRATOR_IMAGE
+          env:
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: POSTGRES_CONNECTION_STRING, value: "postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/postgres?sslmode=disable" }
+        - name: clickhouse-migrator
+          image: E2B_CLICKHOUSE_MIGRATOR_IMAGE
+          env:
+            - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: CLICKHOUSE_PASSWORD } } }
+            - { name: GOOSE_DBSTRING, value: "clickhouse://clickhouse:$(CLICKHOUSE_PASSWORD)@clickhouse:9000/default" }
+      containers:
+        - name: seed
+          image: E2B_SEED_IMAGE
+          env:
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: POSTGRES_CONNECTION_STRING, value: "postgres://postgres:$(POSTGRES_PASSWORD)@postgres:5432/postgres?sslmode=disable" }
+            - { name: OIDC_ISSUER, value: "http://localhost:4444/" }
+            - { name: OIDC_SUBJECT, value: local-dev-user }
+            - { name: SEED_TEAM_API_KEY, valueFrom: { secretKeyRef: { name: e2b-secrets, key: TEAM_API_KEY } } }

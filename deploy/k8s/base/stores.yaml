@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres }
+    spec:
+      nodeSelector: { e2b.dev/role: control }
+      containers:
+        - name: postgres
+          image: postgres:18.6-alpine
+          env:
+            - { name: POSTGRES_USER, value: postgres }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: POSTGRES_DB, value: postgres }
+            - { name: PGDATA, value: /var/lib/postgresql/18/docker }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "postgres"] }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 32Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app.kubernetes.io/name: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: redis }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: redis }
+    spec:
+      nodeSelector: { e2b.dev/role: control }
+      containers:
+        - name: redis
+          image: redis:7.4.6
+          args: ["--appendonly", "yes"]
+          ports:
+            - { name: redis, containerPort: 6379 }
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 8Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector: { app.kubernetes.io/name: redis }
+  ports:
+    - { name: redis, port: 6379, targetPort: redis }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: clickhouse }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: clickhouse }
+    spec:
+      nodeSelector: { e2b.dev/role: control }
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:25.8.30.16
+          env:
+            - { name: CLICKHOUSE_DB, value: default }
+            - { name: CLICKHOUSE_USER, value: clickhouse }
+            - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: CLICKHOUSE_PASSWORD } } }
+            - { name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT, value: "1" }
+          ports:
+            - { name: native, containerPort: 9000 }
+            - { name: http, containerPort: 8123 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+            - { name: config, mountPath: /etc/clickhouse-server/config.d/e2b.xml, subPath: clickhouse.xml }
+      volumes:
+        - name: config
+          configMap: { name: e2b-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 64Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+spec:
+  selector: { app.kubernetes.io/name: clickhouse }
+  ports:
+    - { name: native, port: 9000, targetPort: native }
+    - { name: http, port: 8123, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: vector }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: vector }
+    spec:
+      nodeSelector: { e2b.dev/role: control }
+      containers:
+        - name: vector
+          image: timberio/vector:0.51.1-alpine
+          env:
+            - { name: VECTOR_CONFIG, value: /etc/vector/vector.toml }
+            - { name: VECTOR_LOG, value: warn }
+            - { name: CLICKHOUSE_PASSWORD, valueFrom: { secretKeyRef: { name: e2b-secrets, key: CLICKHOUSE_PASSWORD } } }
+          ports:
+            - { name: logs, containerPort: 20006 }
+            - { name: api, containerPort: 8686 }
+          readinessProbe:
+            httpGet: { path: /health, port: api }
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/vector/vector.toml, subPath: vector.toml }
+            - { name: data, mountPath: /var/lib/vector }
+      volumes:
+        - name: config
+          configMap: { name: e2b-config }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector
+spec:
+  selector: { app.kubernetes.io/name: vector }
+  ports:
+    - { name: logs, port: 20006, targetPort: logs }

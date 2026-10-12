@@ -1,0 +1,5 @@
+subscription_id         = "00000000-0000-0000-0000-000000000000"
+domain                  = "e2b.example.com"
+dns_zone_name           = "example.com"
+dns_zone_resource_group = "dns"
+acme_email              = "ops@example.com"

@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+replacements:
+  - source: { kind: ConfigMap, name: e2b-cluster, fieldPath: data.WILDCARD_HOSTNAME }
+    targets:
+      - select: { kind: Gateway, name: e2b }
+        fieldPaths:
+          - spec.listeners.[name=http].hostname
+          - spec.listeners.[name=https].hostname
+      - select: { kind: Certificate, name: e2b-tls }
+        fieldPaths: [spec.dnsNames.0]
+  - source: { kind: ConfigMap, name: e2b-cluster, fieldPath: data.API_HOSTNAME }
+    targets:
+      - select: { kind: HTTPRoute, name: api }
+        fieldPaths: [spec.hostnames.0]
+  - source: { kind: ConfigMap, name: e2b-cluster, fieldPath: data.HUGEPAGES_MEMORY }
+    targets:
+      - select: { kind: DaemonSet, name: orchestrator }
+        fieldPaths:
+          - spec.template.spec.containers.[name=orchestrator].resources.requests.hugepages-2Mi
+          - spec.template.spec.containers.[name=orchestrator].resources.limits.hugepages-2Mi
