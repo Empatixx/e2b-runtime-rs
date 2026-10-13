@@ -16,6 +16,7 @@ use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
 use crate::middleware::connect_timeout::{ConnectTimeout, hold_unary_timeout};
 use crate::middleware::cors::cors;
+use crate::middleware::host::require_host;
 use crate::middleware::legacy_sdk::legacy_sdk;
 use crate::middleware::stream_end::end_stream_like_go;
 use crate::middleware::unary_framing::frame_unary;
@@ -61,4 +62,5 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
         .layer(DefaultBodyLimit::disable())
         .layer(from_fn(cors))
+        .layer(from_fn(require_host))
 }

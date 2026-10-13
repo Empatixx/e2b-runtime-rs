@@ -25,7 +25,7 @@ pub async fn spawn_server_with_flags(flags: &[&str]) -> (SocketAddr, Arc<AppStat
     let app = envd::router::build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    tokio::spawn(envd::connection::serve(listener, app));
     (addr, state)
 }
 
@@ -80,7 +80,7 @@ pub async fn spawn_server_with_cpus(cpus: Arc<FakeCpus>) -> SocketAddr {
     let app = envd::router::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    tokio::spawn(envd::connection::serve(listener, app));
     addr
 }
 
@@ -134,6 +134,6 @@ pub async fn serve_state(state: Arc<AppState>) -> SocketAddr {
     let app = envd::router::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    tokio::spawn(envd::connection::serve(listener, app));
     addr
 }

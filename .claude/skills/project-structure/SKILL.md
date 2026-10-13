@@ -165,15 +165,16 @@ website/               Fumadocs (Next.js, static export) docs: content/docs/**/*
 crates/envd/build.rs   codegen from ../../proto/envd
 crates/envd/reference/ upstream envd OpenAPI + pinned commit
 crates/envd/src/
-  main.rs              parse config, init tracing, bind, serve. Nothing else.
+  main.rs              parse config, init tracing, bind, connection::serve. Nothing else.
   lib.rs               pub mod list only
   config.rs            CLI flags (Go `flag` compatible)
-  connection.rs        per-connection HTTP/1 limits (1 MiB head, no header count limit) and GoErrorPages (Go's 431 page)
+  connection.rs        serve: hyper with Go's HTTP/1 limits (1 MiB head, no header count limit); GoErrorPages turns hyper's
+                       431/400 heads and go_status_error responses into Go's text/plain error pages
   app.rs               AppState (shared state, Arc), Defaults
   router.rs            build_router: every REST route + Connect services + layers, in one place
   auth.rs              who is calling: basic_username, request_user, URL signing
   middleware.rs        pub mod list
-  middleware/          one file per tower middleware or Connect interceptor (access_token.rs, basic_auth.rs, connect_timeout.rs:
+  middleware/          one file per tower middleware or Connect interceptor (access_token.rs, basic_auth.rs, host.rs: Go's Host checks, connect_timeout.rs:
                        timeout parsing and the unary deadline checked only at handler entry, stream_end.rs: Connect end-stream
                        frame escaped and gzipped like connect-go, unary_framing.rs)
   controllers.rs       pub mod list
@@ -184,7 +185,7 @@ crates/envd/src/
   envvars.rs           env vars for spawned processes
   util.rs + util/      small shared helpers (error_response.rs; fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
   proto.rs             include_generated!() only
-crates/envd/tests/     HTTP contract tests against a real server (tests/common: spawn_server_with_state)
+crates/envd/tests/     HTTP contract tests against a real server served by connection::serve (tests/common: spawn_server_with_state)
 ```
 
 ## Where does new code go
@@ -216,7 +217,7 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 ## Request flow
 
 ```
-CORS -> require_token (middleware/access_token.rs)
+require_host (middleware/host.rs) -> CORS -> require_token (middleware/access_token.rs)
      -> authenticate_user (middleware/basic_auth.rs, puts User into extensions)
      -> REST route from router.rs, or fallback to Connect:
         legacy_sdk -> advertise_encodings (middleware/accept_encoding.rs) -> frame_unary -> end_stream_like_go

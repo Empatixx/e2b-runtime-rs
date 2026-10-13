@@ -9,9 +9,9 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| An HTTP/1.1 request without `Host` is served; Go answers `400 Bad Request: missing required Host header` | later |
 | A request target longer than 64 KiB gets 414 from hyper; Go accepts any target that fits in the 1 MiB header limit | later |
-| A malformed request gets 400 from hyper with an empty body; Go writes a `text/plain; charset=utf-8` body, `400 Bad Request` or `400 Bad Request: <reason>` | later |
+| A request with a transfer coding other than `chunked` gets Go's `400 Bad Request` page; Go answers `501 Not Implemented` with the body `Unsupported transfer encoding`. hyper does not say which parse error it hit | later |
+| An `HTTP/1.2` request gets Go's `400 Bad Request` page; Go answers `505 HTTP Version Not Supported: unsupported protocol version` | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
 | 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
 

@@ -3,6 +3,7 @@ pub mod access_token;
 pub mod basic_auth;
 pub mod connect_timeout;
 pub mod cors;
+pub mod host;
 pub mod legacy_sdk;
 pub mod stream_end;
 pub mod unary_framing;

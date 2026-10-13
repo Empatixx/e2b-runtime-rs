@@ -1783,6 +1783,7 @@ dependencies = [
  "futures",
  "hex",
  "http",
+ "hyper",
  "hyper-util",
  "mime_guess",
  "moka",
