@@ -44,10 +44,7 @@ impl PeerBlob {
     }
 
     fn stream_error(&self, error: &str) -> String {
-        format!(
-            "failed to stream file {} from peer: {error}",
-            crate::go_strconv::quote(&self.handle.name)
-        )
+        format!("failed to stream file {:?} from peer: {error}", self.handle.name)
     }
 
     pub async fn read(&self) -> Result<Bytes, String> {
@@ -144,18 +141,18 @@ impl PeerBlob {
             .write(true)
             .open(destination)
             .await
-            .map_err(|e| crate::go_os::path_error("open", destination, &e))?;
+            .map_err(|e| crate::fs::path_error("open", destination, &e))?;
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk.map_err(|e| self.stream_error(&e))?;
             file.write_all(&chunk)
                 .await
-                .map_err(|e| crate::go_os::path_error("write", destination, &e))?;
+                .map_err(|e| crate::fs::path_error("write", destination, &e))?;
             written += chunk.len() as u64;
         }
         file.flush()
             .await
             .map(|()| written)
-            .map_err(|e| crate::go_os::path_error("write", destination, &e))
+            .map_err(|e| crate::fs::path_error("write", destination, &e))
     }
 }
 

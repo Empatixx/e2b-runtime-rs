@@ -9,18 +9,8 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| A request target longer than 64 KiB gets 414 from hyper; Go accepts any target that fits in the 1 MiB header limit | later |
-| A request with a transfer coding other than `chunked` gets Go's `400 Bad Request` page; Go answers `501 Not Implemented` with the body `Unsupported transfer encoding`. hyper does not say which parse error it hit | later |
-| An `HTTP/1.2` request gets Go's `400 Bad Request` page; Go answers `505 HTTP Version Not Supported: unsupported protocol version` | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
 | 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
-
-## Orchestrator: volumes over NFS
-
-| Item | Target |
-|---|---|
-| `NFS_PROXY_DIR_VERIFIER_LIMIT` is not read, because nfsserve pages READDIR by the handle of the last entry instead of a cached listing | later |
-| Call metrics, logs and spans use go-nfs's operation names but follow the Rust calls, so the count per NFS request differs (go-nfs adds `FS.Stat` checks and opens files once per read or write) | later |
 
 ## Orchestrator: shared chunk cache
 
@@ -46,13 +36,10 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| Delta counters and histograms keep up to 20 000 series per export interval; upstream lifts the cap entirely, but the Rust SDK preallocates its maps by the limit and rejects an unbounded one | later |
 | The template cache has no residency gauges (`orchestrator.templates.cache.entries`, pinned refs, oldest pin age, mapping bytes, layer entries by kind and generation band, unlanded layers) and no `evictions` counter by reason | later |
-| The gRPC server pings every 15 s like upstream, but hyper has no keepalive enforcement policy, so a client that pings more often than every 5 s is not sent `too_many_pings` | later |
 
-## Orchestrator: peer chunk sharing
+## Orchestrator: reading builds
 
 | Item | Target |
 |---|---|
-| A peer transition re-reads the diff from storage with the header it already holds; the chunker reads only uncompressed objects, so a build a Go peer uploads compressed is unreadable after the transition (upstream reloads the header and its frame table) | later |
-| `snapshot-cache-drop-provisional-header` is not read and `dead_structure_outcome` and `dead_structure_bytes` are recorded only for `dedup_index`, not for `template_provisional_header` and `upload_provisional_header`. The template keeps its build, provisional memfile header included, until the entry goes, because every resume reads it from there | later |
+| The chunker reads only uncompressed objects, so a build that a Go node uploaded compressed (`.zstd` or `.lz4` with a frame table in its header) cannot be read, neither from storage nor after a peer transition | API |

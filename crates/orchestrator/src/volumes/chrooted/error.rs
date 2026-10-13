@@ -3,7 +3,6 @@ use std::fmt;
 use rustix::io::Errno;
 
 use super::names::kernel_path;
-use crate::go_os::reason;
 
 #[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
 pub struct PathError {
@@ -35,12 +34,36 @@ impl fmt::Display for PathError {
             "{} {}: {}",
             self.operation,
             self.path,
-            reason(&std::io::Error::from_raw_os_error(self.errno.raw_os_error()))
+            errno_text(self.errno)
         )
     }
 }
 
 impl std::error::Error for PathError {}
+
+pub fn errno_text(errno: Errno) -> String {
+    os_error_text(&std::io::Error::from_raw_os_error(errno.raw_os_error()))
+}
+
+pub fn os_error_text(err: &std::io::Error) -> String {
+    err.raw_os_error()
+        .map(|code| client_errno_text(code).unwrap_or_else(|| nix::errno::Errno::from_raw(code).desc()))
+        .map(|desc| {
+            let first = desc.chars().take(1).flat_map(char::to_lowercase);
+            first.chain(desc.chars().skip(1)).collect()
+        })
+        .unwrap_or_else(|| err.to_string())
+}
+
+fn client_errno_text(code: i32) -> Option<&'static str> {
+    match code {
+        nix::libc::EOPNOTSUPP => Some("operation not supported"),
+        nix::libc::EXDEV => Some("invalid cross-device link"),
+        nix::libc::EIO => Some("input/output error"),
+        nix::libc::ESTALE => Some("stale NFS file handle"),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
 pub struct LinkError {
@@ -61,7 +84,7 @@ impl fmt::Display for LinkError {
             self.operation,
             self.old,
             self.new,
-            reason(&std::io::Error::from_raw_os_error(self.errno.raw_os_error()))
+            errno_text(self.errno)
         )
     }
 }

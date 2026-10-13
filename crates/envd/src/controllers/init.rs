@@ -20,7 +20,6 @@ use self::request::InitRequest;
 use crate::app::AppState;
 use crate::host;
 use crate::host::mmds_route::pin_mmds_route;
-use crate::util::go_json;
 use crate::util::rate_limit::RateLimit;
 
 const VERSION_HEADER: &str = "X-Envd-Version";
@@ -230,7 +229,6 @@ fn cpu_report(state: &AppState, rejected: Option<String>) -> Option<String> {
     serde_json::to_string(&report)
         .inspect_err(|e| tracing::warn!(error = %e, "could not encode the cpu state report"))
         .ok()
-        .map(|json| go_json::escape_html(&json))
 }
 
 async fn mmds_hash(state: &AppState) -> Option<String> {

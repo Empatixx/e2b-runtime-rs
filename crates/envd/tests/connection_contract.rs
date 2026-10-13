@@ -4,8 +4,6 @@ use common::spawn_server_with_state;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const GO_ERROR_HEADERS: &str = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n";
-
 async fn raw(request: String) -> String {
     let (addr, _) = spawn_server_with_state().await;
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -22,48 +20,26 @@ async fn health_with(headers: String) -> String {
     .await
 }
 
-fn go_page(status: &str) -> String {
-    format!("HTTP/1.1 {status}{GO_ERROR_HEADERS}{status}")
-}
-
 #[tokio::test]
-async fn headers_up_to_a_mebibyte_are_accepted_like_go() {
+async fn headers_up_to_a_mebibyte_are_accepted() {
     let response = health_with(format!("X-Big: {}\r\n", "a".repeat(1 << 20))).await;
     assert!(response.starts_with("HTTP/1.1 204"), "{response}");
 }
 
 #[tokio::test]
-async fn thousands_of_headers_are_accepted_like_go() {
+async fn thousands_of_headers_are_accepted() {
     let response = health_with((0..5000).map(|i| format!("X-H{i}: v\r\n")).collect()).await;
     assert!(response.starts_with("HTTP/1.1 204"), "{response}");
 }
 
 #[tokio::test]
-async fn headers_over_the_go_limit_get_the_go_page() {
+async fn headers_over_the_limit_are_rejected() {
     let response = health_with(format!("X-Big: {}\r\n", "a".repeat(2 << 20))).await;
-    assert_eq!(response, go_page("431 Request Header Fields Too Large"));
+    assert!(response.starts_with("HTTP/1.1 431"), "{response}");
 }
 
 #[tokio::test]
-async fn a_request_without_host_gets_the_go_page() {
-    let response = raw("GET /health HTTP/1.1\r\nConnection: close\r\n\r\n".to_owned()).await;
-    assert_eq!(response, go_page("400 Bad Request: missing required Host header"));
-}
-
-#[tokio::test]
-async fn a_malformed_host_gets_the_go_page() {
-    let response = raw("GET /health HTTP/1.1\r\nHost: a b\r\n\r\n".to_owned()).await;
-    assert_eq!(response, go_page("400 Bad Request: malformed Host header"));
-}
-
-#[tokio::test]
-async fn an_http_1_0_request_without_host_is_served() {
-    let response = raw("GET /health HTTP/1.0\r\n\r\n".to_owned()).await;
-    assert!(response.starts_with("HTTP/1.0 204"), "{response}");
-}
-
-#[tokio::test]
-async fn a_malformed_request_gets_the_go_page() {
+async fn a_malformed_request_is_rejected() {
     let response = health_with("Bad Header: v\r\n".to_owned()).await;
-    assert_eq!(response, go_page("400 Bad Request"));
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
 }

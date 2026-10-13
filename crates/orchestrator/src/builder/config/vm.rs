@@ -13,7 +13,6 @@ use crate::firecracker::kernel_args::{parse_cmdline_args, render, validate_cmdli
 use crate::firecracker::version::{
     FirecrackerVersion, parse_firecracker_version, supports_free_page_hinting, supports_free_page_reporting,
 };
-use crate::go_strconv::quote;
 use crate::telemetry::build::{record_build_cmdline_args, record_build_cpu_template};
 use crate::template::metadata::{CpuTemplate, applied_digest};
 
@@ -46,8 +45,7 @@ impl BuildVm {
         let cmdline_args = applied_cmdline_args(&flags.get(&build_kernel_cmdline_args(), &contexts));
         let version = parse_firecracker_version(&firecracker_version).map_err(|e| {
             Status::unknown(format!(
-                "invalid resolved firecracker version {}: {e}",
-                quote(&firecracker_version)
+                "invalid resolved firecracker version {firecracker_version:?}: {e}"
             ))
         })?;
         let cpu_template = applied_cpu_template(

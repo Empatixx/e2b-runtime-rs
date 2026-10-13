@@ -3,9 +3,8 @@ use std::sync::OnceLock;
 use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
 use rustix::io::Errno;
 
-use super::error::PathError;
+use super::error::{PathError, errno_text};
 use super::syscalls::retry_interrupted;
-use crate::go_os::reason;
 
 static SUPPORT: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -37,6 +36,6 @@ fn probe() -> Result<(), String> {
 fn unsupported(errno: Errno) -> String {
     format!(
         "kernel does not support openat2 with RESOLVE_IN_ROOT: {}",
-        reason(&std::io::Error::from_raw_os_error(errno.raw_os_error()))
+        errno_text(errno)
     )
 }

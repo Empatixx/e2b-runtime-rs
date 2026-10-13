@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use crate::go_exec::GoCommand;
-use crate::go_strconv::quote;
+use crate::command::Command;
 
 const PROMOTED: &str = "promoted";
 
 pub async fn envd_version(envd: &Path) -> Result<String, String> {
-    GoCommand::new(envd)
+    Command::new(envd)
         .args(["-version"])
         .run()
         .await
@@ -19,7 +18,7 @@ pub async fn resolve_build_binary(target: &str, host_envd: &Path) -> Result<Path
         return Ok(host_envd.to_path_buf());
     }
     if !is_version_like(target) {
-        return Err(format!("invalid build-envd-version target {}", quote(target)));
+        return Err(format!("invalid build-envd-version target {target:?}"));
     }
     let dir = host_envd.parent().unwrap_or(Path::new("."));
     let candidates = [dir.join(format!("envd.{target}")), dir.join(target).join("envd")];
@@ -36,18 +35,14 @@ pub async fn resolve_build_binary(target: &str, host_envd: &Path) -> Result<Path
     );
     let promoted = envd_version(host_envd).await.map_err(|e| {
         format!(
-            "build-envd-version target {} is not staged under {} (tried {tried}), and the promoted binary's version is unreadable: {e}",
-            quote(target),
-            quote(&dir.display().to_string()),
-        )
+            "build-envd-version target {target:?} is not staged under {:?} (tried {tried}), and the promoted binary's version is unreadable: {e}", dir.display())
     })?;
     match promoted.trim_start_matches('v') == target.trim_start_matches('v') {
         true => Ok(host_envd.to_path_buf()),
         false => Err(format!(
-            "build-envd-version target {} is not staged under {} (tried {tried}), and the promoted binary is v{}, not the target",
-            quote(target),
-            quote(&dir.display().to_string()),
-            promoted.trim_start_matches('v'),
+            "build-envd-version target {target:?} is not staged under {:?} (tried {tried}), and the promoted binary is v{}, not the target",
+            dir.display(),
+            promoted.trim_start_matches('v')
         )),
     }
 }

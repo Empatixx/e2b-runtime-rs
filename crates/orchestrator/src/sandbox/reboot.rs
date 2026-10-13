@@ -16,12 +16,8 @@ pub fn check_reboot_cpu_template(template: Option<&CpuTemplate>, firecracker_ver
     let Some(template) = template.filter(|template| !template.is_empty()) else {
         return Ok(());
     };
-    let version = parse_firecracker_version(firecracker_version).map_err(|e| {
-        format!(
-            "parse firecracker version {}: {e}",
-            crate::go_strconv::quote(firecracker_version)
-        )
-    })?;
+    let version = parse_firecracker_version(firecracker_version)
+        .map_err(|e| format!("parse firecracker version {firecracker_version:?}: {e}"))?;
     template
         .validate(&version)
         .map_err(|e| format!("firecracker {firecracker_version}: {e}"))
@@ -38,16 +34,11 @@ pub fn reboot_cpu_template(meta: &TemplateMetadata, override_value: &Value) -> R
         Value::Null => return no_override(build()),
         Value::Object(fields) => fields,
         _ => {
-            return rejected(
-                "invalid CPU template override: json: cannot unmarshal into Go value of type struct".to_owned(),
-            );
+            return rejected("invalid CPU template override: not a JSON object".to_owned());
         }
     };
     if let Some(unknown) = fields.keys().find(|key| key.as_str() != OVERRIDE_FIELD) {
-        return rejected(format!(
-            "invalid CPU template override: json: unknown field {}",
-            crate::go_strconv::quote(unknown)
-        ));
+        return rejected(format!("invalid CPU template override: unknown field {unknown:?}"));
     }
     match fields.get(OVERRIDE_FIELD).filter(|template| !template.is_null()) {
         None => no_override(build()),

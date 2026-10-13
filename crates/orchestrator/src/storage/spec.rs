@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::go_strconv::{parse_bool, quote};
+use crate::go_strconv::parse_bool;
 use crate::go_url::GoUrl;
 use crate::go_url::query::Query;
 
@@ -87,9 +87,8 @@ impl StorageSpec {
             "azblob" => parse_bucket_url(&url, Provider::Azure),
             "file" => parse_file_url(&url),
             scheme => Err(format!(
-                "storage URL {}: unsupported scheme {} (want gs, s3, azblob, or file)",
-                redacted(&url),
-                quote(scheme)
+                "storage URL {}: unsupported scheme {scheme:?} (want gs, s3, azblob, or file)",
+                redacted(&url)
             )),
         }
     }
@@ -137,8 +136,9 @@ fn redacted(url: &GoUrl) -> String {
         }
         .encode(),
     };
-    quote(
-        &GoUrl {
+    format!(
+        "{:?}",
+        GoUrl {
             user: None,
             raw_query,
             ..url.clone()
@@ -194,13 +194,8 @@ fn apply_parameter(url: &GoUrl, spec: StorageSpec, key: &str, value: &str) -> Re
             ..spec
         }),
         "s3ForcePathStyle" => Ok(StorageSpec {
-            use_path_style: parse_bool(value).map_err(|e| {
-                format!(
-                    "storage URL {}: invalid s3ForcePathStyle {}: {e}",
-                    redacted(url),
-                    quote(value)
-                )
-            })?,
+            use_path_style: parse_bool(value)
+                .map_err(|e| format!("storage URL {}: invalid s3ForcePathStyle {value:?}: {e}", redacted(url)))?,
             ..spec
         }),
         "region" => Ok(StorageSpec {
@@ -213,9 +208,8 @@ fn apply_parameter(url: &GoUrl, spec: StorageSpec, key: &str, value: &str) -> Re
                 ..spec
             }),
             _ => Err(format!(
-                "storage URL {}: invalid ssetype {} (want {SSE_AES256} or {SSE_AWS_KMS})",
-                redacted(url),
-                quote(value)
+                "storage URL {}: invalid ssetype {value:?} (want {SSE_AES256} or {SSE_AWS_KMS})",
+                redacted(url)
             )),
         },
         "kmskeyid" => Ok(StorageSpec {
@@ -223,9 +217,8 @@ fn apply_parameter(url: &GoUrl, spec: StorageSpec, key: &str, value: &str) -> Re
             ..spec
         }),
         key => Err(format!(
-            "storage URL {}: unsupported query parameter {} (want endpoint, s3ForcePathStyle, region, ssetype, or kmskeyid)",
-            redacted(url),
-            quote(key)
+            "storage URL {}: unsupported query parameter {key:?} (want endpoint, s3ForcePathStyle, region, ssetype, or kmskeyid)",
+            redacted(url)
         )),
     }
 }
@@ -402,7 +395,7 @@ mod tests {
         );
         assert_eq!(
             error("s3://b?s3ForcePathStyle=yes"),
-            "storage URL \"s3://b?s3ForcePathStyle=yes\": invalid s3ForcePathStyle \"yes\": strconv.ParseBool: parsing \"yes\": invalid syntax"
+            "storage URL \"s3://b?s3ForcePathStyle=yes\": invalid s3ForcePathStyle \"yes\": invalid boolean \"yes\""
         );
         assert_eq!(
             error("s3://b?prefix=x"),

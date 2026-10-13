@@ -16,8 +16,8 @@ use crate::builder::phase::{BuildError, Phase};
 use crate::builder::provision::wait_for_provisioning;
 use crate::builder::rootfs::{MB, RootfsRequest, create_ext4_filesystem};
 use crate::builder::template_files::{BUSYBOX_INIT_PATH, InjectedSources, PROVISION_RESULT_PATH, provision_script};
+use crate::command::Command;
 use crate::envd::version::is_at_least;
-use crate::go_exec::GoCommand;
 use crate::proto::LogLevel;
 use crate::sandbox::config::sandbox_builder::{SetBalloon, SetIoEngine, SetMemoryMib, SetVcpus, SetWithoutMmds};
 use crate::sandbox::config::{Rootfs, SandboxBuilder};
@@ -308,7 +308,7 @@ impl BaseBuild<'_> {
 }
 
 async fn tune2fs_listing(file: &Path) -> (String, Option<String>) {
-    match GoCommand::new("tune2fs")
+    match Command::new("tune2fs")
         .args(["-l".as_ref(), file.as_os_str()])
         .run()
         .await

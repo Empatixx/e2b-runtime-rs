@@ -94,10 +94,7 @@ pub fn parse_cmdline_args(fragment: &str) -> Result<BTreeMap<String, String>, St
         .map(|field| {
             let (name, value) = field.split_once('=').unwrap_or((field, ""));
             match name.is_empty() {
-                true => Err(format!(
-                    "guest kernel cmdline parameter {} has an empty name",
-                    crate::go_strconv::quote(field)
-                )),
+                true => Err(format!("guest kernel cmdline parameter {field:?} has an empty name")),
                 false => Ok((name.to_owned(), value.to_owned())),
             }
         })
@@ -109,8 +106,7 @@ pub fn validate_cmdline_args(args: &BTreeMap<String, String>) -> Result<(), Stri
         .find(|name| RESERVED.contains(&name.as_str()))
         .map_or(Ok(()), |name| {
             Err(format!(
-                "guest kernel cmdline parameter {} is reserved by the orchestrator",
-                crate::go_strconv::quote(name)
+                "guest kernel cmdline parameter {name:?} is reserved by the orchestrator"
             ))
         })
 }

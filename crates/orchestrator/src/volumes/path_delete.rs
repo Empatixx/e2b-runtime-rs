@@ -3,7 +3,6 @@ use tonic::Status;
 use super::api_error::ApiError;
 use super::failure::internal;
 use super::service::VolumeServer;
-use crate::go_strconv::quote;
 use crate::proto::{DeletePathRequest, DeletePathResponse};
 
 impl VolumeServer {
@@ -14,9 +13,7 @@ impl VolumeServer {
             return Err(ApiError::cannot_delete_root("cannot delete root").into_status());
         }
         fs.lstat(path).map_err(|e| match e.is_not_found() {
-            true => {
-                ApiError::path_not_found(format!("failed to delete: {} not found.", quote(&request.path))).into_status()
-            }
+            true => ApiError::path_not_found(format!("failed to delete: {:?} not found.", request.path)).into_status(),
             false => internal(format!("failed to stat path: {e}")),
         })?;
         fs.remove_all(path)

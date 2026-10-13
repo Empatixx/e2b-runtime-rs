@@ -9,7 +9,7 @@ pub fn default_client() -> Result<Client, String> {
 }
 
 pub fn request_error(method: &str, url: &str, error: &reqwest::Error) -> String {
-    format!("{method} {}: {}", crate::go_strconv::quote(url), innermost(error))
+    format!("{method} {url:?}: {}", innermost(error))
 }
 
 fn innermost(error: &reqwest::Error) -> String {

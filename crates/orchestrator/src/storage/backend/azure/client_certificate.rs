@@ -87,15 +87,12 @@ impl ClientCertificate {
         let data = std::fs::read(path).map_err(|e| {
             format!(
                 "failed to read certificate file \"{path}\": {}",
-                crate::go_os::path_error("open", Path::new(path), &e)
+                crate::fs::path_error("open", Path::new(path), &e)
             )
         })?;
         Self::parse(&data, password).map_err(|e| {
             format!(
-                "failed to parse {} due to error {}. This may be due to a limitation of this module's certificate loader. Consider calling NewClientCertificateCredential instead",
-                crate::go_strconv::quote(path),
-                crate::go_strconv::quote(&e)
-            )
+                "failed to parse {path:?} due to error {e:?}. This may be due to a limitation of this module's certificate loader. Consider calling NewClientCertificateCredential instead")
         })
     }
 
@@ -333,7 +330,7 @@ mod tests {
             "certData contains multiple private keys"
         );
         assert!(ClientCertificate::load("/nonexistent/cert.pem", "").err().unwrap().starts_with(
-            "failed to read certificate file \"/nonexistent/cert.pem\": open /nonexistent/cert.pem: no such file or directory"
+            "failed to read certificate file \"/nonexistent/cert.pem\": open /nonexistent/cert.pem: No such file or directory (os error 2)"
         ));
     }
 

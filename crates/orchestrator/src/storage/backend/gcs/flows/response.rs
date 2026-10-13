@@ -4,7 +4,7 @@ use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Deserializer};
 
 use super::super::credsfile;
-use super::super::go_json;
+use super::super::json;
 use crate::go_url::query::Query;
 
 fn seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
@@ -53,7 +53,7 @@ impl Dialect {
         }
     }
 
-    fn token_target(self) -> go_json::Target {
+    fn token_target(self) -> json::Target {
         match self {
             Self::Auth => credsfile::AUTH_TOKEN_3LO,
             Self::Oauth2 => credsfile::OAUTH2_TOKEN,
@@ -85,13 +85,12 @@ impl OAuthError {
     fn text(&self) -> String {
         match self.code.is_empty() {
             false => {
-                let quote = crate::go_strconv::quote;
-                let mut text = format!("{}: {}", self.dialect.prefix(), quote(&self.code));
+                let mut text = format!("{}: {:?}", self.dialect.prefix(), self.code);
                 if !self.description.is_empty() {
-                    text.push_str(&format!(" {}", quote(&self.description)));
+                    text.push_str(&format!(" {:?}", self.description));
                 }
                 if !self.uri.is_empty() {
-                    text.push_str(&format!(" {}", quote(&self.uri)));
+                    text.push_str(&format!(" {:?}", self.uri));
                 }
                 text
             }
@@ -116,7 +115,7 @@ pub async fn read_two_legged(response: Response) -> Result<OAuthToken, String> {
     if !status.is_success() {
         return Err(Dialect::Auth.cannot_fetch(status, &body));
     }
-    let parsed: TokenJson = go_json::unmarshal(body.as_bytes(), credsfile::AUTH_TOKEN_2LO)
+    let parsed: TokenJson = json::unmarshal(body.as_bytes(), credsfile::AUTH_TOKEN_2LO)
         .map_err(|e| format!("auth: cannot fetch token: {e}"))?;
     Ok(OAuthToken {
         access_token: parsed.access_token,
@@ -163,7 +162,7 @@ pub async fn read_three_legged(response: Response, dialect: Dialect) -> Result<O
                 refresh_token: field("refresh_token"),
             }
         }
-        _ => match go_json::unmarshal::<TokenJson>(body.as_bytes(), dialect.token_target()) {
+        _ => match json::unmarshal::<TokenJson>(body.as_bytes(), dialect.token_target()) {
             Ok(parsed) => {
                 error.code = parsed.error;
                 error.description = parsed.error_description;

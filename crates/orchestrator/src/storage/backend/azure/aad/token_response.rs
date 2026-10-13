@@ -113,10 +113,7 @@ fn duration_from_now(value: &Value, now: SystemTime) -> Result<Option<SystemTime
 }
 
 fn atoi_error(raw: &Value, text: &str) -> String {
-    format!(
-        "unix time({raw}) could not be converted from string to int: strconv.Atoi: parsing {}: invalid syntax",
-        crate::go_strconv::quote(text)
-    )
+    format!("unix time {raw} is not an integer: {text:?}")
 }
 
 fn expires_on(value: &Value) -> Result<Option<SystemTime>, String> {

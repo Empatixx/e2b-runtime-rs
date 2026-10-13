@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use super::super::flows::{FlowToken, TokenFlow, default_client};
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 
 const DEFAULT_LIFETIME: &str = "3600s";
 
@@ -87,15 +87,15 @@ impl TokenFlow for ImpersonatedFlow {
     async fn token(&self) -> Result<FlowToken, String> {
         let source = self.source.token().await.map_err(|e| {
             format!(
-                "oauth2/google: unable to generate access token: Post {}: {e}",
-                crate::go_strconv::quote(&self.url)
+                "oauth2/google: unable to generate access token: Post {:?}: {e}",
+                self.url
             )
         })?;
         let (status, text) = self.send(&source).await?;
         if !(200..=299).contains(&status) {
             return Err(format!("oauth2/google: status code {status}: {text}"));
         }
-        let parsed: GeneratedToken = go_json::unmarshal(text.as_bytes(), credsfile::OAUTH2_IMPERSONATION_RESPONSE)
+        let parsed: GeneratedToken = json::unmarshal(text.as_bytes(), credsfile::OAUTH2_IMPERSONATION_RESPONSE)
             .map_err(|e| format!("oauth2/google: unable to parse response: {e}"))?;
         let expiry = DateTime::parse_from_rfc3339(&parsed.expire_time)
             .map_err(|e| format!("oauth2/google: unable to parse expiry: {e}"))?;

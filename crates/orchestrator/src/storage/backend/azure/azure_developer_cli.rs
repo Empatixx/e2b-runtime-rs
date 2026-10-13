@@ -49,12 +49,7 @@ fn bearer(output: &[u8]) -> Result<BearerToken, String> {
     let token: DeveloperCliToken = serde_json::from_slice(output).map_err(|e| e.to_string())?;
     let expires_at = NaiveDateTime::parse_from_str(&token.expires_on, EXPIRES_ON_FORMAT)
         .map(|naive| std::time::SystemTime::from(naive.and_utc()))
-        .map_err(|_| {
-            let quoted = crate::go_strconv::quote(&token.expires_on);
-            format!(
-                "error parsing token expiration time {quoted}: parsing time {quoted} as \"2006-01-02T15:04:05Z\": cannot parse {quoted} as \"2006\""
-            )
-        })?;
+        .map_err(|e| format!("error parsing token expiration time {:?}: {e}", token.expires_on))?;
     Ok(BearerToken::without_refresh(token.token, expires_at))
 }
 
@@ -78,8 +73,8 @@ impl TokenSource for AzureDeveloperCliCredential {
         }
         if !valid_scope(request.scope) {
             return Err(SourceError::Failed(format!(
-                "{CREDENTIAL}.GetToken(): invalid scope {}",
-                crate::go_strconv::quote(request.scope)
+                "{CREDENTIAL}.GetToken(): invalid scope {:?}",
+                request.scope
             )));
         }
         let tenant = self
@@ -138,7 +133,7 @@ mod tests {
         let error = credential.token("s").await.unwrap_err();
 
         assert!(
-            matches!(&error, SourceError::Unavailable(text) if text.starts_with("error parsing token expiration time \"soon\": parsing time"))
+            matches!(&error, SourceError::Unavailable(text) if text.starts_with("error parsing token expiration time \"soon\": "))
         );
     }
 

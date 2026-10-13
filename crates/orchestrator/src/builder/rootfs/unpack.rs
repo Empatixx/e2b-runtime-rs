@@ -26,13 +26,10 @@ impl UnpackError {
 }
 
 pub fn temp_dir(root: &Path, prefix: &str, context: &str) -> Result<TempDir, UnpackError> {
-    tempfile::Builder::new().prefix(prefix).tempdir_in(root).map_err(|e| {
-        UnpackError::Failed(format!(
-            "{context}: mkdirtemp {}/{prefix}*: {}",
-            root.display(),
-            crate::go_os::reason(&e)
-        ))
-    })
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(root)
+        .map_err(|e| UnpackError::Failed(format!("{context}: mkdirtemp {}/{prefix}*: {}", root.display(), e)))
 }
 
 pub async fn unpack_rootfs(

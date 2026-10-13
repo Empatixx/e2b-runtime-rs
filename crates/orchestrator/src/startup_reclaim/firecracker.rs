@@ -5,7 +5,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, getpgid};
 
-use crate::go_os::{path_error, reason};
+use crate::fs::path_error;
 
 const FIRECRACKER_BINARY: &str = "firecracker";
 
@@ -28,7 +28,7 @@ pub fn reclaim(proc_dir: &Path) -> (u64, Vec<String>) {
 
 fn kill_group(pid: i32) -> Result<(), String> {
     let group = getpgid(Some(Pid::from_raw(pid)))
-        .map_err(|e| format!("failed to get firecracker pgid for pid {pid}: {}", go_errno(e)))?;
+        .map_err(|e| format!("failed to get firecracker pgid for pid {pid}: {}", errno_text(e)))?;
     match killpg(group, Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => {
             tracing::warn!(pid, pgid = group.as_raw(), "killed orphaned firecracker process group");
@@ -37,13 +37,13 @@ fn kill_group(pid: i32) -> Result<(), String> {
         Err(e) => Err(format!(
             "failed to kill firecracker process group {} for pid {pid}: {}",
             group.as_raw(),
-            go_errno(e)
+            errno_text(e)
         )),
     }
 }
 
-fn go_errno(errno: Errno) -> String {
-    reason(&io::Error::from(errno))
+fn errno_text(errno: Errno) -> String {
+    io::Error::from(errno).to_string()
 }
 
 pub fn discover(proc_dir: &Path) -> Result<Vec<i32>, String> {
@@ -106,7 +106,10 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(
             failures,
-            vec!["failed to read proc directory: open /definitely/not/proc: no such file or directory".to_owned()]
+            vec![
+                "failed to read proc directory: open /definitely/not/proc: No such file or directory (os error 2)"
+                    .to_owned()
+            ]
         );
     }
 }

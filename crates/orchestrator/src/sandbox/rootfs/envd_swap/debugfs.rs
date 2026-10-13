@@ -10,8 +10,7 @@ use tokio::time::Instant;
 use super::super::jail::jail_properties;
 use super::super::{is_nbd_device, read_capped};
 use super::{Debugfs, ENVD_SWAP_TIMEOUT};
-use crate::go_exec::status_text;
-use crate::go_os::path_error;
+use crate::fs::path_error;
 
 const DEBUGFS: &str = "/usr/sbin/debugfs";
 const MAX_OUTPUT: u64 = 64 << 10;
@@ -59,7 +58,7 @@ impl DebugfsRunError {
             Ok(status) if status.success() => None,
             Ok(status) => match status.code() {
                 Some(code) => failed(code, None),
-                None => failed(-1, Some(status_text(status))),
+                None => failed(-1, Some(status.to_string())),
             },
             Err(e) => failed(-1, Some(e.to_string())),
         }
@@ -74,8 +73,8 @@ impl Debugfs for JailedDebugfs {
     async fn run(&self, phase: &str, script: &str, writable: bool, deadline: Instant) -> Result<Vec<u8>, String> {
         if !is_nbd_device(&self.device) {
             return Err(format!(
-                "refusing to run debugfs on unexpected device path {}",
-                crate::go_strconv::quote(&self.device)
+                "refusing to run debugfs on unexpected device path {:?}",
+                self.device
             ));
         }
         let script_path = self.write_script(phase, script)?;
@@ -210,7 +209,7 @@ mod tests {
         let killed = DebugfsRunError::from_status("backup", Ok(ExitStatus::from_raw(9)), 0).unwrap();
         assert_eq!(
             (killed.exit_code, killed.cause.as_deref()),
-            (-1, Some("signal: killed"))
+            (-1, Some("signal: 9 (SIGKILL)"))
         );
 
         assert!(DebugfsRunError::from_status("backup", Ok(ExitStatus::from_raw(0)), 0).is_none());

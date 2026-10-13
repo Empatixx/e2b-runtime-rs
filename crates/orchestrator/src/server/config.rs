@@ -142,7 +142,7 @@ impl NodeConfig {
             runtime_flags: RuntimeFlags::new(FeatureFlags::offline(), services.clone()),
             local: var("ENVIRONMENT").is_some_and(|environment| environment == "local"),
             development: var("ENVIRONMENT").is_some_and(|environment| environment == "local" || environment == "dev"),
-            force_stop: env_bool(var("FORCE_STOP").as_deref(), "ForceStop")?,
+            force_stop: env_bool(var("FORCE_STOP").as_deref(), "FORCE_STOP")?,
             services,
             orchestrator_ip: var("SANDBOX_ORCHESTRATOR_IP").unwrap_or_else(|| DEFAULT_ORCHESTRATOR_IP.to_owned()),
             hyperloop_port: number(vars, "SANDBOX_HYPERLOOP_PROXY_PORT")?.unwrap_or(DEFAULT_HYPERLOOP_PORT),
@@ -154,7 +154,7 @@ impl NodeConfig {
             clickhouse_additional: clickhouse.1,
             volume_mounts: VolumeMounts::from_vars(vars)?,
             nfs_proxy: NfsProxySettings::from_vars(vars)?,
-            disable_startup_reclaim: env_bool(var("DISABLE_STARTUP_RECLAIM").as_deref(), "DisableStartupReclaim")?,
+            disable_startup_reclaim: env_bool(var("DISABLE_STARTUP_RECLAIM").as_deref(), "DISABLE_STARTUP_RECLAIM")?,
             rootfs_exposure: Transport::parse(var("ROOTFS_EXPOSURE").as_deref())?,
         })
     }

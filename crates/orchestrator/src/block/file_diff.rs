@@ -34,7 +34,7 @@ pub fn export_file_diff(source: &Path, out: &mut impl Write, block_size: u64) ->
 fn read_block(file: &mut File, block: &mut [u8]) -> io::Result<()> {
     file.read_exact(block).map_err(|e| match e.kind() {
         io::ErrorKind::UnexpectedEof => io::Error::other("error reading from file: EOF"),
-        _ => io::Error::other(format!("error reading from file: {}", crate::go_os::reason(&e))),
+        _ => io::Error::other(format!("error reading from file: {}", e)),
     })
 }
 

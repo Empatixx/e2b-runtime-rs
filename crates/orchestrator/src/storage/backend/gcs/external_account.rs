@@ -1,7 +1,6 @@
 mod aws;
 mod config;
 mod executable;
-mod exit_status;
 mod sts;
 mod subject;
 mod x509;

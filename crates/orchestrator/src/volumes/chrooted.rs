@@ -19,10 +19,9 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, CWD, Gid, Mode, OFlags, Uid, chmodat, chownat, fstat, mkdirat, statat};
 use rustix::io::Errno;
 
-use crate::go_os::path_error;
 use crate::go_path;
 use directory::entry_names;
-use error::{PathError, failed};
+use error::{PathError, errno_text, failed};
 use file::ConfinedFile;
 use info::FileInfo;
 use names::{check_component, display_path, kernel_path, split_parent};
@@ -53,7 +52,7 @@ impl Chrooted {
             root,
             source: source.to_path_buf(),
         })
-        .map_err(|errno| path_error("open", source, &std::io::Error::from_raw_os_error(errno.raw_os_error())))
+        .map_err(|errno| format!("open {}: {}", source.display(), errno_text(errno)))
     }
 
     pub fn source(&self) -> &Path {

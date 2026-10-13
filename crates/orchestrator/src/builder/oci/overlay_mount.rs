@@ -13,17 +13,15 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
 const NO_DIRFD: libc::c_int = -1;
 
 pub fn mount_overlay(layers: &[impl AsRef<Path>], mount_point: &Path) -> Result<(), String> {
-    let context = FsContext::open("overlay").map_err(|e| format!("fsopen failed: {}", reason(&e)))?;
+    let context = FsContext::open("overlay").map_err(|e| format!("fsopen failed: {}", e))?;
     layers.iter().try_for_each(|layer| {
         context
             .set_string("lowerdir+", layer.as_ref())
-            .map_err(|e| format!("fsconfig lowerdir failed: {}", reason(&e)))
+            .map_err(|e| format!("fsconfig lowerdir failed: {}", e))
     })?;
-    context
-        .create()
-        .map_err(|e| format!("fsconfig create failed: {}", reason(&e)))?;
-    let mount = context.mount().map_err(|e| format!("fsmount failed: {}", reason(&e)))?;
-    move_mount(&mount, mount_point).map_err(|e| format!("move mount failed: {}", reason(&e)))
+    context.create().map_err(|e| format!("fsconfig create failed: {}", e))?;
+    let mount = context.mount().map_err(|e| format!("fsmount failed: {}", e))?;
+    move_mount(&mount, mount_point).map_err(|e| format!("move mount failed: {}", e))
 }
 
 struct FsContext {
@@ -104,10 +102,6 @@ fn check(result: libc::c_long) -> io::Result<libc::c_long> {
         -1 => Err(io::Error::last_os_error()),
         value => Ok(value),
     }
-}
-
-fn reason(error: &io::Error) -> String {
-    crate::go_os::reason(error)
 }
 
 #[cfg(test)]

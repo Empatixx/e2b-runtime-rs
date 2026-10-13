@@ -212,10 +212,9 @@ impl ManagedIdentitySource {
                 self.rendered("the requested identity isn't assigned to this resource", failure)
             }
             (true, 400) => SourceError::Unavailable(format!("{CREDENTIAL}: {}", system_assigned_failure(body))),
-            (true, 403) if body.contains("unreachable") => SourceError::Unavailable(format!(
-                "{CREDENTIAL}: unexpected response {}",
-                crate::go_strconv::quote(body)
-            )),
+            (true, 403) if body.contains("unreachable") => {
+                SourceError::Unavailable(format!("{CREDENTIAL}: unexpected response {body:?}"))
+            }
             _ => self.rendered("", failure),
         }
     }
@@ -241,7 +240,7 @@ fn transport_text(method: &str, url: &str, error: &reqwest::Error) -> String {
         "POST" => "Post",
         other => other,
     };
-    format!("{operation} {}: {error}", crate::go_strconv::quote(url))
+    format!("{operation} {url:?}: {error}")
 }
 
 fn system_assigned_failure(body: &str) -> String {

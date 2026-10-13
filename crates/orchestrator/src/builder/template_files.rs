@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::builder::hash::{ENVD_MEMORY_LOW_MIB, ENVD_MEMORY_MIN_MIB};
-use crate::go_os::path_error;
+use crate::fs::path_error;
 
 use render::{Value, Values, render};
 

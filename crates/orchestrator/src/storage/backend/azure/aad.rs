@@ -157,7 +157,7 @@ fn resolve_host(configured: Option<String>) -> Result<String, String> {
     let host = configured
         .filter(|host| !host.is_empty())
         .unwrap_or_else(|| PUBLIC_CLOUD.to_owned());
-    let url = GoUrl::parse(&host).map_err(|e| format!("parse {}: {e}", crate::go_strconv::quote(&host)))?;
+    let url = GoUrl::parse(&host).map_err(|e| format!("parse {host:?}: {e}"))?;
     match url.scheme == "https" {
         true => Ok(host),
         false => Err("cannot use an authority host without https".to_owned()),

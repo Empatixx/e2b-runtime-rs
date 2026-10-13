@@ -6,8 +6,7 @@ use super::error::{Kind, WarmError};
 use super::identity::Identity;
 use super::scope::{Scope, ScopeError};
 use super::{COPY_CHUNK, Cache, TEMP_PREFIX};
-use crate::go_os::{path_error, reason};
-use crate::go_strconv::quote;
+use crate::fs::path_error;
 
 #[derive(Debug)]
 pub enum CopyFailure {
@@ -123,7 +122,7 @@ impl Cache {
         std::fs::create_dir_all(&self.dir).map_err(|e| {
             WarmError::tagged(
                 Kind::CacheUnusable,
-                format!("create dir {}: {}", quote(&self.dir.display().to_string()), reason(&e)),
+                format!("create dir {:?}: {}", self.dir.display(), e),
             )
         })?;
         self.reap_temps.call_once(|| reap_temp_files(&self.dir));
@@ -135,15 +134,15 @@ impl Cache {
         };
         let mut input = std::fs::File::open(source).map_err(|e| {
             WarmError::other(format!(
-                "open envd binary {}: {}",
-                quote(&source.display().to_string()),
+                "open envd binary {:?}: {}",
+                source.display(),
                 path_error("open", source, &e)
             ))
         })?;
         let mut temporary = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .tempfile_in(&self.dir)
-            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("create temp file: {}", reason(&e))))?;
+            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("create temp file: {}", e)))?;
         let (written, copy) = copy_context(scope, temporary.as_file_mut(), &mut input);
         Ok((
             reservation,
@@ -163,7 +162,7 @@ impl Cache {
         written: u64,
         copy: Result<(), CopyFailure>,
     ) -> Result<(), WarmError> {
-        let name = quote(&source.display().to_string());
+        let name = format!("{:?}", source.display());
         if copy.is_ok() && written != identity.size {
             return match self.stat_source_bounded(scope, source).await {
                 Ok(current) if current != identity => Err(WarmError::of(Kind::Superseded)),
@@ -176,8 +175,8 @@ impl Cache {
         match copy {
             Ok(()) => Ok(()),
             Err(CopyFailure::Scope(error)) => Err(WarmError::other(format!("copy envd binary {name}: {error}"))),
-            Err(CopyFailure::Read(e)) => Err(WarmError::other(format!("copy envd binary {name}: {}", reason(&e)))),
-            Err(CopyFailure::Write(e)) => Err(WarmError::tagged(Kind::CacheUnusable, format!("write: {}", reason(&e)))),
+            Err(CopyFailure::Read(e)) => Err(WarmError::other(format!("copy envd binary {name}: {}", e))),
+            Err(CopyFailure::Write(e)) => Err(WarmError::tagged(Kind::CacheUnusable, format!("write: {}", e))),
         }
     }
 
@@ -186,13 +185,13 @@ impl Cache {
         temporary
             .as_file()
             .sync_all()
-            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("close temp file: {}", reason(&e))))?;
+            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("close temp file: {}", e)))?;
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("chmod: {}", reason(&e))))?;
+            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("chmod: {}", e)))?;
         temporary
             .persist(destination)
             .map(|_| ())
-            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("rename: {}", reason(&e.error))))
+            .map_err(|e| WarmError::tagged(Kind::CacheUnusable, format!("rename: {}", e.error)))
     }
 
     pub(crate) fn reserve_in_flight(&self, destination: &Path) {

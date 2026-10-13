@@ -9,7 +9,6 @@ use crate::featureflags::{
     COLLAPSE_ENVD_HEAP, COLLAPSE_ENVD_HEAP_TIMEOUT_MS, FREEZE_GUEST_HIERARCHY, FREEZE_GUEST_HIERARCHY_MAX_CGROUPS,
     FREEZE_USER_CGROUP_TIMEOUT_MS, FeatureFlags, FlagContext, GUEST_PAUSE_RECLAIM, IntFlag, freeze_user_cgroup,
 };
-use crate::go_strconv::quote;
 use crate::telemetry::reclaim::{
     FreezeCall, FreezeObserved, record_collapse_chunks, record_collapse_duration, record_freeze_call,
     record_freeze_observed, record_unfreeze,
@@ -100,9 +99,8 @@ impl ReclaimSteps {
                 enabled
                     .iter()
                     .map(|(cap, command)| format!(
-                        "timeout -s KILL {:.3} sh -c {} >/dev/null 2>&1 || rc=$?",
-                        cap.as_secs_f64(),
-                        quote(command)
+                        "timeout -s KILL {:.3} sh -c {command:?} >/dev/null 2>&1 || rc=$?",
+                        cap.as_secs_f64()
                     ))
                     .collect::<Vec<_>>()
                     .join("; ")

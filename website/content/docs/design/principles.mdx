@@ -5,31 +5,29 @@ description: The rules the code follows, and where you can see each one in the s
 
 This page lists the rules we follow when we write code for envd and the orchestrator. Each rule names the place in the source where you can see it.
 
-## Same as Go at every edge
+## Same API as Go, built like Go
 
-Anything a client, a stored file or a dashboard can see must match the Go version. That covers routes, status codes, headers, JSON shapes, error texts, metric names and file formats. Inside, the code is free to look different.
+The Rust service must be exchangeable with the Go one. Routes, status codes, the headers callers read, JSON and proto shapes, Connect framing, metric names and file formats match Go. Inside, the code follows the shape of the Go source: the same components, the same steps in the same order and the same names, so each part can be checked side by side with its Go counterpart.
 
-We check this rule against the Go source, not the Go documentation. When the two disagree, the source wins.
+What we do not copy is Go itself: its syntax, its error wording and the quirks of its standard library that no caller sees. We check behaviour against the Go source, not the Go documentation. When the two disagree, the source wins.
 
-## Go formats, written again in Rust
+## Go formats that must stay byte for byte
 
-Some outputs depend on how the Go standard library formats them. Rust crates give a correct result, but not the same bytes or text. So the orchestrator has small modules that copy the Go behaviour:
+Some outputs cross to Go services or into storage, so they must have the same bytes. Rust crates give a correct result, but not always the same bytes. For those cases the orchestrator has small modules that copy the Go behaviour:
 
 | Module | What it copies |
 |---|---|
 | `go_gzip` | `compress/gzip` at `BestSpeed`, byte for byte, so a layer archive has the same hash as one built by Go |
 | `go_tar` | `archive/tar` headers, including PAX records |
-| `go_strconv` | `strconv.ParseBool` and `strconv.Quote` |
-| `go_time` | `time.ParseDuration` and the text of its errors |
-| `go_url` | URL escaping and `url.Values` parsing and encoding |
-| `go_humanize` | `humanize.Bytes` (`1.2 GB`) |
-| `go_os`, `go_exec` | the text of `*os.PathError` and `exec` errors |
+| `go_url` | URL escaping and `url.Values`, which decide the bytes of storage requests and signatures |
+| `go_time` | `time.ParseDuration`, so operators can keep values like `1h30m` |
+| `go_strconv` | `strconv.ParseBool` for the boolean settings operators already use |
 
 Byte-for-byte archives matter for the layer cache. A template layer is found by the hash of its content, so a different gzip encoder would miss every layer that Go already built.
 
-## Errors carry the exact text
+## Errors carry a clear text
 
-A function returns the text the client will see: a `String`, an `io::Error`, a `ConnectError` or an `ErrorResponse`. We do not wrap errors in a generic type and translate them at the edge. The text is built once, where the error happens, the same way Go builds it with `fmt.Errorf`.
+A function returns a `String`, an `io::Error`, a `ConnectError` or an `ErrorResponse` with a clear message. The status code and the error code match Go; the wording does not need to. We do not wrap errors in a generic type and translate them at the edge. The text is built once, where the error happens.
 
 ## Unsafe code stays in small types
 

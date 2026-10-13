@@ -58,8 +58,7 @@ impl TenantPolicy {
         ) {
             (true, _, _) | (false, true, "" | "organizations") => Ok(specified.to_owned()),
             _ => Err(format!(
-                "{credential} isn't configured to acquire tokens for tenant {}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant",
-                crate::go_strconv::quote(specified)
+                "{credential} isn't configured to acquire tokens for tenant {specified:?}. To enable acquiring tokens for this tenant add it to the AdditionallyAllowedTenants on the credential options, or add \"*\" to allow acquiring tokens for any tenant"
             )),
         }
     }

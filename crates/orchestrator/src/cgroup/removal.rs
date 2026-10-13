@@ -20,10 +20,7 @@ pub fn parse_events_populated(events: &str) -> Result<bool, String> {
             ["populated", value] => Some(match *value {
                 "0" => Ok(false),
                 "1" => Ok(true),
-                other => Err(format!(
-                    "invalid populated value in cgroup.events: {}",
-                    crate::go_strconv::quote(other)
-                )),
+                other => Err(format!("invalid populated value in cgroup.events: {other:?}")),
             }),
             _ => None,
         })

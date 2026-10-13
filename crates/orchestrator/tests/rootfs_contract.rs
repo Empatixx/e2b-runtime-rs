@@ -7,12 +7,12 @@ use orchestrator::builder::oci::pull::Puller;
 use orchestrator::builder::phase::PhaseMeta;
 use orchestrator::builder::rootfs::{RootfsRequest, create_ext4_filesystem};
 use orchestrator::builder::template_files::{InjectedSources, provision_script};
-use orchestrator::go_exec::GoCommand;
+use orchestrator::command::Command;
 
 const DISK_SIZE_MB: i64 = 512;
 
 async fn debugfs(ext4: &Ext4, request: &str) -> String {
-    let output = GoCommand::new("debugfs")
+    let output = Command::new("debugfs")
         .args(["-R".as_ref(), request.as_ref(), ext4.file.as_os_str()])
         .run()
         .await

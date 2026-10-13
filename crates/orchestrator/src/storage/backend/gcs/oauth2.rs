@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use super::adc::AdcFile;
 use super::external_account::ExternalAccount;
 use super::flows::{ComputeFlow, ComputeMessages, FlowProfile, TokenFlow, on_gce};
-use super::{credsfile, go_json};
+use super::{credsfile, json};
 use reuse::ReuseFlow;
 
 const STORE: &str = "GoogleCloudStorage";
@@ -36,7 +36,7 @@ struct ImpersonatedFile {
 }
 
 fn oauth2_flow(json: &[u8], scopes: &[String]) -> Result<Arc<dyn TokenFlow>, String> {
-    let kind = go_json::unmarshal::<FileType>(json, credsfile::OAUTH2_CREDENTIALS_FILE)?.r#type;
+    let kind = json::unmarshal::<FileType>(json, credsfile::OAUTH2_CREDENTIALS_FILE)?.r#type;
     let flow: Arc<dyn TokenFlow> = match kind.as_str() {
         "service_account" | "gdch_service_account" => jwt::JwtFlow::from_json(json, scopes)?,
         "authorized_user" => user::UserFlow::from_json(json)?,
@@ -44,7 +44,7 @@ fn oauth2_flow(json: &[u8], scopes: &[String]) -> Result<Arc<dyn TokenFlow>, Str
         "external_account_authorized_user" => return super::flows::build(json, &profile(scopes)),
         "impersonated_service_account" => impersonated_flow(json, scopes)?,
         "" => return Err("missing 'type' field in credentials".to_owned()),
-        other => return Err(format!("unknown credential type: {}", crate::go_strconv::quote(other))),
+        other => return Err(format!("unknown credential type: {other:?}")),
     };
     Ok(ReuseFlow::new(flow))
 }
@@ -57,7 +57,7 @@ fn profile(scopes: &[String]) -> FlowProfile {
 }
 
 fn impersonated_flow(json: &[u8], scopes: &[String]) -> Result<Arc<dyn TokenFlow>, String> {
-    let file: ImpersonatedFile = go_json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
+    let file: ImpersonatedFile = json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
     let source = match (
         file.source_credentials,
         file.service_account_impersonation_url.is_empty(),

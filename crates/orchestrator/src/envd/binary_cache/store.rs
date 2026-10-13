@@ -4,7 +4,6 @@ use std::sync::Arc;
 use super::error::{Kind, WarmError};
 use super::scope::Scope;
 use super::{Cache, Entry, MAX_ENTRIES, TEMP_PREFIX};
-use crate::go_strconv::quote;
 
 impl Cache {
     pub(crate) async fn store(&self, scope: &Scope, entry: Entry) -> Result<(), WarmError> {
@@ -13,8 +12,8 @@ impl Cache {
             Err(error) => {
                 let _ = std::fs::remove_file(&entry.local_path);
                 return Err(WarmError::other(format!(
-                    "revalidate envd binary source {}: {error}",
-                    quote(&entry.source_path.display().to_string())
+                    "revalidate envd binary source {:?}: {error}",
+                    entry.source_path.display()
                 )));
             }
         };

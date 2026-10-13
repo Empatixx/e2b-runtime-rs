@@ -13,7 +13,7 @@ use tokio_rustls::rustls::pki_types::{
 use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, SignatureScheme};
 
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use super::config::CredentialSource;
 use crate::storage::backend::pem;
 
@@ -61,9 +61,8 @@ struct WorkloadCertResolver {
 
 impl WorkloadCertResolver {
     fn load(&self) -> Result<CertifiedKey, String> {
-        let read = |path: &str| {
-            std::fs::read_to_string(path).map_err(|e| crate::go_os::path_error("open", Path::new(path), &e))
-        };
+        let read =
+            |path: &str| std::fs::read_to_string(path).map_err(|e| crate::fs::path_error("open", Path::new(path), &e));
         let certificates: Vec<CertificateDer<'static>> = pem::blocks(&read(&self.cert_path)?)
             .into_iter()
             .filter(|block| block.label == "CERTIFICATE")
@@ -158,7 +157,7 @@ impl X509Subject {
     fn workload(&self) -> Result<WorkloadConfig, String> {
         let config_path = self.config_file();
         let bytes = std::fs::read(&config_path).map_err(|_| SOURCE_UNAVAILABLE.to_owned())?;
-        let config: CertificateConfigFile = go_json::unmarshal(&bytes, credsfile::CERTIFICATE_CONFIG)?;
+        let config: CertificateConfigFile = json::unmarshal(&bytes, credsfile::CERTIFICATE_CONFIG)?;
         let Some(workload) = config.cert_configs.workload else {
             return match is_ecp(&config) {
                 true => Err(ECP_UNSUPPORTED.to_owned()),
@@ -180,7 +179,7 @@ impl X509Subject {
         let data = std::fs::read(&path).map_err(|e| {
             format!(
                 "credentials: failed to read leaf certificate file: {}",
-                crate::go_os::path_error("open", Path::new(&path), &e)
+                crate::fs::path_error("open", Path::new(&path), &e)
             )
         })?;
         single_certificate(&data)
@@ -228,11 +227,11 @@ fn trust_chain(path: &str) -> Result<Vec<Vec<u8>>, String> {
     let data = std::fs::read(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!(
             "credentials: trust chain file not found: {}",
-            crate::go_os::path_error("open", Path::new(path), &e)
+            crate::fs::path_error("open", Path::new(path), &e)
         ),
         _ => format!(
             "credentials: failed to read trust chain file: {}",
-            crate::go_os::path_error("open", Path::new(path), &e)
+            crate::fs::path_error("open", Path::new(path), &e)
         ),
     })?;
     Ok(pem::blocks(&String::from_utf8_lossy(&data))

@@ -38,7 +38,7 @@ impl StorageEnv {
             template_base_path: var("LOCAL_TEMPLATE_STORAGE_BASE_PATH"),
             build_cache_bucket: var("BUILD_CACHE_BUCKET_NAME"),
             build_cache_base_path: var("LOCAL_BUILD_CACHE_STORAGE_BASE_PATH"),
-            s3_path_style: env_bool(vars.get("S3_USE_PATH_STYLE").map(String::as_str), "S3PathStyle")
+            s3_path_style: env_bool(vars.get("S3_USE_PATH_STYLE").map(String::as_str), "S3_USE_PATH_STYLE")
                 .map_err(|e| format!("parse storage environment: {e}"))?,
             s3_sse_type: var("S3_SSE_TYPE"),
             s3_sse_kms_key_id: var("S3_SSE_KMS_KEY_ID"),
@@ -219,7 +219,7 @@ mod tests {
         );
         assert_eq!(
             env(&[("S3_USE_PATH_STYLE", "yes")]).unwrap_err(),
-            "parse storage environment: env: parse error on field \"S3PathStyle\" of type \"bool\": strconv.ParseBool: parsing \"yes\": invalid syntax"
+            "parse storage environment: S3_USE_PATH_STYLE: invalid boolean \"yes\""
         );
     }
 }

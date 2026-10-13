@@ -3,7 +3,6 @@ use tonic::Status;
 use super::api_error::ApiError;
 use super::failure::internal;
 use super::service::VolumeServer;
-use crate::go_strconv::quote;
 use crate::proto::{StatPathRequest, StatPathResponse};
 
 impl VolumeServer {
@@ -16,8 +15,9 @@ impl VolumeServer {
                 entry: Some(entry.into()),
             })
             .map_err(|e| match e.is_not_found() {
-                true => ApiError::path_not_found(format!("failed to stat: {} not found.", quote(&request.path)))
-                    .into_status(),
+                true => {
+                    ApiError::path_not_found(format!("failed to stat: {:?} not found.", request.path)).into_status()
+                }
                 false => internal(format!("failed to stat path: {e}")),
             })
     }

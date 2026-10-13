@@ -14,7 +14,6 @@ use super::image::validate_image;
 use super::scope::Scope;
 use super::source::{BoundedError, LookupError};
 use super::{Cache, Entry};
-use crate::go_strconv::quote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlightError {
@@ -106,10 +105,7 @@ impl Cache {
 
     fn stat_failed(&self, source: &Path, error: &BoundedError) -> WarmError {
         self.note_failure(source);
-        WarmError::other(format!(
-            "stat envd binary {}: {error}",
-            quote(&source.display().to_string())
-        ))
+        WarmError::other(format!("stat envd binary {:?}: {error}", source.display()))
     }
 
     pub(crate) async fn warm_with(
@@ -143,7 +139,7 @@ impl Cache {
                 tracing::error!(path = %source.display(), panic = %payload, "envd binary cache: warm panicked");
                 Err(WarmError::tagged(
                     Kind::Panicked,
-                    format!("{}: {payload}", quote(&source.display().to_string())),
+                    format!("{:?}: {payload}", source.display()),
                 ))
             }
         }
@@ -185,7 +181,7 @@ impl Cache {
             self.mark_bad_identity(source, identity);
             return Err(WarmError::wrapping(
                 Kind::BadTarget,
-                &quote(&source.display().to_string()),
+                &format!("{:?}", source.display()),
                 &error,
             ));
         }
@@ -203,8 +199,8 @@ impl Cache {
         let failure = match self.probe.version(scope, local).await {
             Ok(version) if !version.is_empty() => return Ok(version),
             Ok(_) => super::probe::ProbeFailure::Other(format!(
-                "probe of {} exited 0 without naming a version",
-                quote(&local.display().to_string())
+                "probe of {:?} exited 0 without naming a version",
+                local.display()
             )),
             Err(failure) => failure,
         };
@@ -213,14 +209,14 @@ impl Cache {
             self.mark_bad_identity(source, identity);
             return Err(WarmError::wrapping(
                 Kind::BadTarget,
-                &quote(&source.display().to_string()),
+                &format!("{:?}", source.display()),
                 &WarmError::other(failure.to_string()),
             ));
         }
         self.note_failure(source);
         Err(WarmError::other(format!(
-            "probe envd binary copy {}: {failure}",
-            quote(&local.display().to_string())
+            "probe envd binary copy {:?}: {failure}",
+            local.display()
         )))
     }
 
@@ -245,7 +241,7 @@ impl Cache {
             Err(error) => {
                 self.note_failure(source);
                 Err(WarmError::context(
-                    format!("publish envd binary copy {}", quote(&source.display().to_string())),
+                    format!("publish envd binary copy {:?}", source.display()),
                     &error,
                 ))
             }
@@ -287,10 +283,7 @@ impl Cache {
                     Ok(identity) => identity,
                     Err(error) => {
                         self.note_failure(source);
-                        let failed = WarmError::other(format!(
-                            "stat envd binary {}: {error}",
-                            quote(&source.display().to_string())
-                        ));
+                        let failed = WarmError::other(format!("stat envd binary {:?}: {error}", source.display()));
                         self.report_warm(source, Err(&failed));
                         return;
                     }

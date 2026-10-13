@@ -1,10 +1,12 @@
 # envd-rs
 
-envd-rs is a Rust drop-in replacement for the E2B `envd` daemon written in Go. A client must be able to swap the Go binary for this one and see no difference.
+envd-rs is a Rust drop-in replacement for the E2B `envd` daemon and orchestrator written in Go. It must be exchangeable with the Go service: the same API, the same behaviour for every service that talks to it, and internals shaped like upstream (the same components, logic flow, order of steps and names for the same concepts), so a Rust component can be validated side by side with its Go counterpart. It does not copy Go syntax, Go error wording or Go library quirks.
 
 ## API parity
 
-Match the upstream Go envd exactly at the edges: routes, status codes, headers, JSON shapes and error texts. Read the Go source first, then write the same behaviour in idiomatic Rust. Keep the inside of the code shaped the Rust way, using tokio, axum and connectrpc conventions.
+Keep the API the same as upstream Go: routes, status codes, the headers callers read, JSON and proto shapes, Connect and gRPC framing, metric names, storage paths and formats. Behave close enough that the orchestrator, the SDK and the other services work unchanged. Do not copy Go library quirks the callers never see: net/http error pages, exact error wording, JSON escaping, chunking thresholds, Go formatting helpers. Read the Go source first and follow its structure: one Rust module for each Go package or component, the same steps in the same order. Write each step as idiomatic Rust with tokio, axum and connectrpc.
+
+Before porting any difference, ask one question: would the orchestrator, the SDK, the client-proxy or a Go node in the same cluster notice it? If yes, match Go. If no, write the plain Rust version and move on. Values that cross to Go services or into storage (proto, Redis, ClickHouse, object paths, header formats, layer hashes) must stay compatible byte for byte; everything else only needs to behave the same.
 
 ## Code style
 
@@ -12,7 +14,7 @@ Write simple, plain code: free functions, `match`, `?` and iterator chains. Let 
 
 Put readability first. Split work into small, well-named methods with low cognitive complexity, so each one reads top to bottom in a few lines. Keep it simple and direct, and reach for an abstraction when it makes the calling code read like the domain.
 
-Hide low-level details such as `unsafe`, syscalls, ioctls and byte layouts behind small types with a clean, safe API. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` holding the exact text the client sees.
+Hide low-level details such as `unsafe`, syscalls, ioctls and byte layouts behind small types with a clean, safe API. Return errors as `String`, `io::Error`, `ConnectError` or `ErrorResponse` with a clear message.
 
 Write code as method chains. Transform `Option`, `Result` and iterators with combinators like `map`, `and_then`, `filter`, `map_or`, `is_none_or` and `try_for_each`, the way `keepalive_interval` reads a header in one chain. Build values with builder chains, for example `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`, give a struct its own `builder()` when it is created in several places, and use library builders like `OpenOptions` and `Response::builder`. Builders are always generated with `bon`, never written by hand; prefer well-known crates over hand-rolled code.
 
@@ -30,7 +32,7 @@ Put unit tests at the bottom of the same file in `#[cfg(test)] mod tests`. Put H
 
 ## Backlog
 
-`docs/BACKLOG.md` lists only gaps to Go parity, each with the milestone where it starts to matter. Add every deferred parity gap there when a review ends, and delete the line when it is fixed. Anything that already behaves like Go does not belong there. Deliberate differences from Go and features upstream does not have go to `docs/new-features.md`, with their open items.
+`docs/BACKLOG.md` lists only gaps to Go parity that a caller would notice, each with the milestone where it starts to matter. Add every deferred gap of that kind there when a review ends, and delete the line when it is fixed. Anything that already behaves like Go, and any difference no caller sees (error wording, net/http quirks, internal metrics counts), does not belong there. Deliberate differences from Go and features upstream does not have go to `docs/new-features.md`, with their open items.
 
 ## Writing docs and posts
 

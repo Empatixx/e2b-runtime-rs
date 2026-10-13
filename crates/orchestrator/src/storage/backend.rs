@@ -337,15 +337,15 @@ impl Storage {
             .write(true)
             .open(destination)
             .await
-            .map_err(|e| crate::go_os::path_error("open", destination, &e))?;
+            .map_err(|e| crate::fs::path_error("open", destination, &e))?;
         while let Some(chunk) = chunks.try_next().await? {
             file.write_all(&chunk)
                 .await
-                .map_err(|e| crate::go_os::path_error("write", destination, &e))?;
+                .map_err(|e| crate::fs::path_error("write", destination, &e))?;
         }
         file.flush()
             .await
-            .map_err(|e| crate::go_os::path_error("write", destination, &e))
+            .map_err(|e| crate::fs::path_error("write", destination, &e))
     }
 
     async fn blob_stream(&self, path: &str) -> Result<BoxStream<'static, Result<Bytes, String>>, String> {
@@ -367,16 +367,13 @@ impl Storage {
             error => error.to_string(),
         };
         match self.signing {
-            Signing::Gcs(_) => format!(
-                "failed to create reader for {}: {reason}",
-                crate::go_strconv::quote(path)
-            ),
+            Signing::Gcs(_) => format!("failed to create reader for {path:?}: {reason}"),
             _ => reason,
         }
     }
 
     fn copy_error(&self, path: &str) -> impl Fn(object_store::Error) -> String + Send + 'static {
-        let gcs_path = matches!(self.signing, Signing::Gcs(_)).then(|| crate::go_strconv::quote(path));
+        let gcs_path = matches!(self.signing, Signing::Gcs(_)).then(|| format!("{path:?}"));
         move |error| match &gcs_path {
             Some(quoted) => format!("failed to copy {quoted} to buffer: {error}"),
             None => error.to_string(),
@@ -439,8 +436,8 @@ impl Storage {
         validate_object_path(path)?;
         match &self.signing {
             Signing::Local { root, .. } => {
-                let parent = crate::go_os::parent(&root.join(path));
-                std::fs::create_dir_all(&parent).map_err(|e| crate::go_os::path_error("mkdir", &parent, &e))
+                let parent = crate::fs::parent(&root.join(path));
+                std::fs::create_dir_all(&parent).map_err(|e| crate::fs::path_error("mkdir", &parent, &e))
             }
             _ => Ok(()),
         }
@@ -545,7 +542,7 @@ fn local_blob_handle(path: &Path) -> Result<(), String> {
         Ok(info) if info.is_dir() => Err(format!("path {} is a directory", path.display())),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OBJECT_NOT_EXIST.to_owned()),
-        Err(e) => Err(crate::go_os::path_error("stat", path, &e)),
+        Err(e) => Err(crate::fs::path_error("stat", path, &e)),
     }
 }
 
@@ -705,8 +702,7 @@ mod tests {
         ];
         for (name, storage) in providers().await {
             for path in paths {
-                let invalid: Result<(), String> =
-                    Err(format!("invalid object path: {}", crate::go_strconv::quote(path)));
+                let invalid: Result<(), String> = Err(format!("invalid object path: {path:?}"));
                 let context = format!("{name} {path:?}");
                 assert_eq!(storage.open_blob(path), invalid.clone(), "open_blob {context}");
                 assert_eq!(

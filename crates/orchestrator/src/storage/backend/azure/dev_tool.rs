@@ -7,7 +7,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKING_DIRECTORY: &str = "/bin";
 const NOT_FOUND_EXIT_CODE: i32 = 127;
 const NOT_RECOGNIZED: &str = "' is not recognized";
-const KILLED: &str = "signal: killed";
+const TIMED_OUT: &str = "timed out";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecFailure {
@@ -43,7 +43,7 @@ impl ShellExec {
             .output();
         let output = tokio::time::timeout(self.timeout, child)
             .await
-            .map_err(|_| failed(String::new(), KILLED.to_owned()))?
+            .map_err(|_| failed(String::new(), TIMED_OUT.to_owned()))?
             .map_err(|e| failed(String::new(), e.to_string()))?;
         outcome(output)
     }
@@ -72,15 +72,8 @@ fn outcome(output: Output) -> Result<Vec<u8>, ExecFailure> {
         false if output.status.code() == Some(NOT_FOUND_EXIT_CODE) || stderr.contains(NOT_RECOGNIZED) => {
             Err(ExecFailure::NotFound)
         }
-        false => Err(failed(stderr, status_text(&output))),
+        false => Err(failed(stderr, output.status.to_string())),
     }
-}
-
-fn status_text(output: &Output) -> String {
-    output
-        .status
-        .code()
-        .map_or_else(|| KILLED.to_owned(), |code| format!("exit status {code}"))
 }
 
 pub fn valid_scope(scope: &str) -> bool {
@@ -137,7 +130,7 @@ mod tests {
         let (_b, silent) = fake_shell("exit 3");
 
         assert_eq!(with_stderr.run("x").await.unwrap_err().message(), "boom\n");
-        assert_eq!(silent.run("x").await.unwrap_err().message(), "exit status 3");
+        assert_eq!(silent.run("x").await.unwrap_err().message(), "exit status: 3");
     }
 
     #[tokio::test]

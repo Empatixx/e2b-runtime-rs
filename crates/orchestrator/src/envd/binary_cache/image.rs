@@ -2,7 +2,6 @@ use std::io::Read;
 use std::path::Path;
 
 use super::error::{Kind, WarmError};
-use crate::go_strconv::quote;
 
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const CLASS_32: u8 = 1;
@@ -27,9 +26,9 @@ struct Header {
 }
 
 pub fn validate_image(path: &Path, size: u64) -> Result<(), WarmError> {
-    let name = quote(&path.display().to_string());
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| WarmError::other(format!("open envd binary copy {name}: {}", crate::go_os::reason(&e))))?;
+    let name = format!("{:?}", path.display());
+    let mut file =
+        std::fs::File::open(path).map_err(|e| WarmError::other(format!("open envd binary copy {name}: {}", e)))?;
     let mut image = vec![0u8; size as usize];
     file.read_exact(&mut image)
         .map_err(|e| WarmError::other(format!("read envd binary copy {name}: {}", read_reason(&e))))?;
@@ -39,7 +38,7 @@ pub fn validate_image(path: &Path, size: u64) -> Result<(), WarmError> {
 fn read_reason(error: &std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::UnexpectedEof => "unexpected EOF".to_owned(),
-        _ => crate::go_os::reason(error),
+        _ => error.to_string(),
     }
 }
 

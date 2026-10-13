@@ -7,7 +7,6 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::host::mmds::MmdsOpts;
-use crate::util::go_json::escape_html;
 use crate::util::rate_limit::RateLimit;
 
 const EXPORTER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -185,9 +184,7 @@ fn with_opts(line: &[u8], opts: &MmdsOpts) -> Result<String, String> {
         serde_json::from_slice(line).map_err(|e| e.to_string())?;
     parsed.insert("instanceID".to_owned(), opts.sandbox_id.clone().into());
     parsed.insert("envID".to_owned(), opts.template_id.clone().into());
-    serde_json::to_string(&parsed)
-        .map(|json| escape_html(&json))
-        .map_err(|e| e.to_string())
+    serde_json::to_string(&parsed).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -206,7 +203,7 @@ mod tests {
     fn lines_get_the_instance_ids_and_sorted_keys() {
         assert_eq!(
             with_opts(br#"{"level":"info","message":"a<b"}"#, &opts()).unwrap(),
-            r#"{"envID":"tpl","instanceID":"sbx","level":"info","message":"a\u003cb"}"#
+            r#"{"envID":"tpl","instanceID":"sbx","level":"info","message":"a<b"}"#
         );
         assert!(with_opts(b"not json", &opts()).is_err());
     }

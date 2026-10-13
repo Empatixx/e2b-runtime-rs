@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use nix::libc;
+use nix::sys::signal::Signal;
 
 use super::scope::Scope;
 
@@ -20,7 +21,7 @@ pub enum ProbeFailure {
 
 impl ProbeFailure {
     pub fn from_spawn(path: &Path, error: &io::Error) -> Self {
-        let text = format!("fork/exec {}: {}", path.display(), crate::go_os::reason(error));
+        let text = format!("{}: {error}", path.display());
         match error.raw_os_error() {
             Some(libc::ENOEXEC) => ProbeFailure::NotExecutable(text),
             _ => ProbeFailure::Other(text),
@@ -51,21 +52,14 @@ impl fmt::Display for ProbeFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProbeFailure::NotExecutable(text) | ProbeFailure::Other(text) => f.write_str(text),
-            ProbeFailure::Exited(code) => write!(f, "exit status {code}"),
-            ProbeFailure::Signalled(signal) => write!(f, "signal: {}", signal_text(*signal)),
+            ProbeFailure::Exited(code) => write!(f, "exit status: {code}"),
+            ProbeFailure::Signalled(signal) => write!(f, "signal: {signal} ({})", signal_name(*signal)),
         }
     }
 }
 
-fn signal_text(signal: i32) -> String {
-    match signal {
-        libc::SIGBUS => "bus error".to_owned(),
-        libc::SIGSEGV => "segmentation fault".to_owned(),
-        libc::SIGILL => "illegal instruction".to_owned(),
-        libc::SIGKILL => "killed".to_owned(),
-        libc::SIGTERM => "terminated".to_owned(),
-        other => format!("signal {other}"),
-    }
+fn signal_name(signal: i32) -> &'static str {
+    Signal::try_from(signal).map_or("unknown", Signal::as_str)
 }
 
 pub trait Probe: Send + Sync {
@@ -206,12 +200,11 @@ mod tests {
     }
 
     #[test]
-    fn the_failures_read_like_go() {
-        assert_eq!(ProbeFailure::Exited(3).to_string(), "exit status 3");
-        assert_eq!(ProbeFailure::Signalled(libc::SIGKILL).to_string(), "signal: killed");
+    fn the_failures_name_the_exit_code_or_signal() {
+        assert_eq!(ProbeFailure::Exited(3).to_string(), "exit status: 3");
         assert_eq!(
-            ProbeFailure::Signalled(libc::SIGSEGV).to_string(),
-            "signal: segmentation fault"
+            ProbeFailure::Signalled(libc::SIGKILL).to_string(),
+            "signal: 9 (SIGKILL)"
         );
     }
 

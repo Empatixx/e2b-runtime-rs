@@ -57,7 +57,7 @@ impl UploadHandler {
 
     async fn store(&self, path: &str, body: Body) -> Result<(), UploadFailure> {
         let full_path = self.base_path.join(path);
-        let dir = crate::go_os::parent(&full_path);
+        let dir = crate::fs::parent(&full_path);
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|_| internal("failed to create directory"))?;

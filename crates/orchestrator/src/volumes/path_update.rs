@@ -4,7 +4,6 @@ use super::api_error::ApiError;
 use super::chrooted::error::PathError;
 use super::failure::internal;
 use super::service::VolumeServer;
-use crate::go_strconv::quote;
 use crate::proto::{UpdatePathRequest, UpdatePathResponse};
 
 impl VolumeServer {
@@ -29,8 +28,7 @@ impl VolumeServer {
 
 fn update_failure(operation: &str, failure: &str, requested_path: &str, error: &PathError) -> Status {
     match error.is_not_found() {
-        true => ApiError::path_not_found(format!("failed to {operation}: {} not found.", quote(requested_path)))
-            .into_status(),
+        true => ApiError::path_not_found(format!("failed to {operation}: {requested_path:?} not found.")).into_status(),
         false => internal(format!("{failure}: {error}")),
     }
 }

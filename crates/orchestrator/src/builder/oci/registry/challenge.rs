@@ -114,20 +114,19 @@ fn split_token(text: &str) -> (&str, &str) {
 }
 
 pub fn validate_realm(realm: &str, registry: &str, insecure: bool) -> Result<(), String> {
-    let url = GoUrl::parse(realm).map_err(|e| format!("parsing realm {}: {e}", quote(realm)))?;
+    let url = GoUrl::parse(realm).map_err(|e| format!("parsing realm {realm:?}: {e}"))?;
     match url.scheme.as_str() {
         "https" => {}
         "http" if insecure => {}
         "http" => {
             return Err(format!(
-                "realm scheme {} not allowed for a secure registry; use https",
-                quote(&url.scheme)
+                "realm scheme {:?} not allowed for a secure registry; use https",
+                url.scheme
             ));
         }
         scheme => {
             return Err(format!(
-                "realm scheme {} not allowed; must be https (or http for insecure registries)",
-                quote(scheme)
+                "realm scheme {scheme:?} not allowed; must be https (or http for insecure registries)"
             ));
         }
     }
@@ -136,7 +135,7 @@ pub fn validate_realm(realm: &str, registry: &str, insecure: bool) -> Result<(),
     }
     let host = hostname(&url.host);
     match host.parse::<IpAddr>() {
-        Ok(ip) if is_internal(ip) => Err(format!("realm host {} is a private or link-local address", quote(host))),
+        Ok(ip) if is_internal(ip) => Err(format!("realm host {host:?} is a private or link-local address")),
         _ => Ok(()),
     }
 }
@@ -202,7 +201,7 @@ fn redirect_policy(registry: &str, insecure: bool) -> Policy {
         let target = attempt.url().to_string();
         match validate_realm(&target, &registry, insecure) {
             Ok(()) => attempt.follow(),
-            Err(e) => attempt.error(format!("refusing token-server redirect to {}: {e}", quote(&target))),
+            Err(e) => attempt.error(format!("refusing token-server redirect to {target:?}: {e}")),
         }
     })
 }
@@ -231,10 +230,6 @@ fn is_internal(ip: IpAddr) -> bool {
                 || (v6.segments()[0] & 0xff0f) == 0xff02
         }
     }
-}
-
-fn quote(text: &str) -> String {
-    crate::go_strconv::quote(text)
 }
 
 #[cfg(test)]

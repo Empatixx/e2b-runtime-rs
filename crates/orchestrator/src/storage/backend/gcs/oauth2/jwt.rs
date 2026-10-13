@@ -12,7 +12,7 @@ use super::super::flows::{FlowToken, TokenFlow, default_client, request_error};
 use super::super::form::UrlEncodedForm;
 use super::super::key_errors::oauth2_rsa_key;
 use super::super::private_key::sign_rsa;
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use crate::storage::backend::pem;
 
 const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -45,7 +45,7 @@ struct TokenResponse {
 
 impl JwtFlow {
     pub fn from_json(json: &[u8], scopes: &[String]) -> Result<Arc<Self>, String> {
-        let file: ServiceAccountFile = go_json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
+        let file: ServiceAccountFile = json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
         Ok(Arc::new(Self {
             file,
             scopes: scopes.to_vec(),
@@ -131,7 +131,7 @@ impl TokenFlow for JwtFlow {
         if !status.is_success() {
             return Err(Dialect::Oauth2.cannot_fetch(status, &body));
         }
-        let parsed: TokenResponse = go_json::unmarshal(body.as_bytes(), credsfile::OAUTH2_JWT_RESPONSE)
+        let parsed: TokenResponse = json::unmarshal(body.as_bytes(), credsfile::OAUTH2_JWT_RESPONSE)
             .map_err(|e| format!("oauth2: cannot fetch token: {e}"))?;
         Ok(FlowToken {
             value: parsed.access_token,

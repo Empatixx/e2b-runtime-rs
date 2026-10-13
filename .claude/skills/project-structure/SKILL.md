@@ -12,11 +12,11 @@ Cargo.toml             workspace only: members = ["crates/*"], release profile
 crates/orchestrator/   orchestrator crate (same layout rules as envd below)
   src/storage/         object_store backends (backend.rs: Storage::open per provider, signed UploadUrl;
                        backend/providers.rs: S3, GCS, Azure builders; backend/gcs/ ADC, credential flows, external
-                       accounts; backend/azure/ DefaultAzureCredential chain, AAD, WS-Trust, SAS; backend/aws.rs + aws/sse.rs S3 server-side encryption headers), object_path.rs (validate_object_path), spec.rs (StorageSpec, upstream storage URL
+                       accounts, json.rs + credsfile.rs (credential JSON with case-insensitive keys, nulls skipped); backend/azure/ DefaultAzureCredential chain, AAD, WS-Trust, SAS; backend/aws.rs + aws/sse.rs S3 server-side encryption headers), object_path.rs (validate_object_path), spec.rs (StorageSpec, upstream storage URL
                        parsing), local_upload.rs (HMAC UploadSigner), build paths, header V3
   src/go_url.rs        Go net/url parse and String (go_url/escape.rs, go_url/query.rs url.Values)
-  src/go_exec.rs       commands with Go exec error texts (exit status N, signal: killed, not found in $PATH);
-                       go_humanize.rs (humanize.Bytes)
+  src/command.rs       Command: run a tool with stdin closed, output or combined output, CommandFailure with the exit
+                       code; fs.rs (path_error "op path: io error", mkdir_all, temp files, parent)
   src/builder/         template builder: config.rs (BuilderConfig env), template_files.rs (+ render.rs Go template
                        subset, layers.rs files/symlink tars, hash.rs filesHash/provision version; assets/template/),
                        ext4.rs (+ stats.rs debugfs parsing), oci/ (reference.rs go-containerregistry names, registry.rs
@@ -24,8 +24,7 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        whiteouts, export.rs layers top-first, overlay_mount.rs new mount API, copy.rs rsync),
                        rootfs.rs (+ unpack.rs CreateExt4Filesystem), provision.rs (console marker scan),
                        phases.rs (BuildEnv) + phases/base.rs (+ build.rs), pipeline.rs (PhasePipeline)
-  src/go_strconv.rs    strconv.ParseBool, strconv.Quote, caarlos0/env bool errors; go_os.rs (Go PathError text);
-                       go_path.rs (path.Clean, Join, Dir, Base)
+  src/go_strconv.rs    strconv.ParseBool accepted values for env and URL flags; go_path.rs (path.Clean, Join, Dir, Base)
   src/go_gzip.rs       Go compress/gzip + flate BestSpeed port (layer digests byte for byte); go_tar.rs (Go archive/tar
                        writer: USTAR prefix split, PAX records); go_time.rs + go_time/parse.rs (time.ParseDuration)
   src/featureflags.rs  LaunchDarkly client (featureflags/client.rs: offline fallbacks, overrides), contexts.rs (sandbox,
@@ -168,22 +167,20 @@ crates/envd/src/
   main.rs              parse config, init tracing, bind, connection::serve. Nothing else.
   lib.rs               pub mod list only
   config.rs            CLI flags (Go `flag` compatible)
-  connection.rs        serve: hyper with Go's HTTP/1 limits (1 MiB head, no header count limit); GoErrorPages turns hyper's
-                       431/400 heads and go_status_error responses into Go's text/plain error pages
+  connection.rs        serve: hyper with Go's HTTP/1 limits (1 MiB head, no header count limit)
   app.rs               AppState (shared state, Arc), Defaults
   router.rs            build_router: every REST route + Connect services + layers, in one place
   auth.rs              who is calling: basic_username, request_user, URL signing
   middleware.rs        pub mod list
-  middleware/          one file per tower middleware or Connect interceptor (access_token.rs, basic_auth.rs, host.rs: Go's Host checks, connect_timeout.rs:
-                       timeout parsing and the unary deadline checked only at handler entry, stream_end.rs: Connect end-stream
-                       frame escaped and gzipped like connect-go, unary_framing.rs)
+  middleware/          one file per tower middleware or Connect interceptor (access_token.rs, basic_auth.rs, connect_timeout.rs:
+                       timeout parsing and the unary deadline checked only at handler entry)
   controllers.rs       pub mod list
   controllers/         one file per area: health.rs, envs.rs, init.rs, filesystem.rs, ...
   controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs; files/download.rs, upload.rs, compose.rs, encoding.rs; process/spawn.rs, output.rs, events.rs, registry.rs)
   host.rs + host/      things done to the VM (clock, /etc/hosts, MMDS)
   user.rs              Linux users/groups
   envvars.rs           env vars for spawned processes
-  util.rs + util/      small shared helpers (error_response.rs; fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
+  util.rs + util/      small shared helpers (error_response.rs; json.rs: float32 numbers without a .0; fs.rs: OS error text, eval_symlinks; paths.rs; keepalive.rs; metadata.rs: user.e2b.* xattrs)
   proto.rs             include_generated!() only
 crates/envd/tests/     HTTP contract tests against a real server served by connection::serve (tests/common: spawn_server_with_state)
 ```
@@ -209,18 +206,18 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 - **Chaining**: write code as method chains — `Option`/`Result`/iterator combinators (`map`, `and_then`, `filter`, `map_or`, `is_none_or`, `try_for_each`) rather than `if let`/`let else` with early returns, e.g. `headers.get(..).and_then(..).filter(..).map_or(DEFAULT, ..)`.
 - **Builders**: build values with builder chains, e.g. `ErrorResponse::builder().status(StatusCode::NOT_FOUND).message(text).build()`. A struct created in several places gets its own `builder()`; use library builders (`OpenOptions`, `Response::builder`).
 - **Named fields always**: no tuple structs (`struct Foo(Bar)`), no `.0`/`.1` field access.
-- Errors are `String`, `io::Error`, `ConnectError` or `util::error_response::ErrorResponse` (REST JSON/plain error like Go `jsonError`) carrying the exact text the client sees.
-- **API = upstream Go envd**: paths, status codes, JSON shapes, header names and error texts must match byte for byte. Check the Go source before writing; internals are plain Rust.
+- Errors are `String`, `io::Error`, `ConnectError` or `util::error_response::ErrorResponse` (REST JSON/plain error in Go's JSON shape) with a clear message.
+- **API = upstream Go envd**: paths, status codes, JSON and proto shapes, header names callers read and Connect framing match Go. Error wording, escaping and Go library quirks callers never see do not need to. Check the Go source before writing; internals are plain Rust.
 - Unit tests live in `#[cfg(test)] mod tests` at the bottom of the same file; HTTP behaviour goes in `crates/<crate>/tests/*_contract.rs`.
 - `rustfmt.toml` sets `max_width = 120`; run `cargo fmt` and `cargo clippy --all-targets` before committing.
 
 ## Request flow
 
 ```
-require_host (middleware/host.rs) -> CORS -> require_token (middleware/access_token.rs)
+CORS -> require_token (middleware/access_token.rs)
      -> authenticate_user (middleware/basic_auth.rs, puts User into extensions)
      -> REST route from router.rs, or fallback to Connect:
-        legacy_sdk -> advertise_encodings (middleware/accept_encoding.rs) -> frame_unary -> end_stream_like_go
+        legacy_sdk -> advertise_encodings (middleware/accept_encoding.rs)
         -> hold_unary_timeout -> ConnectRpcService (gzip only, ConnectTimeout interceptor in middleware/connect_timeout.rs)
      -> controller fn
 ```

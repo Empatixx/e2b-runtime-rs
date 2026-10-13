@@ -75,8 +75,7 @@ impl TokenSource for PowerShellCredential {
         let scope = request.scope;
         if !valid_scope(scope) {
             return Err(SourceError::Failed(format!(
-                "{CREDENTIAL}.GetToken(): invalid scope {}",
-                crate::go_strconv::quote(scope)
+                "{CREDENTIAL}.GetToken(): invalid scope {scope:?}"
             )));
         }
         let tenant = self
@@ -129,7 +128,7 @@ mod tests {
     fn failures_are_summarised_like_the_sdk() {
         let failed = |stderr: &str| ExecFailure::Failed {
             stderr: stderr.to_owned(),
-            status: "exit status 1".to_owned(),
+            status: "exit status: 1".to_owned(),
         };
 
         assert_eq!(
@@ -140,7 +139,7 @@ mod tests {
             failure_message(&failed("Run Connect-AzAccount")),
             "Please run \"Connect-AzAccount\" to set up an account"
         );
-        assert_eq!(failure_message(&failed("")), "exit status 1");
+        assert_eq!(failure_message(&failed("")), "exit status: 1");
         assert_eq!(failure_message(&failed("boom")), "boom");
     }
 

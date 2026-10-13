@@ -53,7 +53,7 @@ fn read_key(path: &Path) -> Result<String, String> {
         format!(
             "failed to get metadata for {} due to error: {}",
             path.display(),
-            crate::go_os::path_error("stat", path, &e)
+            crate::fs::path_error("stat", path, &e)
         )
     })?;
     if metadata.len() > MAX_KEY_BYTES {
@@ -66,9 +66,9 @@ fn read_key(path: &Path) -> Result<String, String> {
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .map_err(|e| {
             format!(
-                "failed to read {} due to error: {}",
-                crate::go_strconv::quote(&path.display().to_string()),
-                crate::go_os::path_error("open", path, &e)
+                "failed to read {:?} due to error: {}",
+                path.display(),
+                crate::fs::path_error("open", path, &e)
             )
         })
 }
@@ -142,7 +142,7 @@ mod tests {
         let big_error = secret_key(&challenge(&big), expected).unwrap_err();
 
         assert!(missing_error.starts_with(&format!(
-            "failed to get metadata for {} due to error: stat {}: no such file or directory",
+            "failed to get metadata for {} due to error: stat {}: No such file or directory (os error 2)",
             missing.display(),
             missing.display()
         )));

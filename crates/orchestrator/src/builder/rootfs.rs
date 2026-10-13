@@ -11,8 +11,8 @@ use super::oci::registry::digest_of;
 use super::phase::{BuildError, PhaseMeta};
 use super::template_files::layers::{files_layer, gzipped, symlink_layer};
 use super::template_files::{InjectedFiles, InjectedSources};
-use crate::go_humanize::bytes;
 use crate::proto::{FromImageRegistry, LogLevel};
+use bytesize::ByteSize;
 use teardown::{Step, Teardown};
 use unpack::{UnpackError, temp_dir, unpack_rootfs};
 
@@ -40,7 +40,7 @@ pub async fn create_ext4_filesystem(
         .map_err(|e| BuildError::user(request.meta, e))?;
     log.push(
         LogLevel::Info,
-        format!("Base Docker image size: {}", bytes(image.size())),
+        format!("Base Docker image size: {}", ByteSize::b(image.size()).display().si()),
     );
     log.push(LogLevel::Debug, "Setting up system files");
     let mut layers = remote_layers(&image);
@@ -136,7 +136,7 @@ async fn extract_into(
     max_size: i64,
     teardown: &mut Teardown,
 ) -> Result<(), UnpackError> {
-    let temp_root = crate::go_os::parent(&ext4.file);
+    let temp_root = crate::fs::parent(&ext4.file);
     let mount_dir = temp_dir(&temp_root, ".ext4-mount-", "error creating temporary mount point")?;
     let mount_path = mount_dir.path().to_path_buf();
     teardown.push(Step::Remove {

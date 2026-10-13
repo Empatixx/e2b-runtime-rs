@@ -65,7 +65,7 @@ impl EntryMeta {
             .iter()
             .filter_map(|(key, value)| key.strip_prefix(XATTR_PAX_PREFIX).map(|name| (name, value)))
             .map(|(name, value)| match xattr::set(path, name, value) {
-                Err(e) if e.raw_os_error() == Some(nix::libc::EPERM) => Ok(Some(crate::go_os::reason(&e))),
+                Err(e) if e.raw_os_error() == Some(nix::libc::EPERM) => Ok(Some(e.to_string())),
                 Err(e) => Err(e),
                 Ok(()) => Ok(None),
             })

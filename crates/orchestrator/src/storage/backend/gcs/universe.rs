@@ -16,9 +16,7 @@ pub fn validate_universe_domain(client: &str, credentials: &str) -> Result<(), S
     match client == credentials {
         true => Ok(()),
         false => Err(format!(
-            "the configured universe domain ({}) does not match the universe domain found in the credentials ({}). If you haven't configured the universe domain explicitly, \"googleapis.com\" is the default",
-            crate::go_strconv::quote(client),
-            crate::go_strconv::quote(credentials)
+            "the configured universe domain ({client:?}) does not match the universe domain found in the credentials ({credentials:?}). If you haven't configured the universe domain explicitly, \"googleapis.com\" is the default"
         )),
     }
 }

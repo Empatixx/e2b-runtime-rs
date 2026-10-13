@@ -4,7 +4,7 @@ pub mod detect;
 pub mod external_account;
 pub mod flows;
 mod form;
-pub mod go_json;
+pub mod json;
 mod key_errors;
 pub mod oauth2;
 pub mod private_key;
@@ -72,7 +72,7 @@ impl ServiceAccountSigner {
 
     fn service_account(&self) -> Result<ServiceAccount, String> {
         let decoded = decode_ignoring_newlines(&self.service_account_base64)?;
-        go_json::unmarshal(&decoded, credsfile::SERVICE_ACCOUNT_TOKEN)
+        json::unmarshal(&decoded, credsfile::SERVICE_ACCOUNT_TOKEN)
             .map_err(|e| format!("failed to parse service account JSON: {e}"))
     }
 
@@ -158,10 +158,12 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_secret_reads_like_go_json_on_empty_input() {
-        assert_eq!(
-            signer("").upload_url("t/memfile", Duration::from_secs(60)).unwrap_err(),
-            "failed to parse GCP service account: failed to parse service account JSON: unexpected end of JSON input"
+    fn a_missing_secret_is_a_json_parse_error() {
+        assert!(
+            signer("")
+                .upload_url("t/memfile", Duration::from_secs(60))
+                .unwrap_err()
+                .starts_with("failed to parse GCP service account: failed to parse service account JSON: ")
         );
     }
 

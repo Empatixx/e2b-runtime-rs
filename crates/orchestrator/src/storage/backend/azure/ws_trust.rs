@@ -443,10 +443,7 @@ pub fn assertion(body: &str) -> Result<SamlToken, String> {
                 grant_type: SAML_V2_GRANT,
                 assertion: raw,
             }),
-            other => Err(format!(
-                "couldn't parse SAML assertion, version unknown: {}",
-                crate::go_strconv::quote(other)
-            )),
+            other => Err(format!("couldn't parse SAML assertion, version unknown: {other:?}")),
         };
     }
     Err("unknown WS-Trust version".to_owned())

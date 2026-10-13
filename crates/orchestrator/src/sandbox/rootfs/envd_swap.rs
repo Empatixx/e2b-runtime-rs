@@ -14,8 +14,7 @@ use tokio::time::Instant;
 pub use debugfs::JailedDebugfs;
 use state::{Content, EnvdState, Presence, STAT_UNPARSEABLE, Verdict, envd_absent, envd_executable, parse_envd_size};
 
-use crate::go_os::path_error;
-use crate::go_strconv::quote;
+use crate::fs::path_error;
 
 pub const ENVD_SWAP_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENVD_SWAP_BUDGET: Duration = Duration::from_secs(240);
@@ -90,8 +89,8 @@ pub async fn swap_envd_binary(device: &str, source: &Path, stage_root: &Path) ->
 fn stage_dir(stage_root: &Path) -> Result<tempfile::TempDir, String> {
     if !stage_root.is_absolute() {
         return Err(format!(
-            "envd swap stage root must be absolute: {}",
-            quote(&stage_root.to_string_lossy())
+            "envd swap stage root must be absolute: {:?}",
+            stage_root.to_string_lossy()
         ));
     }
     let stage = tempfile::Builder::new()
@@ -137,17 +136,17 @@ fn stage_target(stage: &Path, source: &Path) -> Result<PathBuf, SwapError> {
     let staged = stage.join("envd.new");
     copy_file(source, &staged).map_err(|e| match std::fs::metadata(source) {
         Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
-            SwapError::SourceMissing(format!("{SOURCE_MISSING}: {}: {e}", quote(&source.to_string_lossy())))
+            SwapError::SourceMissing(format!("{SOURCE_MISSING}: {:?}: {e}", source.to_string_lossy()))
         }
-        _ => SwapError::Failed(format!("stage target envd {}: {e}", quote(&source.to_string_lossy()))),
+        _ => SwapError::Failed(format!("stage target envd {:?}: {e}", source.to_string_lossy())),
     })?;
     std::fs::set_permissions(&staged, Permissions::from_mode(EXECUTABLE))
         .map_err(|e| SwapError::Failed(format!("chmod staged envd: {}", path_error("chmod", &staged, &e))))?;
     match std::fs::metadata(&staged) {
         Ok(metadata) if metadata.len() > 0 => Ok(staged),
         _ => Err(SwapError::Failed(format!(
-            "refusing offline swap: staged target envd {} is empty or unreadable",
-            quote(&source.to_string_lossy())
+            "refusing offline swap: staged target envd {:?} is empty or unreadable",
+            source.to_string_lossy()
         ))),
     }
 }

@@ -89,12 +89,7 @@ fn unmount(path: &std::path::Path, retry_busy: bool) -> Result<(), String> {
     for attempt in 1..=attempts {
         match std::process::Command::new("umount").arg(path).status() {
             Ok(status) if status.success() => return Ok(()),
-            Ok(status) => {
-                last = format!(
-                    "error unmounting ext4 filesystem: exit status {}",
-                    status.code().unwrap_or(-1)
-                )
-            }
+            Ok(status) => last = format!("error unmounting ext4 filesystem: {status}"),
             Err(e) => last = format!("error unmounting ext4 filesystem: {e}"),
         }
         if attempt < attempts {

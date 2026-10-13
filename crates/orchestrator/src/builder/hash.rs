@@ -57,7 +57,7 @@ impl BaseKey<'_> {
 pub fn validate_files_hash(hash: &str) -> Result<(), String> {
     match hash.len() == FILES_HASH_LENGTH && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
         true => Ok(()),
-        false => Err(format!("invalid files hash: {}", crate::go_strconv::quote(hash))),
+        false => Err(format!("invalid files hash: {hash:?}")),
     }
 }
 

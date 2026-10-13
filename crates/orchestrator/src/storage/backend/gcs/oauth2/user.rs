@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use super::super::flows::read_three_legged;
 use super::super::flows::{Dialect, FlowToken, TokenFlow, default_client, request_error};
 use super::super::form::UrlEncodedForm;
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 
 const DEFAULT_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const NO_REFRESH_TOKEN: &str = "oauth2: token expired and refresh token is not set";
@@ -31,7 +31,7 @@ pub struct UserFlow {
 
 impl UserFlow {
     pub fn from_json(json: &[u8]) -> Result<Arc<Self>, String> {
-        let file: UserFile = go_json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
+        let file: UserFile = json::unmarshal(json, credsfile::OAUTH2_CREDENTIALS_FILE)?;
         let token_url = match file.token_uri.is_empty() {
             true => DEFAULT_TOKEN_URL.to_owned(),
             false => file.token_uri,

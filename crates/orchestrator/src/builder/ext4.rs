@@ -2,7 +2,7 @@ pub mod stats;
 
 use std::path::{Path, PathBuf};
 
-use crate::go_exec::{CommandFailure, GoCommand};
+use crate::command::{Command, CommandFailure};
 
 pub const BLOCK_SIZE: i64 = 4096;
 const INODES_RATIO: i64 = 4096;
@@ -62,7 +62,7 @@ impl Ext4 {
         if block_size < INODES_RATIO {
             return Err("block size must be greater than inodes ratio".to_owned());
         }
-        GoCommand::new(&self.tools.mkfs)
+        Command::new(&self.tools.mkfs)
             .args(["-O", &FEATURES.join(","), "-b", &block_size.to_string()])
             .args([
                 "-m",
@@ -78,7 +78,7 @@ impl Ext4 {
     }
 
     pub async fn mount(&self, mount_point: &Path) -> Result<(), String> {
-        GoCommand::new("mount")
+        Command::new("mount")
             .args([
                 "-o".as_ref(),
                 "loop".as_ref(),
@@ -92,7 +92,7 @@ impl Ext4 {
     }
 
     pub async fn make_writable(&self) -> Result<(), String> {
-        GoCommand::new(&self.tools.tune2fs)
+        Command::new(&self.tools.tune2fs)
             .args(["-O ^read-only".as_ref(), self.file.as_os_str()])
             .run()
             .await
@@ -106,7 +106,7 @@ impl Ext4 {
     }
 
     pub async fn resize(&self, target: i64) -> Result<i64, String> {
-        let resized = GoCommand::new(&self.tools.resize2fs)
+        let resized = Command::new(&self.tools.resize2fs)
             .args([self.file.as_os_str(), format!("{}M", target / MB).as_ref()])
             .run()
             .await;
@@ -114,7 +114,7 @@ impl Ext4 {
     }
 
     pub async fn shrink(&self) -> Result<i64, String> {
-        let shrunk = GoCommand::new(&self.tools.resize2fs)
+        let shrunk = Command::new(&self.tools.resize2fs)
             .args(["-M".as_ref(), self.file.as_os_str()])
             .run()
             .await;
@@ -131,7 +131,7 @@ impl Ext4 {
     }
 
     pub async fn free_space(&self, block_size: i64) -> Result<i64, String> {
-        let output = GoCommand::new(&self.tools.debugfs)
+        let output = Command::new(&self.tools.debugfs)
             .args(["-R".as_ref(), "stats".as_ref(), self.file.as_os_str()])
             .env("LC_ALL", "C")
             .run()
@@ -153,7 +153,7 @@ impl Ext4 {
             true => ("-pfv", E2FSCK_ACCEPTED_WITH_FIX),
             false => ("-nfv", 0),
         };
-        match GoCommand::new(&self.tools.e2fsck)
+        match Command::new(&self.tools.e2fsck)
             .args([flags.as_ref(), self.file.as_os_str()])
             .combined_output()
             .await
@@ -164,7 +164,7 @@ impl Ext4 {
     }
 
     pub async fn replay_journal(&self) -> Result<String, String> {
-        match GoCommand::new(&self.tools.e2fsck)
+        match Command::new(&self.tools.e2fsck)
             .args([
                 "-p".as_ref(),
                 "-E".as_ref(),
@@ -180,7 +180,7 @@ impl Ext4 {
     }
 
     pub async fn remove_file(&self, path: &str) -> Result<(), String> {
-        GoCommand::new(&self.tools.debugfs)
+        Command::new(&self.tools.debugfs)
             .args(["-w".as_ref(), "-R".as_ref(), format!("rm \"{path}\"").as_ref(), self.file.as_os_str()])
             .combined_output()
             .await
@@ -195,7 +195,7 @@ impl Ext4 {
         if reserved_mb <= 0 {
             return Ok(());
         }
-        GoCommand::new(&self.tools.tune2fs)
+        Command::new(&self.tools.tune2fs)
             .args([
                 "-r".as_ref(),
                 (reserved_mb * MB / block_size).to_string().as_ref(),
@@ -208,7 +208,7 @@ impl Ext4 {
     }
 
     pub async fn log_metadata(&self) {
-        let outcome = GoCommand::new(&self.tools.tune2fs)
+        let outcome = Command::new(&self.tools.tune2fs)
             .args(["-l".as_ref(), self.file.as_os_str()])
             .combined_output()
             .await;
@@ -227,12 +227,12 @@ impl Ext4 {
     fn size(&self) -> Result<i64, String> {
         std::fs::metadata(&self.file)
             .map(|metadata| metadata.len() as i64)
-            .map_err(|e| crate::go_os::path_error("stat", &self.file, &e))
+            .map_err(|e| crate::fs::path_error("stat", &self.file, &e))
     }
 }
 
 pub async fn unmount(path: &Path) -> Result<(), String> {
-    GoCommand::new("umount")
+    Command::new("umount")
         .args([path])
         .run()
         .await
@@ -313,9 +313,9 @@ mod tests {
         .check_integrity(true)
         .await;
 
-        assert_eq!(killed.unwrap_err(), "error running e2fsck: signal: killed\n");
+        assert_eq!(killed.unwrap_err(), "error running e2fsck: signal: 9 (SIGKILL)\n");
         assert_eq!(failed.unwrap_err(), "error running e2fsck [exit 4]\nbroken\n");
-        assert!(missing.unwrap_err().starts_with("error running e2fsck: fork/exec "));
+        assert!(missing.unwrap_err().starts_with("error running e2fsck: /"));
     }
 
     #[tokio::test]
@@ -346,7 +346,7 @@ mod tests {
 
         assert_eq!(
             failed.unwrap_err(),
-            "error replaying ext4 journal: exit status 4\nbroken\n"
+            "error replaying ext4 journal: exit status: 4\nbroken\n"
         );
         assert_eq!(replayed.unwrap(), "recovering");
     }
@@ -364,12 +364,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn mkfs_keeps_dir_index_when_e2fsprogs_is_present() {
-        if GoCommand::new("mkfs.ext4")
-            .args(["-V"])
-            .combined_output()
-            .await
-            .is_err()
-        {
+        if Command::new("mkfs.ext4").args(["-V"]).combined_output().await.is_err() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -377,7 +372,7 @@ mod tests {
 
         ext4.make(64, BLOCK_SIZE).await.unwrap();
 
-        let output = GoCommand::new("dumpe2fs")
+        let output = Command::new("dumpe2fs")
             .args(["-h".as_ref(), ext4.file.as_os_str()])
             .env("LC_ALL", "C")
             .run()

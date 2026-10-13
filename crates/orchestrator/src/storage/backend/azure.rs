@@ -247,12 +247,10 @@ impl AzureSigner {
         let query = match &self.auth {
             SigningAuth::SharedKey(key) => sas.query(SasKey::Account(&key.key)),
             SigningAuth::Delegation { credential, client, .. } => {
-                let key = self.delegation_key(&sas, credential, client).await.map_err(|e| {
-                    format!(
-                        "failed to get Azure user delegation key for {}: {e}",
-                        crate::go_strconv::quote(path)
-                    )
-                })?;
+                let key = self
+                    .delegation_key(&sas, credential, client)
+                    .await
+                    .map_err(|e| format!("failed to get Azure user delegation key for {path:?}: {e}"))?;
                 sas.query(SasKey::Delegation(&key))
             }
             SigningAuth::Unsupported => return Err(self.unsupported(path)),
@@ -296,8 +294,7 @@ impl AzureSigner {
 
     fn unsupported(&self, path: &str) -> String {
         format!(
-            "{SIGNING_UNSUPPORTED}: Azure ({}) needs AZURE_STORAGE_ACCOUNT_KEY, an AccountKey in AZURE_STORAGE_CONNECTION_STRING, or a credential allowed to fetch a user delegation key",
-            crate::go_strconv::quote(path)
+            "{SIGNING_UNSUPPORTED}: Azure ({path:?}) needs AZURE_STORAGE_ACCOUNT_KEY, an AccountKey in AZURE_STORAGE_CONNECTION_STRING, or a credential allowed to fetch a user delegation key"
         )
     }
 }

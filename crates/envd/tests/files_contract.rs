@@ -217,7 +217,7 @@ async fn download_errors_are_json() {
     assert_eq!(res.status(), 400);
     assert_eq!(
         res.text().await.unwrap(),
-        "Invalid format for parameter signature_expiration: error binding string parameter: strconv.ParseInt: parsing \"soon\": invalid syntax\n"
+        "Invalid format for parameter signature_expiration: \"soon\" is not an integer: invalid digit found in string\n"
     );
 }
 

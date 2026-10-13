@@ -19,7 +19,7 @@ impl fmt::Display for SourceError {
         match self {
             SourceError::NotAvailable => f.write_str("not available in local peer cache"),
             SourceError::NotSupported => f.write_str("operation not supported"),
-            SourceError::UnknownFile(name) => write!(f, "unknown file: {}", crate::go_strconv::quote(name)),
+            SourceError::UnknownFile(name) => write!(f, "unknown file: {name:?}"),
             SourceError::Failed(message) => f.write_str(message),
         }
     }

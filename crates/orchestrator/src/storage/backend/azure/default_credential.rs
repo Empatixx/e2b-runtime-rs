@@ -120,9 +120,7 @@ fn selected_kinds(setting: Option<&str>) -> Result<Vec<Kind>, String> {
             .map(|kind| vec![kind])
             .ok_or_else(|| {
                 format!(
-                    "invalid {TOKEN_CREDENTIALS_ENV} value {}. Valid values are \"dev\", \"prod\", or the name of any credential type in the default chain. See https://aka.ms/azsdk/go/identity/docs#DefaultAzureCredential for more information",
-                    crate::go_strconv::quote(name)
-                )
+                    "invalid {TOKEN_CREDENTIALS_ENV} value {name:?}. Valid values are \"dev\", \"prod\", or the name of any credential type in the default chain. See https://aka.ms/azsdk/go/identity/docs#DefaultAzureCredential for more information")
             }),
     }
 }

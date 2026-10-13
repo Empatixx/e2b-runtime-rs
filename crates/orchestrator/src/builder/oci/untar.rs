@@ -77,10 +77,7 @@ fn apply<R: Read>(entry: &mut Entry<R>, root: &Path) -> io::Result<Option<Direct
 fn invalid_entry_name(name: &[u8]) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!(
-            "invalid entry name {}",
-            crate::go_strconv::quote(&String::from_utf8_lossy(name))
-        ),
+        format!("invalid entry name {:?}", String::from_utf8_lossy(name)),
     )
 }
 
@@ -99,10 +96,7 @@ fn convert_whiteout(target: &Target, meta: &EntryMeta, raw_name: &[u8]) -> io::R
     if [b".wh.".as_slice(), b".wh..", b".wh..."].contains(&base) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "invalid whiteout entry {}",
-                crate::go_strconv::quote(&String::from_utf8_lossy(raw_name))
-            ),
+            format!("invalid whiteout entry {:?}", String::from_utf8_lossy(raw_name)),
         ));
     }
     if base == OPAQUE_WHITEOUT {
@@ -145,10 +139,7 @@ fn hard_link_target(link: &[u8], root: &Path) -> io::Result<PathBuf> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "invalid hardlink target {}",
-                crate::go_strconv::quote(&String::from_utf8_lossy(link))
-            ),
+            format!("invalid hardlink target {:?}", String::from_utf8_lossy(link)),
         )
     };
     let mut parts = clean_local(link).map_err(|()| invalid())?.ok_or_else(invalid)?;
@@ -235,11 +226,11 @@ fn chown(path: &Path, meta: &EntryMeta) -> io::Result<()> {
         io::Error::new(
             io::Error::from(e).kind(),
             format!(
-                "failed to Lchown {} for UID {}, GID {}: {}",
-                crate::go_strconv::quote(&path.display().to_string()),
+                "failed to Lchown {:?} for UID {}, GID {}: {}",
+                path.display(),
                 meta.uid,
                 meta.gid,
-                crate::go_os::reason(&io::Error::from(e))
+                io::Error::from(e)
             ),
         )
     })

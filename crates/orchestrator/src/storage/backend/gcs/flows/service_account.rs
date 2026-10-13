@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use super::super::form::UrlEncodedForm;
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use super::response::read_two_legged;
 use super::service_key::ServiceKey;
 use super::{FlowProfile, FlowToken, TokenFlow, default_client, request_error};
@@ -41,7 +41,7 @@ pub struct ServiceAccountFlow {
 
 impl ServiceAccountFlow {
     pub fn from_json(json: &[u8], profile: &FlowProfile) -> Result<Arc<Self>, String> {
-        let file: ServiceAccountFile = go_json::unmarshal(json, credsfile::SERVICE_ACCOUNT)?;
+        let file: ServiceAccountFile = json::unmarshal(json, credsfile::SERVICE_ACCOUNT)?;
         let scopes = profile.scopes.clone();
         let non_default_universe = !file.universe_domain.is_empty() && file.universe_domain != DEFAULT_UNIVERSE_DOMAIN;
         let mode = match profile.self_signed_jwt || non_default_universe {

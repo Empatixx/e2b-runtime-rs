@@ -11,7 +11,6 @@ use tokio::time::Instant;
 use crate::app::AppState;
 use crate::cgroups::freeze::{FreezeMode, FreezeOptions, FreezeResult};
 use crate::util::error_response::ErrorResponse;
-use crate::util::go_json;
 use crate::util::query::parse_int;
 
 const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -79,7 +78,7 @@ pub async fn post_freeze(
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
     log_observations(&result);
-    let body = go_json::encode(&FreezeResultBody::from(&result)).unwrap_or_default();
+    let body = serde_json::to_string(&FreezeResultBody::from(&result)).unwrap_or_default();
     Ok((
         StatusCode::OK,
         [

@@ -25,7 +25,7 @@ struct Artifacts {
 }
 
 pub async fn gdb_mode(runner: &Runner, options: &GdbOptions, layout: &GdbLayout) -> Result<(), String> {
-    look_path("gdb").ok_or("gdb not found on PATH: exec: \"gdb\": executable file not found in $PATH")?;
+    look_path("gdb").ok_or("gdb not found on PATH")?;
     let artifacts = resolve_artifacts(runner, options, layout)?;
     let staged = layout
         .staging_versions_dir
@@ -249,9 +249,7 @@ async fn run_gdb(init_script: PathBuf, options: GdbOptions) -> Result<(), String
         .map_err(|e| e.to_string())?;
     match status.success() {
         true => Ok(()),
-        false => Err(status
-            .code()
-            .map_or_else(|| "signal: killed".to_owned(), |code| format!("exit status {code}"))),
+        false => Err(status.to_string()),
     }
 }
 

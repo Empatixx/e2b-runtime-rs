@@ -176,10 +176,7 @@ impl RegistrySession {
                 self.manifest(&child.digest, Some(&child.digest)).await?
             }
             schema1 if SCHEMA1.contains(&schema1) => {
-                return Err(RegistryError::Other(format!(
-                    "unsupported MediaType: {}",
-                    crate::go_strconv::quote(schema1)
-                )));
+                return Err(RegistryError::Other(format!("unsupported MediaType: {schema1:?}")));
             }
             _ => top,
         };
@@ -246,10 +243,9 @@ impl RegistrySession {
         let body = response.bytes().await.map_err(request_failure)?;
         if let Some(wanted) = digest.filter(|wanted| digest_of(&body) != *wanted) {
             return Err(RegistryError::Other(format!(
-                "manifest digest: {} does not match requested digest: {} for {}",
-                crate::go_strconv::quote(&digest_of(&body)),
-                crate::go_strconv::quote(wanted),
-                crate::go_strconv::quote(&self.reference.name())
+                "manifest digest: {:?} does not match requested digest: {wanted:?} for {:?}",
+                digest_of(&body),
+                self.reference.name()
             )));
         }
         let manifest: Manifest =

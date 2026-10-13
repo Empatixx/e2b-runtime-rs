@@ -14,7 +14,6 @@ use super::chrooted::metrics::ChrootMetrics;
 use super::failure::{internal, received};
 use super::spans::traced;
 use crate::go_path;
-use crate::go_strconv::quote;
 use crate::proto::volume_service_server::VolumeService;
 use crate::proto::{
     CreateDirRequest, CreateDirResponse, CreateFileRequest, CreateFileResponse, CreateVolumeRequest,
@@ -83,9 +82,9 @@ pub fn volume_path(requested: &str) -> String {
 
 fn parse_ids(volume: &VolumeInfo) -> Result<(Uuid, Uuid), ApiError> {
     let team_id = Uuid::parse_str(&volume.team_id)
-        .map_err(|_| ApiError::invalid_request(format!("invalid team ID {}", quote(&volume.team_id))))?;
+        .map_err(|_| ApiError::invalid_request(format!("invalid team ID {:?}", volume.team_id)))?;
     let volume_id = Uuid::parse_str(&volume.volume_id)
-        .map_err(|_| ApiError::invalid_request(format!("invalid volume ID {}", quote(&volume.volume_id))))?;
+        .map_err(|_| ApiError::invalid_request(format!("invalid volume ID {:?}", volume.volume_id)))?;
     Ok((team_id, volume_id))
 }
 

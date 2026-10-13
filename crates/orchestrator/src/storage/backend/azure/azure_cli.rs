@@ -63,14 +63,7 @@ fn local_expiry(text: &str) -> Result<std::time::SystemTime, String> {
         .ok()
         .and_then(|naive| Local.from_local_datetime(&naive).earliest())
         .map(|local| std::time::SystemTime::from(local.with_timezone(&Utc)))
-        .ok_or_else(|| {
-            format!(
-                "{CREDENTIAL}: error parsing token expiration time {}: parsing time {} as \"2006-01-02 15:04:05.999999\": cannot parse {} as \"2006\"",
-                crate::go_strconv::quote(text),
-                crate::go_strconv::quote(text),
-                crate::go_strconv::quote(text)
-            )
-        })
+        .ok_or_else(|| format!("{CREDENTIAL}: error parsing token expiration time {text:?}"))
 }
 
 #[async_trait::async_trait]
@@ -78,8 +71,8 @@ impl TokenSource for AzureCliCredential {
     async fn token_for(&self, request: &TokenRequest<'_>) -> Result<BearerToken, SourceError> {
         if !valid_scope(request.scope) {
             return Err(SourceError::Failed(format!(
-                "{CREDENTIAL}.GetToken(): invalid scope {}",
-                crate::go_strconv::quote(request.scope)
+                "{CREDENTIAL}.GetToken(): invalid scope {:?}",
+                request.scope
             )));
         }
         let tenant = self
@@ -131,7 +124,7 @@ mod tests {
         assert!(
             bearer(br#"{"accessToken":"t","expiresOn":"soon"}"#)
                 .unwrap_err()
-                .starts_with("AzureCLICredential: error parsing token expiration time \"soon\": parsing time \"soon\"")
+                .starts_with("AzureCLICredential: error parsing token expiration time \"soon\"")
         );
     }
 

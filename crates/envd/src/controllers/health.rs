@@ -6,7 +6,6 @@ use axum::response::{IntoResponse, Response};
 
 use crate::app::AppState;
 use crate::host::metrics::{Metrics, read_metrics};
-use crate::util::go_json;
 
 pub async fn health() -> impl IntoResponse {
     (
@@ -26,7 +25,7 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
     });
     match metrics
         .map_err(|e| e.to_string())
-        .and_then(|metrics| go_json::encode(&metrics).map_err(|e| e.to_string()))
+        .and_then(|metrics| serde_json::to_string(&metrics).map_err(|e| e.to_string()))
     {
         Ok(body) => (StatusCode::OK, headers, body).into_response(),
         Err(e) => {

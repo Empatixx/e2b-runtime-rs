@@ -101,16 +101,11 @@ impl DockerHubProxy {
 fn azure_proxy(url: String) -> Result<DockerHubProxy, String> {
     if url.contains("://") {
         return Err(format!(
-            "invalid Azure remote repository URL {}: want registry.host/repository without a scheme",
-            crate::go_strconv::quote(&url)
+            "invalid Azure remote repository URL {url:?}: want registry.host/repository without a scheme"
         ));
     }
-    let repository = Repository::parse_strict(&url).map_err(|e| {
-        format!(
-            "invalid Azure remote repository URL {} (want registry.host/repository): {e}",
-            crate::go_strconv::quote(&url)
-        )
-    })?;
+    let repository = Repository::parse_strict(&url)
+        .map_err(|e| format!("invalid Azure remote repository URL {url:?} (want registry.host/repository): {e}"))?;
     let credential = DefaultAzureCredential::new()
         .map(Arc::new)
         .map_err(|e| format!("failed to create Azure default credential: {e}"))?;
@@ -259,9 +254,8 @@ impl Puller {
         match config.architecture == self.platform.architecture {
             true => Ok(config),
             false => Err(format!(
-                "image architecture {} does not match expected {}",
-                crate::go_strconv::quote(&config.architecture),
-                crate::go_strconv::quote(&self.platform.architecture)
+                "image architecture {:?} does not match expected {:?}",
+                config.architecture, self.platform.architecture
             )),
         }
     }

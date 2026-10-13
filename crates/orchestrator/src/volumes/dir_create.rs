@@ -7,7 +7,6 @@ use super::failure::{internal, process_error};
 use super::parents::ensure_dirs;
 use super::service::{DEFAULT_DIR_MODE, DEFAULT_GROUP_ID, DEFAULT_OWNER_ID, VolumeServer};
 use crate::go_path;
-use crate::go_strconv::quote;
 use crate::proto::{CreateDirRequest, CreateDirResponse};
 
 const CREATE_FAILURE: &str = "failed to create directory";
@@ -57,7 +56,7 @@ fn create_directory(fs: &Chrooted, path: &str, mode: u32, create_parents: bool) 
 
 fn existing_directory(fs: &Chrooted, path: &str, mkdir_error: &PathError) -> Result<(), Status> {
     match fs.stat(path) {
-        Err(e) => Err(internal(format!("failed to verify existing path {}: {e}", quote(path)))),
+        Err(e) => Err(internal(format!("failed to verify existing path {path:?}: {e}"))),
         Ok(info) if info.is_dir() => Ok(()),
         Ok(_) => Err(process_error(CREATE_FAILURE, mkdir_error)),
     }

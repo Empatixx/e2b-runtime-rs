@@ -101,8 +101,7 @@ pub fn target_arch(value: Option<&str>) -> String {
         Some("arm64" | "aarch64") => "arm64".to_owned(),
         Some(other) => {
             eprintln!(
-                "WARNING: unrecognized TARGET_ARCH={}, falling back to {}",
-                crate::go_strconv::quote(other),
+                "WARNING: unrecognized TARGET_ARCH={other:?}, falling back to {}",
                 host_arch()
             );
             host_arch().to_owned()

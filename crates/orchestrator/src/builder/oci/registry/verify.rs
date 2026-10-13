@@ -37,10 +37,8 @@ impl Verified {
                 self.read, self.expected_size
             ))),
             (true, false) => Some(io::Error::other(format!(
-                "error verifying sha256 checksum after reading {} bytes; got {}, want {}",
-                self.read,
-                crate::go_strconv::quote(&got),
-                crate::go_strconv::quote(&self.expected_digest)
+                "error verifying sha256 checksum after reading {} bytes; got {got:?}, want {:?}",
+                self.read, self.expected_digest
             ))),
             (true, true) => None,
         }

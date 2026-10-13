@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use super::identity::Identity;
 use super::scope::{Scope, ScopeError};
 use super::{Cache, LOOKUP_STAT_BUDGET};
-use crate::go_os::path_error;
+use crate::fs::path_error;
 
 const STALLED: &str = "envd binary source stat stalled";
 
@@ -99,11 +99,7 @@ impl LookupError {
 
     pub fn for_source(self, source: &Path) -> Self {
         Self {
-            message: format!(
-                "stat envd binary {}: {}",
-                crate::go_strconv::quote(&source.display().to_string()),
-                self.message
-            ),
+            message: format!("stat envd binary {:?}: {}", source.display(), self.message),
             kind: self.kind,
         }
     }

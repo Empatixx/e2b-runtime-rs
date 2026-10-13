@@ -6,7 +6,6 @@ use super::chrooted::error::PathError;
 use super::failure::internal;
 use super::service::VolumeServer;
 use crate::go_path;
-use crate::go_strconv::quote;
 use crate::proto::{ListDirRequest, ListDirResponse, VolumeDirectoryItem};
 
 const MIN_DEPTH: u32 = 1;
@@ -30,13 +29,10 @@ impl VolumeServer {
         list_recursive(&confined.fs, &confined.path, depth)
             .map(|files| ListDirResponse { files })
             .map_err(|error| match error.cause.is_not_found() {
-                true => ApiError::path_not_found(format!("failed to read: {} not found.", quote(&request.path)))
-                    .into_status(),
-                false => internal(format!(
-                    "failed to read directory {}: {}",
-                    quote(&confined.path),
-                    error.text
-                )),
+                true => {
+                    ApiError::path_not_found(format!("failed to read: {:?} not found.", request.path)).into_status()
+                }
+                false => internal(format!("failed to read directory {:?}: {}", confined.path, error.text)),
             })
     }
 }
@@ -47,7 +43,7 @@ fn list_recursive(fs: &Chrooted, path: &str, depth: u32) -> Result<Vec<VolumeDir
     }
     fs.read_dir(path)
         .map_err(|cause| ListError {
-            text: format!("failed to read directory {}: {cause}", quote(path)),
+            text: format!("failed to read directory {path:?}: {cause}"),
             cause,
         })?
         .iter()

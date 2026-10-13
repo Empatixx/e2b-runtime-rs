@@ -8,7 +8,7 @@ use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::super::credsfile;
-use super::super::go_json::{self, Target};
+use super::super::json::{self, Target};
 use super::{FlowToken, TokenFlow};
 use crate::go_url::escape::{Mode, escape};
 
@@ -171,8 +171,8 @@ impl ComputeFlow {
         match status {
             200 => Ok(body),
             404 => Err(format!(
-                "metadata: GCE metadata {} not defined",
-                crate::go_strconv::quote(suffix.trim_start_matches('/'))
+                "metadata: GCE metadata {:?} not defined",
+                suffix.trim_start_matches('/')
             )),
             code => Err(format!("compute: Received {code} `{body}`")),
         }
@@ -190,7 +190,7 @@ impl TokenFlow for ComputeFlow {
             .get(&self.suffix())
             .await
             .map_err(|e| format!("{}{e}", self.messages.fetch_prefix))?;
-        let parsed: MetadataToken = go_json::decode(body.as_bytes(), *self.messages.target)
+        let parsed: MetadataToken = json::decode(body.as_bytes(), *self.messages.target)
             .map_err(|e| format!("{}{e}", self.messages.invalid_json_prefix))?;
         if parsed.expires_in == 0 || parsed.access_token.is_empty() {
             return Err(self.messages.incomplete.to_owned());

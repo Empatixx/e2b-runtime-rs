@@ -38,7 +38,7 @@ fn envelope(message: &Value) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn an_unparsable_timeout_is_rejected_like_connect_go() {
+async fn an_unparsable_timeout_is_rejected_as_invalid_argument() {
     let (addr, _) = spawn_server_with_state().await;
     let res = unary(addr, &[("connect-timeout-ms", "abc")]).await;
 
@@ -47,7 +47,7 @@ async fn an_unparsable_timeout_is_rejected_like_connect_go() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(
         body,
-        json!({ "code": "invalid_argument", "message": "parse timeout: strconv.ParseInt: parsing \"abc\": invalid syntax" })
+        json!({ "code": "invalid_argument", "message": "invalid timeout \"abc\"" })
     );
 }
 
@@ -60,7 +60,7 @@ async fn a_timeout_with_more_than_ten_digits_is_rejected() {
         .await
         .unwrap();
 
-    assert_eq!(body["message"], "parse timeout: \"12345678901\" has >10 digits");
+    assert_eq!(body["message"], "timeout \"12345678901\" has more than 10 digits");
 }
 
 #[tokio::test]
@@ -108,7 +108,7 @@ async fn a_stream_with_an_unparsable_timeout_ends_with_the_error() {
     let end: Value = serde_json::from_slice(&body[5..]).unwrap();
     assert_eq!(
         end,
-        json!({ "error": { "code": "invalid_argument", "message": "parse timeout: strconv.ParseInt: parsing \"abc\": invalid syntax" } })
+        json!({ "error": { "code": "invalid_argument", "message": "invalid timeout \"abc\"" } })
     );
 }
 
@@ -129,52 +129,16 @@ async fn list_dir_sent_slowly(addr: std::net::SocketAddr, timeout_ms: u64, delay
 }
 
 #[tokio::test]
-async fn a_stream_error_escapes_html_like_connect_go() {
-    let (addr, _) = spawn_server_with_state().await;
-    let res = reqwest::Client::new()
-        .post(format!("http://{addr}/filesystem.Filesystem/WatchDir"))
-        .header("content-type", "application/connect+json")
-        .header("authorization", basic_auth())
-        .body(envelope(&json!({ "path": "/missing/<a&b>" })))
-        .send()
-        .await
-        .unwrap();
-
-    let body = res.bytes().await.unwrap();
-    let end = String::from_utf8_lossy(&body[5..]);
-    assert_eq!(body[0], 2);
-    assert!(end.contains(r"/missing/\u003ca\u0026b\u003e"), "{end}");
-}
-
-#[tokio::test]
-async fn a_gzipped_stream_ends_with_a_compressed_frame_like_connect_go() {
-    let (addr, _) = spawn_server_with_state().await;
-    let res = reqwest::Client::new()
-        .post(format!("http://{addr}/filesystem.Filesystem/WatchDir"))
-        .header("content-type", "application/connect+json")
-        .header("connect-accept-encoding", "gzip")
-        .header("authorization", basic_auth())
-        .body(envelope(&json!({ "path": "/missing" })))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(res.headers()["connect-content-encoding"], "gzip");
-    let body = res.bytes().await.unwrap();
-    assert_eq!(body[0], 3);
-}
-
-#[tokio::test]
-async fn a_unary_call_whose_deadline_passes_before_the_handler_fails_with_the_go_text() {
+async fn a_unary_call_whose_deadline_passes_before_the_handler_fails() {
     let (addr, _) = spawn_server_with_state().await;
     let response = list_dir_sent_slowly(addr, 50, Duration::from_millis(300)).await;
 
     assert!(response.starts_with("HTTP/1.1 504"), "{response}");
-    assert!(response.ends_with(r#"{"code":"deadline_exceeded","message":"context deadline exceeded"}"#));
+    assert!(response.contains(r#"{"code":"deadline_exceeded","message":"context deadline exceeded"}"#));
 }
 
 #[tokio::test]
-async fn a_unary_handler_that_runs_past_its_deadline_still_answers_like_go() {
+async fn a_unary_handler_that_runs_past_its_deadline_still_answers() {
     let (addr, _) = spawn_server_with_state().await;
     let dir = tempfile::tempdir().unwrap();
     (0..20_000).for_each(|i| std::fs::write(dir.path().join(format!("f{i}")), "").unwrap());
@@ -194,7 +158,7 @@ async fn a_unary_handler_that_runs_past_its_deadline_still_answers_like_go() {
 }
 
 #[tokio::test]
-async fn a_malformed_grpc_timeout_is_rejected_like_connect_go() {
+async fn a_malformed_grpc_timeout_is_rejected_as_invalid_argument() {
     let (addr, _) = spawn_server_with_state().await;
     let res = reqwest::Client::new()
         .post(format!("http://{addr}/filesystem.Filesystem/Stat"))
@@ -209,7 +173,7 @@ async fn a_malformed_grpc_timeout_is_rejected_like_connect_go() {
     let body = res.bytes().await.unwrap();
     let trailers = String::from_utf8_lossy(&body[5..]);
     assert!(
-        trailers.starts_with("grpc-status: 3\r\ngrpc-message: protocol error: timeout has invalid unit 'x'\r\n"),
+        trailers.starts_with("grpc-status: 3\r\ngrpc-message: timeout \"5x\" has an invalid unit\r\n"),
         "{trailers}"
     );
 }

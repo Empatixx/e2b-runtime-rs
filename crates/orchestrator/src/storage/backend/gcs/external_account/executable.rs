@@ -3,9 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use super::config::{CredentialSource, ExternalAccountFile};
-use super::exit_status::{exit_code, exit_text, start_failure};
 
 const EMAIL_PREFIX: &str = "https://iamcredentials";
 const EMAIL_PATH: &str = "/v1/projects/-/serviceAccounts/";
@@ -138,12 +137,12 @@ impl ExecutableSubject {
         let output = command
             .output()
             .await
-            .map_err(|e| format!("credentials: executable command failed: {}", start_failure(program, &e)))?;
+            .map_err(|e| format!("credentials: executable command failed: {program}: {e}"))?;
         if !output.status.success() {
             return Err(format!(
                 "credentials: executable command failed with exit code {}: {}",
-                exit_code(output.status),
-                exit_text(output.status)
+                output.status.code().unwrap_or(-1),
+                output.status
             ));
         }
         let stdout = output.stdout.trim_ascii();
@@ -154,20 +153,13 @@ impl ExecutableSubject {
     }
 
     fn parse(&self, response: &[u8], source: &str, now: i64) -> Result<String, ParseError> {
-        let parsed: Response = go_json::unmarshal(response, credsfile::EXECUTABLE_RESPONSE).map_err(|_| {
+        let parsed: Response = json::unmarshal(response, credsfile::EXECUTABLE_RESPONSE).map_err(|_| {
             ParseError::Reportable(format!(
-                "credentials: unable to parse {}: {}",
-                crate::go_strconv::quote(source),
+                "credentials: unable to parse {source:?}: {}",
                 String::from_utf8_lossy(response)
             ))
         })?;
-        let missing = |field: &str| {
-            ParseError::Reportable(format!(
-                "credentials: {} missing {} field",
-                crate::go_strconv::quote(source),
-                crate::go_strconv::quote(field)
-            ))
-        };
+        let missing = |field: &str| ParseError::Reportable(format!("credentials: {source:?} missing {field:?} field"));
         if parsed.version == 0 {
             return Err(missing("version"));
         }
@@ -443,7 +435,7 @@ mod tests {
         subject.command = format!("sh {}", failing.display());
         assert_eq!(
             subject.run().await.unwrap_err(),
-            "credentials: executable command failed with exit code 3: exit status 3"
+            "credentials: executable command failed with exit code 3: exit status: 3"
         );
     }
 
@@ -507,7 +499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failing_commands_read_like_go_exec_errors() {
+    async fn failing_commands_name_the_exit_code_or_start_error() {
         let (exits, _keep_exits) = script_subject("exit 3");
         let (killed, _keep_killed) = script_subject("kill -9 $$");
         let mut missing = subject("");
@@ -515,15 +507,18 @@ mod tests {
 
         assert_eq!(
             exits.run().await.unwrap_err(),
-            "credentials: executable command failed with exit code 3: exit status 3"
+            "credentials: executable command failed with exit code 3: exit status: 3"
         );
         assert_eq!(
             killed.run().await.unwrap_err(),
-            "credentials: executable command failed with exit code -1: signal: killed"
+            "credentials: executable command failed with exit code -1: signal: 9 (SIGKILL)"
         );
-        assert_eq!(
-            missing.run().await.unwrap_err(),
-            "credentials: executable command failed: exec: \"no-such-binary-e2b\": executable file not found in $PATH"
+        assert!(
+            missing
+                .run()
+                .await
+                .unwrap_err()
+                .starts_with("credentials: executable command failed: no-such-binary-e2b: ")
         );
     }
 

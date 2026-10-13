@@ -245,9 +245,7 @@ fn go_arch(arch: &str) -> &str {
 }
 
 fn reject_unknown_fields(document: &Value) -> Result<(), String> {
-    let object = document
-        .as_object()
-        .ok_or("invalid CPU template: json: cannot unmarshal array into Go value of type cputemplate.Template")?;
+    let object = document.as_object().ok_or("invalid CPU template: not a JSON object")?;
     check_fields(object, &TEMPLATE_FIELDS)?;
     entries(document, "cpuid_modifiers").try_for_each(|leaf| {
         check_object(leaf, &CPUID_LEAF_FIELDS)?;
@@ -273,7 +271,7 @@ fn check_fields(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> Re
         .keys()
         .find(|key| !allowed.contains(&key.as_str()))
         .map_or(Ok(()), |key| {
-            Err(format!("invalid CPU template: json: unknown field \"{key}\""))
+            Err(format!("invalid CPU template: unknown field {key:?}"))
         })
 }
 

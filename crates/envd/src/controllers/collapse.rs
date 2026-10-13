@@ -5,7 +5,6 @@ use tokio::time::Instant;
 
 use crate::host::collapse::{CollapseStats, collapse_self};
 use crate::util::error_response::ErrorResponse;
-use crate::util::go_json;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +32,7 @@ pub async fn post_collapse() -> Result<Response, ErrorResponse> {
             .build()
     })?;
     log(&stats, elapsed_ms);
-    let body = go_json::encode(&CollapseResult {
+    let body = serde_json::to_string(&CollapseResult {
         already_huge: stats.already_huge,
         chunks: stats.chunks,
         collapsed: stats.collapsed,

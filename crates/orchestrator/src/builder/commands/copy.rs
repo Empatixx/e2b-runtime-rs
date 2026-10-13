@@ -48,7 +48,7 @@ async fn download(run: &CommandRun<'_>, hash: &str) -> Result<NamedTempFile, Str
     run.files
         .open_blob(&path)
         .map_err(|e| format!("failed to open files object from storage: {e}"))?;
-    let local = crate::go_os::create_temp("layer-file-", ".tar")
+    let local = crate::fs::create_temp("layer-file-", ".tar")
         .map_err(|e| format!("failed to create temporary file for layer tar: {e}"))?;
     run.until_cancelled(run.files.write_to(&path, local.path()), REQUEST_CANCELLED)
         .await

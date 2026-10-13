@@ -50,7 +50,7 @@ impl<'a> Cursor<'a> {
             .position(|c| c == b'.' || c.is_ascii_digit())
             .unwrap_or(self.rest.len());
         if end == 0 {
-            return Err(format!("time: missing unit in duration {}", quote(original)));
+            return Err(format!("time: missing unit in duration {original:?}"));
         }
         let name = &self.rest[..end];
         self.rest = &self.rest[end..];
@@ -61,21 +61,13 @@ impl<'a> Cursor<'a> {
             "s" => Ok(1_000_000_000),
             "m" => Ok(60_000_000_000),
             "h" => Ok(3_600_000_000_000),
-            _ => Err(format!(
-                "time: unknown unit {} in duration {}",
-                quote(name),
-                quote(original)
-            )),
+            _ => Err(format!("time: unknown unit {name:?} in duration {original:?}")),
         }
     }
 }
 
-fn quote(text: &str) -> String {
-    crate::go_strconv::quote(text)
-}
-
 fn invalid(original: &str) -> String {
-    format!("time: invalid duration {}", quote(original))
+    format!("time: invalid duration {original:?}")
 }
 
 fn component(cursor: &mut Cursor<'_>, original: &str) -> Result<u64, String> {
@@ -98,7 +90,7 @@ fn component(cursor: &mut Cursor<'_>, original: &str) -> Result<u64, String> {
         return Err(invalid(original));
     }
     let unit = cursor.unit(original)?;
-    let overflow = || format!("time: invalid duration {}", quote(original));
+    let overflow = || format!("time: invalid duration {original:?}");
     let mut value = whole
         .checked_mul(unit)
         .filter(|value| *value <= LIMIT)

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use super::config::{CredentialSource, ExternalAccountFile};
 use crate::go_url::GoUrl;
 use crate::go_url::escape::{Mode, escape};
@@ -187,7 +187,7 @@ struct SecurityCredentials {
 }
 
 fn parse_keys(body: &str) -> Result<AwsKeys, String> {
-    let parsed: SecurityCredentials = go_json::unmarshal(body.as_bytes(), credsfile::AWS_SECURITY_CREDENTIALS)?;
+    let parsed: SecurityCredentials = json::unmarshal(body.as_bytes(), credsfile::AWS_SECURITY_CREDENTIALS)?;
     Ok(AwsKeys {
         access_key_id: parsed.access_key_id,
         secret_access_key: parsed.secret_access_key,

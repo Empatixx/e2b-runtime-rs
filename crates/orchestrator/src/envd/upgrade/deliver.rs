@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio_util::io::ReaderStream;
 
 use crate::envd::body::error_body;
-use crate::go_os::{path_error, reason};
+use crate::fs::path_error;
 
 const TOKEN_HEADER: &str = "x-access-token";
 const GUEST_PATH_HEADER: &str = "x-envd-upgrade-bin";
@@ -69,12 +69,9 @@ async fn exchange(
     length: u64,
     guest_path: &str,
 ) -> Result<bool, DeliveryFailure> {
-    let stream = TcpStream::connect(address).await.map_err(|e| {
-        DeliveryFailure::failed(format!(
-            "deliver upgrade to envd: Post \"http://{address}/upgrade\": dial tcp {address}: connect: {}",
-            reason(&e)
-        ))
-    })?;
+    let stream = TcpStream::connect(address)
+        .await
+        .map_err(|e| DeliveryFailure::failed(format!("deliver upgrade to envd at {address}: {e}")))?;
     let Ok((mut sender, connection)) = http1::handshake(TokioIo::new(stream)).await else {
         return Ok(true);
     };
@@ -160,7 +157,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(failure.message.starts_with("deliver upgrade to envd: "), "{failure}");
+        assert!(failure.message.starts_with("deliver upgrade to envd at "), "{failure}");
         assert!(!failure.source_missing);
     }
 

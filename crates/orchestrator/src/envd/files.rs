@@ -5,7 +5,7 @@ use std::time::Duration;
 use reqwest::multipart::{Form, Part};
 use tokio_util::io::ReaderStream;
 
-use crate::go_os::path_error;
+use crate::fs::path_error;
 use crate::go_url::escape::{Mode, escape};
 
 const OCTET_STREAM: &str = "application/octet-stream";

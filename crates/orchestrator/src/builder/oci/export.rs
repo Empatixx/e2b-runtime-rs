@@ -13,8 +13,8 @@ use super::pull::PulledImage;
 use super::registry::{Descriptor, RegistrySession};
 use super::untar::untar;
 use crate::builder::logs::ScopedLog;
-use crate::go_humanize::bytes;
 use crate::proto::LogLevel;
+use bytesize::ByteSize;
 
 const LAYER_DIR_MODE: u32 = 0o755;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -62,7 +62,11 @@ pub async fn create_export(
         .map(|(index, layer)| {
             log.push(
                 LogLevel::Info,
-                format!("Uncompressing layer {} {}", layer.digest, bytes(layer.size)),
+                format!(
+                    "Uncompressing layer {} {}",
+                    layer.digest,
+                    ByteSize::b(layer.size).display().si()
+                ),
             );
             let layer_path = path.join(format!("layer-{index}-{}", layer.digest.replace(':', "-")));
             let task = tracker.spawn(extract(index, layer.source, layer_path.clone(), cancel.clone()));

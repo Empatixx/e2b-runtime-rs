@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::num::{IntErrorKind, NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use tracing_subscriber::filter::LevelFilter;
 
-use crate::go_strconv::{parse_bool, quote};
+use crate::go_strconv::parse_bool;
 
 pub const LOG_LEVEL_VARIABLE: &str = "NFS_PROXY_LOG_LEVEL";
 const DEFAULT_HANDLE_CACHE_LIMIT: i64 = 16384;
@@ -31,7 +31,7 @@ impl NfsLogLevel {
             "info" => Ok(Self::Info),
             "debug" => Ok(Self::Debug),
             "trace" => Ok(Self::Trace),
-            other => Err(format!("invalid log level {}", quote(other))),
+            other => Err(format!("invalid log level {other:?}")),
         }
     }
 
@@ -82,31 +82,14 @@ impl NfsProxySettings {
     pub fn from_vars(vars: &HashMap<String, String>) -> Result<Self, String> {
         let defaults = Self::default();
         Ok(Self {
-            logging: flag(vars, "NFS_PROXY_LOGGING", "NFSProxyLogging", defaults.logging)?,
-            tracing: flag(vars, "NFS_PROXY_TRACING", "NFSProxyTracing", defaults.tracing)?,
-            metrics: flag(vars, "NFS_PROXY_METRICS", "NFSProxyMetrics", defaults.metrics)?,
-            record_handle_calls: flag(
-                vars,
-                "NFS_PROXY_RECORD_HANDLE_CALLS",
-                "NFSProxyRecordHandleCalls",
-                defaults.record_handle_calls,
-            )?,
-            record_stat_calls: flag(
-                vars,
-                "NFS_PROXY_RECORD_STAT_CALLS",
-                "NFSProxyRecordStatCalls",
-                defaults.record_stat_calls,
-            )?,
-            handle_cache_limit: integer(
-                vars,
-                "NFS_PROXY_HANDLE_CACHE_LIMIT",
-                "NFSProxyHandleCacheLimit",
-                defaults.handle_cache_limit,
-            )?,
+            logging: flag(vars, "NFS_PROXY_LOGGING", defaults.logging)?,
+            tracing: flag(vars, "NFS_PROXY_TRACING", defaults.tracing)?,
+            metrics: flag(vars, "NFS_PROXY_METRICS", defaults.metrics)?,
+            record_handle_calls: flag(vars, "NFS_PROXY_RECORD_HANDLE_CALLS", defaults.record_handle_calls)?,
+            record_stat_calls: flag(vars, "NFS_PROXY_RECORD_STAT_CALLS", defaults.record_stat_calls)?,
+            handle_cache_limit: integer(vars, "NFS_PROXY_HANDLE_CACHE_LIMIT", defaults.handle_cache_limit)?,
             log_level: set(vars, LOG_LEVEL_VARIABLE).map_or(Ok(defaults.log_level), |text| {
-                NfsLogLevel::parse(text).map_err(|e| {
-                    format!("env: parse error on field \"NFSProxyLogLevel\" of type \"nfs.LogLevel\": {e}")
-                })
+                NfsLogLevel::parse(text).map_err(|e| format!("{LOG_LEVEL_VARIABLE}: {e}"))
             })?,
         })
     }
@@ -132,25 +115,17 @@ fn set<'a>(vars: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
     vars.get(name).map(String::as_str).filter(|value| !value.is_empty())
 }
 
-fn flag(vars: &HashMap<String, String>, name: &str, field: &str, default: bool) -> Result<bool, String> {
+fn flag(vars: &HashMap<String, String>, name: &str, default: bool) -> Result<bool, String> {
     set(vars, name).map_or(Ok(default), |value| {
-        parse_bool(value).map_err(|e| format!("env: parse error on field {} of type \"bool\": {e}", quote(field)))
+        parse_bool(value).map_err(|e| format!("{name}: {e}"))
     })
 }
 
-fn integer(vars: &HashMap<String, String>, name: &str, field: &str, default: i64) -> Result<i64, String> {
+fn integer(vars: &HashMap<String, String>, name: &str, default: i64) -> Result<i64, String> {
     set(vars, name).map_or(Ok(default), |value| {
-        value.parse::<i64>().map_err(|e| {
-            let reason = match e.kind() {
-                IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => "value out of range",
-                _ => "invalid syntax",
-            };
-            format!(
-                "env: parse error on field {} of type \"int\": strconv.ParseInt: parsing {}: {reason}",
-                quote(field),
-                quote(value)
-            )
-        })
+        value
+            .parse::<i64>()
+            .map_err(|e| format!("{name}: invalid integer {value:?}: {e}"))
     })
 }
 
@@ -206,10 +181,7 @@ mod tests {
         assert_eq!(level(""), Ok(NfsLogLevel::Info));
         assert_eq!(
             level("Loud"),
-            Err(
-                "env: parse error on field \"NFSProxyLogLevel\" of type \"nfs.LogLevel\": invalid log level \"loud\""
-                    .to_owned()
-            )
+            Err("NFS_PROXY_LOG_LEVEL: invalid log level \"loud\"".to_owned())
         );
         assert_eq!(NfsLogLevel::Fatal.filter(), LevelFilter::ERROR);
     }
@@ -230,14 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn bad_values_fail_like_the_go_env_parser() {
+    fn bad_values_name_the_variable() {
         assert_eq!(
             NfsProxySettings::from_vars(&vars(&[("NFS_PROXY_HANDLE_CACHE_LIMIT", "lots")])).unwrap_err(),
-            "env: parse error on field \"NFSProxyHandleCacheLimit\" of type \"int\": strconv.ParseInt: parsing \"lots\": invalid syntax"
+            "NFS_PROXY_HANDLE_CACHE_LIMIT: invalid integer \"lots\": invalid digit found in string"
         );
         assert_eq!(
             NfsProxySettings::from_vars(&vars(&[("NFS_PROXY_METRICS", "yes")])).unwrap_err(),
-            "env: parse error on field \"NFSProxyMetrics\" of type \"bool\": strconv.ParseBool: parsing \"yes\": invalid syntax"
+            "NFS_PROXY_METRICS: invalid boolean \"yes\""
         );
     }
 }

@@ -7,6 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }
 bytes = "1"
+bytesize = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait = "0.1"
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls", "credentials-process", "sso"] }

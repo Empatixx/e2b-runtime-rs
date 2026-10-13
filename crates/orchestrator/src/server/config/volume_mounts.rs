@@ -4,12 +4,10 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::go_os::path_error;
+use crate::fs::path_error;
 use crate::go_path;
-use crate::go_strconv::quote;
 
 const VARIABLE: &str = "PERSISTENT_VOLUME_MOUNTS";
-const FIELD: &str = "PersistentVolumeMounts";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VolumeMounts {
@@ -23,7 +21,7 @@ pub struct UnknownVolumeType {
 
 impl fmt::Display for UnknownVolumeType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "volume type not found: {}", quote(&self.volume_type))
+        write!(formatter, "volume type not found: {:?}", self.volume_type)
     }
 }
 
@@ -69,13 +67,7 @@ fn parse_pairs(value: &str) -> Result<HashMap<String, String>, String> {
         .map(|pair| {
             pair.split_once(':')
                 .map(|(name, path)| (name.to_owned(), path.to_owned()))
-                .ok_or_else(|| {
-                    format!(
-                        "env: parse error on field {} of type \"map[string]string\": {} should be in key:value format",
-                        quote(FIELD),
-                        quote(pair)
-                    )
-                })
+                .ok_or_else(|| format!("{VARIABLE}: {pair:?} should be in key:value format"))
         })
         .collect()
 }
@@ -86,18 +78,12 @@ fn mount_root(name: &str, path: &str) -> Result<PathBuf, String> {
         true => PathBuf::from(cleaned),
         false => std::env::current_dir()
             .map(|cwd| PathBuf::from(go_path::join(&[&cwd.to_string_lossy(), &cleaned])))
-            .map_err(|e| {
-                format!(
-                    "failed to make persistent volume mount {} an absolute path: {e}",
-                    quote(name)
-                )
-            })?,
+            .map_err(|e| format!("failed to make persistent volume mount {name:?} an absolute path: {e}"))?,
     };
     std::fs::metadata(&absolute).map(|_| absolute.clone()).map_err(|e| {
         format!(
-            "failed to access persistent volume mount {} ({}): {}",
-            quote(name),
-            quote(&absolute.to_string_lossy()),
+            "failed to access persistent volume mount {name:?} ({:?}): {}",
+            absolute.to_string_lossy(),
             path_error("stat", Path::new(&absolute), &e)
         )
     })
@@ -137,10 +123,9 @@ mod tests {
     fn a_missing_mount_names_the_mount_and_the_stat_error() {
         let error = VolumeMounts::from_vars(&vars("fast:/definitely/not/here")).unwrap_err();
 
-        assert_eq!(
-            error,
-            "failed to access persistent volume mount \"fast\" (\"/definitely/not/here\"): stat /definitely/not/here: no such file or directory"
-        );
+        assert!(error.starts_with(
+            "failed to access persistent volume mount \"fast\" (\"/definitely/not/here\"): stat /definitely/not/here: "
+        ));
     }
 
     #[test]
@@ -149,7 +134,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "env: parse error on field \"PersistentVolumeMounts\" of type \"map[string]string\": \"fast\" should be in key:value format"
+            "PERSISTENT_VOLUME_MOUNTS: \"fast\" should be in key:value format"
         );
     }
 

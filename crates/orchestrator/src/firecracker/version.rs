@@ -32,12 +32,7 @@ impl FirecrackerVersion {
 }
 
 pub fn parse_firecracker_version(version: &str) -> Result<FirecrackerVersion, String> {
-    let invalid = || {
-        format!(
-            "invalid firecracker version {}: Invalid Semantic Version",
-            crate::go_strconv::quote(version)
-        )
-    };
+    let invalid = || format!("invalid firecracker version {version:?}: Invalid Semantic Version");
     match version.split_once('_') {
         Some((release, _)) => strict_semver(release)
             .map(|_| FirecrackerVersion { e2b_release: None })

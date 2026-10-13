@@ -1,6 +1,5 @@
 use super::chrooted::Chrooted;
 use crate::go_path;
-use crate::go_strconv::quote;
 use crate::volumes::service::DEFAULT_DIR_MODE;
 
 pub fn ensure_dirs(fs: &Chrooted, dir_path: &str, uid: u32, gid: u32) -> Result<(), String> {
@@ -27,7 +26,7 @@ fn missing_directories(fs: &Chrooted, dir_path: &str) -> Result<Vec<String>, Str
             Ok(_) => return Ok(missing),
             Err(e) if e.is_not_found() => {}
             Err(e) => {
-                return Err(format!("failed to stat parent directory {}: {e}", quote(&current)));
+                return Err(format!("failed to stat parent directory {current:?}: {e}"));
             }
         }
         missing.push(current.clone());
@@ -41,9 +40,9 @@ fn missing_directories(fs: &Chrooted, dir_path: &str) -> Result<Vec<String>, Str
 
 fn own_created_directory(fs: &Chrooted, path: &str, uid: u32, gid: u32) -> Result<(), String> {
     fs.chmod(path, DEFAULT_DIR_MODE)
-        .map_err(|e| format!("failed chmod for created parent directory {}: {e}", quote(path)))?;
+        .map_err(|e| format!("failed chmod for created parent directory {path:?}: {e}"))?;
     fs.chown(path, Some(uid), Some(gid))
-        .map_err(|e| format!("failed chown for created parent directory {}: {e}", quote(path)))
+        .map_err(|e| format!("failed chown for created parent directory {path:?}: {e}"))
 }
 
 #[cfg(test)]

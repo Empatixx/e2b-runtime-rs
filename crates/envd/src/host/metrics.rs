@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::oom::OomKill;
 use crate::cpus::State;
-use crate::util::go_json;
+use crate::util::json;
 
 const KIB: u64 = 1024;
 
@@ -13,7 +13,7 @@ const KIB: u64 = 1024;
 pub struct Metrics {
     pub ts: i64,
     pub cpu_count: u32,
-    #[serde(serialize_with = "go_json::float32")]
+    #[serde(serialize_with = "json::float32")]
     pub cpu_used_pct: f32,
     pub cpu_possible: u32,
     pub cpu_target: u32,
@@ -256,14 +256,18 @@ mod tests {
             oom_kills: None,
         };
         assert_eq!(
-            go_json::encode(&metrics).unwrap(),
-            "{\"ts\":1,\"cpu_count\":2,\"cpu_used_pct\":0,\"cpu_possible\":8,\"cpu_target\":4,\"cpu_target_attempts\":2,\"cpu_write_pending_ms\":1500,\"mem_total\":3,\"mem_used\":4,\"mem_cache\":5,\"disk_used\":6,\"disk_total\":7}\n"
+            serde_json::to_string(&metrics).unwrap(),
+            "{\"ts\":1,\"cpu_count\":2,\"cpu_used_pct\":0,\"cpu_possible\":8,\"cpu_target\":4,\"cpu_target_attempts\":2,\"cpu_write_pending_ms\":1500,\"mem_total\":3,\"mem_used\":4,\"mem_cache\":5,\"disk_used\":6,\"disk_total\":7}"
         );
         let with_kills = Metrics {
             oom_kills: Some(Vec::new()),
             ..metrics
         };
-        assert!(go_json::encode(&with_kills).unwrap().ends_with(",\"oom_kills\":[]}\n"));
+        assert!(
+            serde_json::to_string(&with_kills)
+                .unwrap()
+                .ends_with(",\"oom_kills\":[]}")
+        );
     }
 
     #[test]

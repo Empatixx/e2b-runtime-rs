@@ -47,7 +47,7 @@ async fn snapfile_exists(template: &Template) -> Result<bool, SourceError> {
     match tokio::fs::metadata(&path).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(SourceError::Failed(crate::go_os::path_error("stat", &path, &e))),
+        Err(e) => Err(SourceError::Failed(crate::fs::path_error("stat", &path, &e))),
     }
 }
 
@@ -66,9 +66,9 @@ fn open_error(path: &Path, error: &std::io::Error) -> SourceError {
     match error.kind() {
         std::io::ErrorKind::NotFound => SourceError::NotAvailable,
         _ => SourceError::Failed(format!(
-            "open file {}: {}",
-            crate::go_strconv::quote(&path.display().to_string()),
-            crate::go_os::path_error("open", path, error)
+            "open file {:?}: {}",
+            path.display(),
+            crate::fs::path_error("open", path, error)
         )),
     }
 }

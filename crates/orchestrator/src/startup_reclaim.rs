@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cgroup::Cgroup;
 use crate::exposure::nbd::device::{connected_devices, disconnect_device};
-use crate::go_os::path_error;
+use crate::fs::path_error;
 use crate::network::slot::Slot;
 
 const METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/startupreclaim";

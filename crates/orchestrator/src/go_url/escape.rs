@@ -1,5 +1,3 @@
-use crate::go_strconv::quote;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Path,
@@ -81,10 +79,7 @@ fn validate_escapes(bytes: &[u8], mode: Mode) -> Result<(), String> {
                 index += 3;
             }
             c if matches!(mode, Mode::Host | Mode::Zone) && c < 0x80 && should_escape(c, mode) => {
-                return Err(format!(
-                    "invalid character {} in host name",
-                    quote(&(c as char).to_string())
-                ));
+                return Err(format!("invalid character {:?} in host name", (c as char).to_string()));
             }
             _ => index += 1,
         }
@@ -112,7 +107,7 @@ fn validate_percent(bytes: &[u8], index: usize, mode: Mode) -> Result<(), String
 }
 
 fn escape_error(sequence: &[u8]) -> String {
-    format!("invalid URL escape {}", quote(&String::from_utf8_lossy(sequence)))
+    format!("invalid URL escape {:?}", String::from_utf8_lossy(sequence))
 }
 
 fn is_hex(c: u8) -> bool {

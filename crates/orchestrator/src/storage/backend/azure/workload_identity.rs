@@ -55,7 +55,7 @@ impl WorkloadIdentityCredential {
         let mut held = self.assertion.lock().await;
         if held.expires < SystemTime::now() {
             let content = std::fs::read(&self.file)
-                .map_err(|e| crate::go_os::path_error("open", std::path::Path::new(&self.file), &e))?;
+                .map_err(|e| crate::fs::path_error("open", std::path::Path::new(&self.file), &e))?;
             *held = Assertion {
                 content: String::from_utf8_lossy(&content).into_owned(),
                 expires: SystemTime::now() + ASSERTION_LIFETIME,
@@ -213,7 +213,8 @@ mod tests {
         assert_eq!(
             error,
             SourceError::Failed(
-                "WorkloadIdentityCredential: open /nonexistent/token: no such file or directory".to_owned()
+                "WorkloadIdentityCredential: open /nonexistent/token: No such file or directory (os error 2)"
+                    .to_owned()
             )
         );
     }

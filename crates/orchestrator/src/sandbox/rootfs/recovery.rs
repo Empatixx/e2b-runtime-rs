@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use super::jail::jail_properties;
 use super::{is_nbd_device, read_capped};
-use crate::go_exec::status_text;
 
 pub const FS_RECOVER_TIMEOUT: Duration = Duration::from_secs(15);
 const E2FSCK: &str = "/usr/sbin/e2fsck";
@@ -287,7 +286,7 @@ async fn run_e2fsck(device: &str) -> Run {
     if !is_nbd_device(device) {
         return Run {
             sentinel: Vec::new(),
-            error: RunError::Refused(format!("{DEVICE_REFUSED} {}", crate::go_strconv::quote(device))),
+            error: RunError::Refused(format!("{DEVICE_REFUSED} {device:?}")),
             timed_out: false,
         };
     }
@@ -353,7 +352,7 @@ fn run_error(status: std::io::Result<std::process::ExitStatus>) -> RunError {
         Ok(status) if status.success() => RunError::None,
         Ok(status) => RunError::Exit {
             code: status.code().unwrap_or(-1),
-            text: status_text(status),
+            text: status.to_string(),
         },
         Err(e) => RunError::Other(e.to_string()),
     }
@@ -383,7 +382,7 @@ mod tests {
     fn exit(code: i32) -> RunError {
         RunError::Exit {
             code,
-            text: format!("exit status {code}"),
+            text: format!("exit status: {code}"),
         }
     }
 
@@ -521,7 +520,7 @@ mod tests {
         );
         assert_eq!(
             text(exit(137), Vec::new(), false),
-            "rootfs filesystem recovery did not complete: recovery unit signalled: exit status 137"
+            "rootfs filesystem recovery did not complete: recovery unit signalled: exit status: 137"
         );
         assert_eq!(
             text(RunError::None, Vec::new(), false),

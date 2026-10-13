@@ -25,7 +25,7 @@ impl AdcFile {
                 bytes,
                 from_environment,
             })
-            .map_err(|e| crate::go_os::path_error("open", path, &e))
+            .map_err(|e| crate::fs::path_error("open", path, &e))
     }
 }
 
@@ -76,7 +76,7 @@ mod tests {
         assert!(located.from_environment);
         assert_eq!(
             AdcFile::locate(&env_of(vec![(CREDENTIALS_ENV, "/nonexistent/c.json".to_owned())])).unwrap_err(),
-            "open /nonexistent/c.json: no such file or directory"
+            "open /nonexistent/c.json: No such file or directory (os error 2)"
         );
     }
 

@@ -31,7 +31,7 @@ async fn collapse_reports_its_work_like_upstream() {
         sorted,
         ["alreadyHuge", "chunks", "collapsed", "elapsedMs", "regions", "skipped"]
     );
-    assert!(body.starts_with("{\"alreadyHuge\":") && body.ends_with("}\n"), "{body}");
+    assert!(body.starts_with("{\"alreadyHuge\":") && body.ends_with('}'), "{body}");
 }
 
 #[tokio::test]
@@ -50,7 +50,7 @@ async fn metrics_report_the_guest_like_upstream() {
     match cfg!(target_os = "linux") {
         true => {
             assert_eq!(status, 200);
-            assert!(body.ends_with("}\n"), "{body:?}");
+            assert!(body.ends_with('}'), "{body:?}");
             let metrics: serde_json::Value = serde_json::from_str(&body).unwrap();
             let mut keys: Vec<&str> = metrics.as_object().unwrap().keys().map(String::as_str).collect();
             keys.sort_unstable();
@@ -217,7 +217,7 @@ async fn freeze_and_unfreeze_answer_like_upstream() {
         body.starts_with("{\"allowlisted\":0,\"failed\":0,\"frozen\":0,\"mode\":\"legacy\",\"notFrozen\":0,"),
         "{body}"
     );
-    assert!(body.ends_with("}\n"));
+    assert!(body.ends_with('}'));
     assert_eq!(
         (parsed["requested"].as_i64(), parsed["unobservable"].as_i64()),
         (Some(2), Some(2))
@@ -227,7 +227,7 @@ async fn freeze_and_unfreeze_answer_like_upstream() {
     assert_eq!(invalid.status(), 400);
     assert_eq!(
         invalid.text().await.unwrap(),
-        "Invalid format for parameter maxWaitMs: error binding string parameter: strconv.ParseInt: parsing \"soon\": invalid syntax\n"
+        "Invalid format for parameter maxWaitMs: \"soon\" is not an integer: invalid digit found in string\n"
     );
 
     let thawed = post("/unfreeze").await.unwrap();

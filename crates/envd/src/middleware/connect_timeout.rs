@@ -117,72 +117,38 @@ fn asserted_nanos(headers: &HeaderMap, protocol: Option<Protocol>) -> Result<Opt
 
 fn connect_nanos(text: &str) -> Result<i128, String> {
     if text.len() > MAX_CONNECT_DIGITS {
-        return Err(format!("parse timeout: {} has >10 digits", go_quote(text)));
+        return Err(format!("timeout {text:?} has more than 10 digits"));
     }
     text.parse::<i64>()
         .map(|millis| i128::from(millis) * 1_000_000)
-        .map_err(|_| {
-            format!(
-                "parse timeout: strconv.ParseInt: parsing {}: invalid syntax",
-                go_quote(text)
-            )
-        })
+        .map_err(|_| format!("invalid timeout {text:?}"))
 }
 
 fn grpc_nanos(text: &str) -> Result<Option<i128>, String> {
     let unit = text.as_bytes()[text.len() - 1];
-    let nanos_per_unit = grpc_unit(unit)?;
+    let nanos_per_unit = grpc_unit(unit).ok_or_else(|| format!("timeout {text:?} has an invalid unit"))?;
     let value = text[..text.len() - 1]
         .parse::<i64>()
         .ok()
         .filter(|value| *value >= 0)
-        .ok_or_else(|| format!("protocol error: invalid timeout {}", go_quote(text)))?;
+        .ok_or_else(|| format!("invalid timeout {text:?}"))?;
     match value {
-        value if value > MAX_GRPC_VALUE => Err(format!("protocol error: timeout {} is too long", go_quote(text))),
+        value if value > MAX_GRPC_VALUE => Err(format!("timeout {text:?} is too long")),
         value if unit == b'H' && value > i64::MAX / NANOS_PER_HOUR => Ok(None),
         value => Ok(Some(i128::from(value) * i128::from(nanos_per_unit))),
     }
 }
 
-fn grpc_unit(unit: u8) -> Result<i64, String> {
+fn grpc_unit(unit: u8) -> Option<i64> {
     match unit {
-        b'n' => Ok(1),
-        b'u' => Ok(1_000),
-        b'm' => Ok(1_000_000),
-        b'S' => Ok(1_000_000_000),
-        b'M' => Ok(60_000_000_000),
-        b'H' => Ok(NANOS_PER_HOUR),
-        other => Err(format!(
-            "protocol error: timeout has invalid unit {}",
-            go_quote_rune(other)
-        )),
+        b'n' => Some(1),
+        b'u' => Some(1_000),
+        b'm' => Some(1_000_000),
+        b'S' => Some(1_000_000_000),
+        b'M' => Some(60_000_000_000),
+        b'H' => Some(NANOS_PER_HOUR),
+        _ => None,
     }
-}
-
-fn go_quote_rune(byte: u8) -> String {
-    let escaped = match char::from(byte) {
-        '\'' => "\\'".to_owned(),
-        '\\' => "\\\\".to_owned(),
-        '\t' => "\\t".to_owned(),
-        c if c.is_ascii_control() => format!("\\x{byte:02x}"),
-        c if c.is_control() => format!("\\u{byte:04x}"),
-        c => c.to_string(),
-    };
-    format!("'{escaped}'")
-}
-
-fn go_quote(text: &str) -> String {
-    let escaped: String = text
-        .chars()
-        .map(|c| match c {
-            '"' => "\\\"".to_owned(),
-            '\\' => "\\\\".to_owned(),
-            '\t' => "\\t".to_owned(),
-            c if c.is_ascii_control() => format!("\\x{:02x}", c as u32),
-            c => c.to_string(),
-        })
-        .collect();
-    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
@@ -207,40 +173,28 @@ mod tests {
     }
 
     #[test]
-    fn connect_timeouts_parse_like_connect_go() {
+    fn connect_timeouts_parse_to_nanos() {
         assert_eq!(connect(""), Ok(None));
         assert_eq!(connect("1500"), Ok(Some(1_500_000_000)));
         assert_eq!(connect("-1"), Ok(Some(-1_000_000)));
         assert_eq!(connect("+7"), Ok(Some(7_000_000)));
-        assert_eq!(
-            connect("abc"),
-            Err("parse timeout: strconv.ParseInt: parsing \"abc\": invalid syntax".to_owned())
-        );
+        assert_eq!(connect("abc"), Err("invalid timeout \"abc\"".to_owned()));
         assert_eq!(
             connect("12345678901"),
-            Err("parse timeout: \"12345678901\" has >10 digits".to_owned())
+            Err("timeout \"12345678901\" has more than 10 digits".to_owned())
         );
     }
 
     #[test]
-    fn grpc_timeouts_parse_like_connect_go() {
+    fn grpc_timeouts_parse_to_nanos() {
         assert_eq!(grpc("5S"), Ok(Some(5_000_000_000)));
         assert_eq!(grpc("0n"), Ok(Some(0)));
         assert_eq!(grpc("99999999H"), Ok(None));
-        assert_eq!(
-            grpc("5x"),
-            Err("protocol error: timeout has invalid unit 'x'".to_owned())
-        );
-        assert_eq!(
-            grpc("5"),
-            Err("protocol error: timeout has invalid unit '5'".to_owned())
-        );
-        assert_eq!(grpc("m"), Err("protocol error: invalid timeout \"m\"".to_owned()));
-        assert_eq!(grpc("-5m"), Err("protocol error: invalid timeout \"-5m\"".to_owned()));
-        assert_eq!(
-            grpc("123456789m"),
-            Err("protocol error: timeout \"123456789m\" is too long".to_owned())
-        );
+        assert_eq!(grpc("5x"), Err("timeout \"5x\" has an invalid unit".to_owned()));
+        assert_eq!(grpc("5"), Err("timeout \"5\" has an invalid unit".to_owned()));
+        assert_eq!(grpc("m"), Err("invalid timeout \"m\"".to_owned()));
+        assert_eq!(grpc("-5m"), Err("invalid timeout \"-5m\"".to_owned()));
+        assert_eq!(grpc("123456789m"), Err("timeout \"123456789m\" is too long".to_owned()));
     }
 
     #[test]

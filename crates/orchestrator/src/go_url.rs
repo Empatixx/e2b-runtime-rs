@@ -235,10 +235,7 @@ fn check_port(colon_port: &str) -> Result<(), String> {
             .is_some_and(|port| port.bytes().all(|c| c.is_ascii_digit()));
     match valid {
         true => Ok(()),
-        false => Err(format!(
-            "invalid port {} after host",
-            crate::go_strconv::quote(colon_port)
-        )),
+        false => Err(format!("invalid port {colon_port:?} after host")),
     }
 }
 

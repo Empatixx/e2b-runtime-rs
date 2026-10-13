@@ -4,7 +4,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::Value;
 
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 use super::aws::AwsSubject;
 use super::config::{CredentialSource, ExternalAccountFile, Format};
 use super::executable::ExecutableSubject;
@@ -87,9 +87,8 @@ fn is_aws(source: &CredentialSource) -> bool {
 fn file_token(path: &str, format: Option<&Format>) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| {
         format!(
-            "credentials: failed to open credential file {}: {}",
-            crate::go_strconv::quote(path),
-            crate::go_os::path_error("open", std::path::Path::new(path), &e)
+            "credentials: failed to open credential file {path:?}: {}",
+            crate::fs::path_error("open", std::path::Path::new(path), &e)
         )
     })?;
     let text = String::from_utf8_lossy(&bytes).trim().to_owned();
@@ -135,7 +134,7 @@ fn formatted(text: &str, format: Option<&Format>) -> Result<String, String> {
 }
 
 fn json_field(text: &str, field: &str) -> Result<String, String> {
-    let object: HashMap<String, Value> = go_json::unmarshal(text.as_bytes(), credsfile::ANY_OBJECT)
+    let object: HashMap<String, Value> = json::unmarshal(text.as_bytes(), credsfile::ANY_OBJECT)
         .map_err(|e| format!("credentials: failed to unmarshal subject token file: {e}"))?;
     match object.get(field) {
         None => Err("credentials: provided subject_token_field_name not found in credentials".to_owned()),
@@ -188,7 +187,7 @@ mod tests {
 
         assert_eq!(file_token(path.to_str().unwrap(), None).unwrap(), "jwt-token");
         assert!(file_token("/nonexistent/token", None).unwrap_err().starts_with(
-            "credentials: failed to open credential file \"/nonexistent/token\": open /nonexistent/token: no such file or directory"
+            "credentials: failed to open credential file \"/nonexistent/token\": open /nonexistent/token: No such file or directory (os error 2)"
         ));
     }
 

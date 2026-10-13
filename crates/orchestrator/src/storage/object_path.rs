@@ -1,9 +1,7 @@
-use crate::go_strconv::quote;
-
 pub fn validate_object_path(path: &str) -> Result<(), String> {
     match path.split('/').all(|element| !matches!(element, "" | "." | "..")) {
         true => Ok(()),
-        false => Err(format!("invalid object path: {}", quote(path))),
+        false => Err(format!("invalid object path: {path:?}")),
     }
 }
 
@@ -26,7 +24,7 @@ mod tests {
         ] {
             assert_eq!(
                 validate_object_path(path),
-                Err(format!("invalid object path: {}", quote(path))),
+                Err(format!("invalid object path: {path:?}")),
                 "{path:?}"
             );
         }

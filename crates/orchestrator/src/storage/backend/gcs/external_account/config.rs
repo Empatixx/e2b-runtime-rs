@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::super::{credsfile, go_json};
+use super::super::{credsfile, json};
 
 const WORKFORCE_PREFIX: &str = "//iam.googleapis.com/locations/";
 const WORKFORCE_POOLS: &str = "/workforcePools/";
@@ -70,7 +70,7 @@ pub struct CertificateConfig {
 
 impl ExternalAccountFile {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        go_json::unmarshal(bytes, credsfile::EXTERNAL_ACCOUNT)
+        json::unmarshal(bytes, credsfile::EXTERNAL_ACCOUNT)
     }
 
     pub fn validate(&self) -> Result<(), String> {

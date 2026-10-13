@@ -1,6 +1,8 @@
 use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
+use nix::sys::signal::Signal;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitInfo {
     Exited { code: i32 },
@@ -86,41 +88,6 @@ const SIGSYS: i32 = 31;
 
 const FAULT_SIGNALS: [i32; 7] = [SIGBUS, SIGSEGV, SIGILL, SIGFPE, SIGABRT, SIGSYS, SIGTRAP];
 
-const GO_SIGNAL_NAMES: [&str; 32] = [
-    "",
-    "hangup",
-    "interrupt",
-    "quit",
-    "illegal instruction",
-    "trace/breakpoint trap",
-    "aborted",
-    "bus error",
-    "floating point exception",
-    "killed",
-    "user defined signal 1",
-    "segmentation fault",
-    "user defined signal 2",
-    "broken pipe",
-    "alarm clock",
-    "terminated",
-    "stack fault",
-    "child exited",
-    "continued",
-    "stopped (signal)",
-    "stopped",
-    "stopped (tty input)",
-    "stopped (tty output)",
-    "urgent I/O condition",
-    "CPU time limit exceeded",
-    "file size limit exceeded",
-    "virtual timer expired",
-    "profiling timer expired",
-    "window changed",
-    "I/O possible",
-    "power failure",
-    "bad system call",
-];
-
 fn is_fault_signal(signal: i32) -> bool {
     FAULT_SIGNALS.contains(&signal)
 }
@@ -137,11 +104,7 @@ fn handled_signal(code: i32) -> Option<i32> {
 }
 
 fn signal_text(signal: i32) -> String {
-    usize::try_from(signal)
-        .ok()
-        .filter(|index| *index > 0)
-        .and_then(|index| GO_SIGNAL_NAMES.get(index))
-        .map_or_else(|| format!("signal {signal}"), |name| (*name).to_owned())
+    Signal::try_from(signal).map_or_else(|_| format!("signal {signal}"), |name| name.as_str().to_owned())
 }
 
 #[cfg(test)]
@@ -246,8 +209,8 @@ mod tests {
     }
 
     #[test]
-    fn log_fields_name_the_signal_like_go() {
-        assert_eq!(signaled(SIGKILL).log_fields(), "fc_signal=killed fc_core_dumped=false");
+    fn log_fields_name_the_signal() {
+        assert_eq!(signaled(SIGKILL).log_fields(), "fc_signal=SIGKILL fc_core_dumped=false");
         assert_eq!(ExitInfo::Exited { code: 2 }.log_fields(), "fc_exit_code=2");
     }
 }

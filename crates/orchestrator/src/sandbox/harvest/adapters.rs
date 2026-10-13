@@ -5,7 +5,6 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 use super::{HarvestTemplates, HarvestUpload, MetadataUploader, MetadataWriteError};
-use crate::go_strconv::quote;
 use crate::server::uploads::{Outcome, Uploads};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::paths::BuildPaths;
@@ -23,9 +22,9 @@ impl HarvestTemplates for TemplateCache {
     }
 
     async fn update_metadata(&self, build_id: Uuid, metadata: &TemplateMetadata) -> Result<(), MetadataWriteError> {
-        let template = self.lookup(build_id).ok_or_else(|| {
-            MetadataWriteError::failed(format!("template {} not in cache", quote(&build_id.to_string())))
-        })?;
+        let template = self
+            .lookup(build_id)
+            .ok_or_else(|| MetadataWriteError::failed(format!("template {:?} not in cache", build_id.to_string())))?;
         let file = template.dir().join(METADATA_FILE);
         let content = metadata.to_json();
         let written = tokio::task::spawn_blocking(move || replace_file(&file, &content))

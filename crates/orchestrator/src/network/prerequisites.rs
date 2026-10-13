@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 const IP_FORWARD: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPTABLES_NEEDED_FOR: &str = "iptables (needed for the per-slot FORWARD accepts)";
-const IPTABLES_NOT_FOUND: &str = "exec: \"iptables\": executable file not found in $PATH";
+const IPTABLES_NOT_FOUND: &str = "iptables not found on PATH";
 
 pub fn require_v2_prerequisites() -> Result<(), String> {
     check_v2_prerequisites(std::fs::read_to_string(IP_FORWARD), iptables_available())
@@ -78,7 +78,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "v2 networking prerequisites not met: IPv4 forwarding: /proc/sys/net/ipv4/ip_forward must be 1, got \"0\"\niptables (needed for the per-slot FORWARD accepts): exec: \"iptables\": executable file not found in $PATH"
+            "v2 networking prerequisites not met: IPv4 forwarding: /proc/sys/net/ipv4/ip_forward must be 1, got \"0\"\niptables (needed for the per-slot FORWARD accepts): iptables not found on PATH"
         );
     }
 }

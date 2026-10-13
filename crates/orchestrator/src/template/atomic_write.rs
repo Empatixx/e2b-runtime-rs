@@ -3,8 +3,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::go_os::{create_temp_in, parent, path_error};
-use crate::go_strconv::quote;
+use crate::fs::{create_temp_in, parent, path_error};
 
 const TEMP_PREFIX: &str = ".atomic-write-";
 const COMMITTED: &str = "atomic write committed";
@@ -36,8 +35,8 @@ pub fn replace_file(path: &Path, content: &[u8]) -> Result<(), AtomicWriteError>
         std::fs::symlink_metadata(path).map_err(|e| AtomicWriteError::failed(path_error("lstat", path, &e)))?;
     if !existing.is_file() {
         return Err(AtomicWriteError::failed(format!(
-            "atomic write target {} is not a regular file",
-            quote(&path.display().to_string())
+            "atomic write target {:?} is not a regular file",
+            path.display()
         )));
     }
     let dir = parent(path);
@@ -97,7 +96,7 @@ mod tests {
         assert_eq!(
             error,
             AtomicWriteError {
-                message: format!("lstat {}: no such file or directory", file.display()),
+                message: format!("lstat {}: No such file or directory (os error 2)", file.display()),
                 committed: false,
             }
         );
