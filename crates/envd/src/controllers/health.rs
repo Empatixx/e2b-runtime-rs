@@ -9,7 +9,10 @@ use crate::host::metrics::{Metrics, read_metrics};
 use crate::util::go_json;
 
 pub async fn health() -> impl IntoResponse {
-    (StatusCode::NO_CONTENT, [(header::CACHE_CONTROL, "no-store")])
+    (
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store"), (header::CONTENT_TYPE, "")],
+    )
 }
 
 pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {

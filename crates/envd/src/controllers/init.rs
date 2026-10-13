@@ -2,7 +2,6 @@ pub mod presence;
 pub mod request;
 mod resume_freeze;
 
-use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -328,16 +327,7 @@ fn set_cpu_target(state: &AppState, count: i64) -> Option<String> {
 
 fn setup_hyperloop(state: &AppState, address: &str) {
     let _locked = state.hyperloop_lock.lock();
-    let rewritten = address
-        .parse::<IpAddr>()
-        .map_err(|_| {
-            format!("failed to get ip family: failed to parse IP address: ParseAddr({address:?}): unable to parse IP")
-        })
-        .and_then(|_| {
-            host::hosts::rewrite_hosts_file(address, Path::new("/etc/hosts"))
-                .map_err(|e| crate::util::errno::message(&e))
-        });
-    match rewritten {
+    match host::hosts::rewrite_hosts_file(address, Path::new("/etc/hosts")) {
         Ok(()) => state.env_vars.store(EVENTS_ADDRESS, &format!("http://{address}")),
         Err(e) => tracing::error!(error = %e, "failed to modify hosts file"),
     }

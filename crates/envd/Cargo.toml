@@ -41,6 +41,7 @@ tempfile = "3"
 futures = "0.3"
 bon = "3.10.2"
 moka = { version = "0.12.16", features = ["sync"] }
+regex = "1"
 
 [build-dependencies]
 connectrpc-build = "0.9"

@@ -13,7 +13,10 @@ Every final review ends with minors and deferred rulings. They are collected her
 | A 431 from hyper has an empty body and no `Content-Type`; Go writes `431 Request Header Fields Too Large` as a `text/plain; charset=utf-8` body | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
 | 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
-| Not yet compared with Go: gopsutil formulas in `/metrics`, the `txeh` hosts output, `Content-Type: ""` on 204, the `invalid signal` text, an invalid `Connect-Timeout-Ms`, filesystem RPC internals beyond spot checks | API |
+| Filesystem RPC internals beyond the spot checks in `scripts/parity/envd-diff.sh` are not compared with Go | API |
+| Connect unary answers are chunked; Go sends `Content-Length` when the answer fits its 2 KiB buffer. Connect error JSON keeps `<`, `>` and `&`, which Go writes as `\u003c`, `\u003e` and `\u0026`. Both decode to the same values | later |
+| A unary RPC that runs past a valid `Connect-Timeout-Ms` ends with connectrpc's `request timeout`; in Go a handler that ignores its context finishes and one that watches it fails with `context deadline exceeded` | later |
+| A malformed `grpc-timeout` on the gRPC protocol is ignored; Go answers `invalid_argument` | later |
 
 ## Orchestrator: storage
 

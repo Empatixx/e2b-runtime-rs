@@ -170,7 +170,7 @@ crates/envd/src/
   router.rs            build_router: every REST route + Connect services + layers, in one place
   auth.rs              who is calling: basic_username, request_user, URL signing
   middleware.rs        pub mod list
-  middleware/          one file per tower middleware (access_token.rs, basic_auth.rs)
+  middleware/          one file per tower middleware or Connect interceptor (access_token.rs, basic_auth.rs, connect_timeout.rs)
   controllers.rs       pub mod list
   controllers/         one file per area: health.rs, envs.rs, init.rs, filesystem.rs, ...
   controllers/<area>/  helpers of a big area (filesystem/entry.rs, ops.rs, watch.rs; files/download.rs, upload.rs, compose.rs, encoding.rs; process/spawn.rs, output.rs, events.rs, registry.rs)
@@ -213,6 +213,8 @@ Handler names: verb + thing (`get_envs`, `post_init`). Connect methods keep the 
 ```
 CORS -> require_token (middleware/access_token.rs)
      -> authenticate_user (middleware/basic_auth.rs, puts User into extensions)
-     -> REST route from router.rs, or fallback to Connect router
+     -> REST route from router.rs, or fallback to Connect:
+        legacy_sdk -> advertise_encodings (middleware/accept_encoding.rs)
+        -> ConnectRpcService (gzip only, ConnectTimeout interceptor in middleware/connect_timeout.rs)
      -> controller fn
 ```

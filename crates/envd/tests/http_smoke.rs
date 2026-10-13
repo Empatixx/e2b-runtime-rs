@@ -8,6 +8,7 @@ async fn health_returns_204_no_store() {
     let res = reqwest::get(format!("http://{addr}/health")).await.unwrap();
     assert_eq!(res.status(), 204);
     assert_eq!(res.headers()["cache-control"], "no-store");
+    assert_eq!(res.headers()["content-type"], "");
 }
 
 #[tokio::test]

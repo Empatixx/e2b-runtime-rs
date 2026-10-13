@@ -7,3 +7,4 @@
 /deploy/terraform/**/*.tfvars
 /deploy/k8s/overlays/*
 !/deploy/k8s/overlays/example
+/.envd-diff
