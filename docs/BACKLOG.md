@@ -9,12 +9,10 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| Filesystem RPC internals beyond the spot checks in `scripts/parity/envd-diff.sh` are not compared with Go | API |
 | hyper rejects a request with more than 100 headers with 431; Go has no count limit, only the 1 MiB size limit. A higher hyper limit allocates that many slots on every request | later |
 | A 431 from hyper has an empty body and no `Content-Type`; Go writes `431 Request Header Fields Too Large` as a `text/plain; charset=utf-8` body | later |
-| Connect unary answers are chunked; Go sends `Content-Length` when the answer fits its 2 KiB buffer. Connect error JSON keeps `<`, `>` and `&`, which Go writes as `<`, `>` and `&`. Both decode to the same values | later |
-| A unary RPC that runs past a valid `Connect-Timeout-Ms` ends with connectrpc's `request timeout`; in Go a handler that ignores its context finishes and one that watches it fails with `context deadline exceeded` | later |
-| A malformed `grpc-timeout` on the gRPC protocol is ignored; Go answers `invalid_argument` | later |
+| The error JSON at the end of a Connect stream keeps `<`, `>` and `&`, which Go writes as `\u003c`, `\u003e` and `\u0026` (unary answers already match). Both decode to the same values | later |
+| A unary RPC that runs past a valid timeout is cut off with `context deadline exceeded`; in Go a handler that ignores its context still finishes | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
 | 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
 
@@ -22,9 +20,7 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| A rename moves the handles under the old path to the new one; Go makes the renamed entry's handle stale, and handles inside a renamed directory keep their old paths | later |
-| The portmapper answers 2049 for every program; Go answers 2049 only for NFS and mountd over TCP and 0 otherwise | later |
-| `NFS_PROXY_LOG_LEVEL` (go-nfs's own log level) and `NFS_PROXY_DIR_VERIFIER_LIMIT` are not read, because nfsserve pages READDIR by the handle of the last entry instead of a cached listing | later |
+| `NFS_PROXY_DIR_VERIFIER_LIMIT` is not read, because nfsserve pages READDIR by the handle of the last entry instead of a cached listing | later |
 | Call metrics, logs and spans use go-nfs's operation names but follow the Rust calls, so the count per NFS request differs (go-nfs adds `FS.Stat` checks and opens files once per read or write) | later |
 
 ## Orchestrator: shared chunk cache

@@ -42,6 +42,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt};
 
+use crate::server::config::nfs_proxy::NfsLogLevel;
 use endpoint::Endpoint;
 use identity::Identity;
 use logs::BaseFields;
@@ -51,6 +52,7 @@ const TRACER_NAME: &str = "orchestrator";
 const SANDBOX_METER_NAME: &str = "github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics";
 const DEBUG_VARIABLE: &str = "E2B_DEBUG";
 const OWN_TARGET: &str = "orchestrator";
+const NFS_LIBRARY_TARGET: &str = "nfsserve";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Providers {
@@ -95,7 +97,7 @@ impl Telemetry {
 
     pub fn install_subscriber(&self) {
         tracing_subscriber::registry()
-            .with(fmt::layer().with_filter(max_level()))
+            .with(fmt::layer().with_filter(stdout_events()))
             .with(
                 self.providers
                     .as_ref()
@@ -167,6 +169,12 @@ fn max_level() -> LevelFilter {
         true => LevelFilter::DEBUG,
         false => LevelFilter::INFO,
     }
+}
+
+fn stdout_events() -> Targets {
+    Targets::new()
+        .with_default(max_level())
+        .with_target(NFS_LIBRARY_TARGET, NfsLogLevel::from_env().filter())
 }
 
 fn own_events<S>() -> impl tracing_subscriber::layer::Filter<S> {

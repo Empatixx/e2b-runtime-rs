@@ -89,8 +89,36 @@ pub fn pmapproc_getport(
     mapping.deserialize(read)?;
     debug!("pmapproc_getport({:?}, {:?}) ", xid, mapping);
     make_success_reply(xid).serialize(output)?;
-    let port = context.local_port as u32;
+    let port = registered_port(&mapping, context.local_port as u32);
     debug!("\t{:?} --> {:?}", xid, port);
     port.serialize(output)?;
     Ok(())
+}
+
+const NFS3_VERSION: u32 = 3;
+
+fn registered_port(mapping: &portmap::mapping, port: u32) -> u32 {
+    let program = mapping.prog == crate::nfs::PROGRAM || mapping.prog == crate::mount::PROGRAM;
+    match program && mapping.vers == NFS3_VERSION && mapping.prot == portmap::IPPROTO_TCP {
+        true => port,
+        false => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup(prog: u32, vers: u32, prot: u32) -> u32 {
+        registered_port(&portmap::mapping { prog, vers, prot, port: 0 }, 2049)
+    }
+
+    #[test]
+    fn only_nfs_and_mountd_v3_over_tcp_are_registered() {
+        assert_eq!(lookup(100003, 3, portmap::IPPROTO_TCP), 2049);
+        assert_eq!(lookup(100005, 3, portmap::IPPROTO_TCP), 2049);
+        assert_eq!(lookup(100005, 1, portmap::IPPROTO_TCP), 0);
+        assert_eq!(lookup(100003, 3, portmap::IPPROTO_UDP), 0);
+        assert_eq!(lookup(100021, 4, portmap::IPPROTO_TCP), 0);
+    }
 }

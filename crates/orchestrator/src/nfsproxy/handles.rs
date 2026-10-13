@@ -44,18 +44,6 @@ impl Node {
         ancestors.reverse();
         ancestors
     }
-
-    fn contains(&self, other: &Node) -> bool {
-        self.volume == other.volume
-            && (other.path == self.path || self.path.is_empty() || other.path.starts_with(&format!("{}/", self.path)))
-    }
-
-    fn moved(&self, from: &Node, to: &Node) -> Node {
-        Node {
-            volume: to.volume,
-            path: format!("{}{}", to.path, &self.path[from.path.len()..]),
-        }
-    }
 }
 
 pub struct Handles {
@@ -102,35 +90,10 @@ impl VolumeHandles {
         Some(node)
     }
 
-    fn forget(&mut self, gone: &Node) {
-        let ids: Vec<(Node, fileid3)> = self
-            .ids
-            .iter()
-            .filter(|(node, _)| gone.contains(node))
-            .map(|(node, id)| (node.clone(), *id))
-            .collect();
-        ids.into_iter().for_each(|(node, id)| {
+    fn invalidate(&mut self, node: &Node) {
+        if let Some(id) = self.ids.remove(node) {
             self.recent.pop(&id);
-            self.ids.remove(&node);
-        });
-    }
-
-    fn moved(&mut self, from: &Node, to: &Node) {
-        self.forget(to);
-        let moved: Vec<(Node, fileid3)> = self
-            .ids
-            .iter()
-            .filter(|(node, _)| from.contains(node))
-            .map(|(node, id)| (node.clone(), *id))
-            .collect();
-        moved.into_iter().for_each(|(old, id)| {
-            let new = old.moved(from, to);
-            self.ids.remove(&old);
-            if let Some(entry) = self.recent.peek_mut(&id) {
-                *entry = new.clone();
-            }
-            self.ids.insert(new, id);
-        });
+        }
     }
 }
 
@@ -174,15 +137,9 @@ impl Handles {
         id
     }
 
-    pub fn forget(&self, gone: &Node) {
-        if let Some(volume) = self.table.lock().volumes.get_mut(&gone.volume) {
-            volume.forget(gone);
-        }
-    }
-
-    pub fn moved(&self, from: &Node, to: &Node) {
-        if let Some(volume) = self.table.lock().volumes.get_mut(&from.volume) {
-            volume.moved(from, to);
+    pub fn invalidate(&self, node: &Node) {
+        if let Some(volume) = self.table.lock().volumes.get_mut(&node.volume) {
+            volume.invalidate(node);
         }
     }
 }
@@ -212,27 +169,14 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_directory_forgets_what_is_inside() {
+    fn invalidating_a_path_drops_only_its_own_handle_like_go() {
         let handles = handles(16);
         let dir = handles.id_of(node("a"));
         let inside = handles.id_of(node("a/b"));
-        let sibling = handles.id_of(node("ab"));
-        handles.forget(&node("a"));
-        assert_eq!((handles.node(dir), handles.node(inside)), (None, None));
-        assert_eq!(handles.node(sibling), Some(node("ab")));
-    }
-
-    #[test]
-    fn a_rename_moves_the_ids_of_the_tree() {
-        let handles = handles(16);
-        let dir = handles.id_of(node("a"));
-        let inside = handles.id_of(node("a/b"));
-        let replaced = handles.id_of(node("c"));
-        handles.moved(&node("a"), &node("c"));
-        assert_eq!(handles.node(dir), Some(node("c")));
-        assert_eq!(handles.node(inside), Some(node("c/b")));
-        assert_eq!(handles.node(replaced), None);
-        assert_eq!(handles.id_of(node("c/b")), inside);
+        handles.invalidate(&node("a"));
+        assert_eq!(handles.node(dir), None);
+        assert_eq!(handles.node(inside), Some(node("a/b")));
+        assert_ne!(handles.id_of(node("a")), dir);
     }
 
     #[test]

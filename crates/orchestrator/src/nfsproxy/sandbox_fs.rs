@@ -92,11 +92,11 @@ impl SandboxVolumes {
             .unwrap_or_else(|never| match never {})
     }
 
-    fn forget(&self, node: &Node) {
+    fn invalidate(&self, node: &Node) {
         let path = Self::path(node);
         self.calls
             .handle("NFS.InvalidateHandle", &path, || {
-                self.handles.forget(node);
+                self.handles.invalidate(node);
                 Ok::<_, Infallible>(())
             })
             .unwrap_or_else(|never| match never {})
@@ -376,7 +376,7 @@ impl NFSFileSystem for SandboxVolumes {
         self.calls
             .record("FS.Remove", &path, || chroot.remove(&path))
             .map_err(|error| status(&error))?;
-        self.forget(&node);
+        self.invalidate(&node);
         Ok(())
     }
 
@@ -397,7 +397,7 @@ impl NFSFileSystem for SandboxVolumes {
         self.calls
             .record("FS.Rename", &from_path, || chroot.rename(&from_path, &to_path))
             .map_err(|error| rename_status(&error))?;
-        self.handles.moved(&from, &to);
+        self.invalidate(&from);
         Ok(())
     }
 
@@ -525,20 +525,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rename_keeps_the_handle_and_a_remove_makes_it_stale() {
+    async fn a_rename_and_a_remove_treat_handles_like_go() {
         let dir = tempfile::tempdir().unwrap();
         let fs = volumes(&dir);
         let root = volume(&fs).await;
         let (subdir, _) = fs.mkdir(root, &b"a".as_slice().into()).await.unwrap();
-        let (file, _) = fs.create(subdir, &b"f".as_slice().into(), unset()).await.unwrap();
+        let (inside, _) = fs.create(subdir, &b"f".as_slice().into(), unset()).await.unwrap();
 
         fs.rename(root, &b"a".as_slice().into(), root, &b"b".as_slice().into())
             .await
             .unwrap();
-        assert!(fs.getattr(file).await.is_ok());
         assert!(dir.path().join("data/b/f").exists());
+        assert!(matches!(fs.getattr(subdir).await, Err(nfsstat3::NFS3ERR_STALE)));
+        assert!(matches!(fs.getattr(inside).await, Err(nfsstat3::NFS3ERR_NOENT)));
 
-        fs.remove(subdir, &b"f".as_slice().into()).await.unwrap();
+        let (file, _) = fs.create(root, &b"g".as_slice().into(), unset()).await.unwrap();
+        fs.remove(root, &b"g".as_slice().into()).await.unwrap();
         assert!(matches!(fs.getattr(file).await, Err(nfsstat3::NFS3ERR_STALE)));
     }
 

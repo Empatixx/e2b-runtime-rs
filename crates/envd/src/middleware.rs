@@ -4,3 +4,4 @@ pub mod basic_auth;
 pub mod connect_timeout;
 pub mod cors;
 pub mod legacy_sdk;
+pub mod unary_framing;

@@ -108,3 +108,45 @@ async fn a_stream_with_an_unparsable_timeout_ends_with_the_error() {
         json!({ "error": { "code": "invalid_argument", "message": "parse timeout: strconv.ParseInt: parsing \"abc\": invalid syntax" } })
     );
 }
+
+#[tokio::test]
+async fn a_unary_call_past_its_deadline_fails_with_the_go_text() {
+    let (addr, _) = spawn_server_with_state().await;
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/filesystem.Filesystem/ListDir"))
+        .header("content-type", "application/json")
+        .header("authorization", basic_auth())
+        .header("connect-timeout-ms", "1")
+        .json(&json!({ "path": "/usr", "depth": 30 }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 504);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({ "code": "deadline_exceeded", "message": "context deadline exceeded" })
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_grpc_timeout_is_rejected_like_connect_go() {
+    let (addr, _) = spawn_server_with_state().await;
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/filesystem.Filesystem/Stat"))
+        .header("content-type", "application/grpc-web+json")
+        .header("authorization", basic_auth())
+        .header("grpc-timeout", "5x")
+        .body(envelope(&json!({ "path": "/" })))
+        .send()
+        .await
+        .unwrap();
+
+    let body = res.bytes().await.unwrap();
+    let trailers = String::from_utf8_lossy(&body[5..]);
+    assert!(
+        trailers.starts_with("grpc-status: 3\r\ngrpc-message: protocol error: timeout has invalid unit 'x'\r\n"),
+        "{trailers}"
+    );
+}

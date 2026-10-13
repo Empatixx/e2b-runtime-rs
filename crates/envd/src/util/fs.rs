@@ -3,6 +3,21 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+pub fn go_rename(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(target) = std::fs::symlink_metadata(to).ok().filter(std::fs::Metadata::is_dir) {
+        let source = std::fs::symlink_metadata(from)?;
+        if from == to || !same_file(&target, &source) {
+            return Err(io::Error::from_raw_os_error(nix::libc::EEXIST));
+        }
+    }
+    std::fs::rename(from, to)
+}
+
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
 pub fn os_error(op: &str, path: &Path, err: &io::Error) -> String {
     format!("{op} {}: {}", path.display(), reason(err))
 }

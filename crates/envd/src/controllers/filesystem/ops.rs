@@ -6,7 +6,7 @@ use connectrpc::{ConnectError, ErrorCode};
 use super::entry::{entry_info, entry_info_with_owners};
 use crate::proto::filesystem::EntryInfo;
 use crate::user::{OwnerNames, User};
-use crate::util::fs::{dir, eval_symlinks, os_error, reason};
+use crate::util::fs::{dir, eval_symlinks, go_rename, os_error, reason};
 use crate::util::paths::ensure_dirs;
 
 pub fn make_dir(path: &Path, user: &User) -> Result<EntryInfo, ConnectError> {
@@ -34,7 +34,7 @@ pub fn rename(source: &Path, destination: &Path, user: &User) -> Result<EntryInf
     let parent = dir(destination);
     ensure_dirs(&parent, user.uid, user.gid).map_err(ConnectError::internal)?;
 
-    if let Err(e) = std::fs::rename(source, destination) {
+    if let Err(e) = go_rename(source, destination) {
         let text = format!("rename {} {}: {}", source.display(), destination.display(), reason(&e));
         return Err(if e.kind() == io::ErrorKind::NotFound {
             ConnectError::not_found(format!("source file not found: {text}"))
@@ -325,6 +325,22 @@ mod tests {
         assert_eq!(entry.path, s(destination.clone()));
         assert!(!source.exists());
         assert_eq!(std::fs::read(&destination).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn rename_onto_a_directory_fails_with_file_exists_like_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("file"), b"x").unwrap();
+        std::fs::create_dir_all(tmp.path().join("dir/inside")).unwrap();
+        std::fs::create_dir(tmp.path().join("empty")).unwrap();
+
+        let error = go_rename(&tmp.path().join("file"), &tmp.path().join("dir")).unwrap_err();
+        assert_eq!(reason(&error), "file exists");
+        let error = go_rename(&tmp.path().join("empty"), &tmp.path().join("dir/inside")).unwrap_err();
+        assert_eq!(reason(&error), "file exists");
+        let error = go_rename(&tmp.path().join("missing"), &tmp.path().join("dir")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        go_rename(&tmp.path().join("file"), &tmp.path().join("other")).unwrap();
     }
 
     #[test]

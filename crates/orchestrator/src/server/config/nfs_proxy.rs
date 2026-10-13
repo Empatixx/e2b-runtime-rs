@@ -1,10 +1,57 @@
 use std::collections::HashMap;
 use std::num::{IntErrorKind, NonZeroUsize};
 
+use tracing_subscriber::filter::LevelFilter;
+
 use crate::go_strconv::{parse_bool, quote};
 
+pub const LOG_LEVEL_VARIABLE: &str = "NFS_PROXY_LOG_LEVEL";
 const DEFAULT_HANDLE_CACHE_LIMIT: i64 = 16384;
 const MIN_HANDLE_CACHE_LIMIT: i64 = 2;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum NfsLogLevel {
+    Panic,
+    Fatal,
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl NfsLogLevel {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.to_lowercase().as_str() {
+            "panic" => Ok(Self::Panic),
+            "fatal" => Ok(Self::Fatal),
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            other => Err(format!("invalid log level {}", quote(other))),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        std::env::var(LOG_LEVEL_VARIABLE)
+            .ok()
+            .and_then(|text| Self::parse(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn filter(self) -> LevelFilter {
+        match self {
+            Self::Panic | Self::Fatal | Self::Error => LevelFilter::ERROR,
+            Self::Warn => LevelFilter::WARN,
+            Self::Info => LevelFilter::INFO,
+            Self::Debug => LevelFilter::DEBUG,
+            Self::Trace => LevelFilter::TRACE,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NfsProxySettings {
@@ -14,6 +61,7 @@ pub struct NfsProxySettings {
     pub record_handle_calls: bool,
     pub record_stat_calls: bool,
     pub handle_cache_limit: i64,
+    pub log_level: NfsLogLevel,
 }
 
 impl Default for NfsProxySettings {
@@ -25,6 +73,7 @@ impl Default for NfsProxySettings {
             record_handle_calls: false,
             record_stat_calls: false,
             handle_cache_limit: DEFAULT_HANDLE_CACHE_LIMIT,
+            log_level: NfsLogLevel::Info,
         }
     }
 }
@@ -54,6 +103,11 @@ impl NfsProxySettings {
                 "NFSProxyHandleCacheLimit",
                 defaults.handle_cache_limit,
             )?,
+            log_level: set(vars, LOG_LEVEL_VARIABLE).map_or(Ok(defaults.log_level), |text| {
+                NfsLogLevel::parse(text).map_err(|e| {
+                    format!("env: parse error on field \"NFSProxyLogLevel\" of type \"nfs.LogLevel\": {e}")
+                })
+            })?,
         })
     }
 
@@ -139,8 +193,25 @@ mod tests {
                 record_handle_calls: true,
                 record_stat_calls: true,
                 handle_cache_limit: 64,
+                log_level: NfsLogLevel::Info,
             }
         );
+    }
+
+    #[test]
+    fn the_log_level_parses_like_go() {
+        let level =
+            |text: &str| NfsProxySettings::from_vars(&vars(&[("NFS_PROXY_LOG_LEVEL", text)])).map(|s| s.log_level);
+        assert_eq!(level("DEBUG"), Ok(NfsLogLevel::Debug));
+        assert_eq!(level(""), Ok(NfsLogLevel::Info));
+        assert_eq!(
+            level("Loud"),
+            Err(
+                "env: parse error on field \"NFSProxyLogLevel\" of type \"nfs.LogLevel\": invalid log level \"loud\""
+                    .to_owned()
+            )
+        );
+        assert_eq!(NfsLogLevel::Fatal.filter(), LevelFilter::ERROR);
     }
 
     #[test]

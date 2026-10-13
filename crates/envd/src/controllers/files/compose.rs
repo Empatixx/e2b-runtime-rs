@@ -115,7 +115,7 @@ fn compose(sources: &[PathBuf], destination: &Path, uid: u32, gid: u32) -> Resul
     ));
 
     let composed = concatenate(sources, &temporary, uid, gid).and_then(|()| {
-        std::fs::rename(&temporary, destination).map_err(|e| {
+        crate::util::fs::go_rename(&temporary, destination).map_err(|e| {
             ErrorResponse::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .message(format!(
