@@ -9,9 +9,10 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| Request headers are capped at 64 KiB by the hyper read buffer; Go allows 1 MiB (`MaxHeaderBytes`) | API |
+| hyper rejects a request with more than 100 headers with 431; Go has no count limit, only the 1 MiB size limit. A higher hyper limit allocates that many slots on every request | later |
+| A 431 from hyper has an empty body and no `Content-Type`; Go writes `431 Request Header Fields Too Large` as a `text/plain; charset=utf-8` body | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
-| 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (64 KiB hyper buffer per connection plus chunks in flight) | perf |
+| 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
 | Not yet compared with Go: gopsutil formulas in `/metrics`, the `txeh` hosts output, `Content-Type: ""` on 204, the `invalid signal` text, an invalid `Connect-Timeout-Ms`, filesystem RPC internals beyond spot checks | API |
 
 ## Orchestrator: storage

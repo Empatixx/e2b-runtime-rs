@@ -16,7 +16,7 @@ use hyper_util::service::TowerToHyperService;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-const READ_BUFFER: usize = 64 * 1024;
+const MAX_HEADER_BYTES: usize = (1 << 20) + 4096;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(640);
 const HANDOVER_FALLBACK_THAW: Duration = Duration::from_secs(60);
 
@@ -112,7 +112,7 @@ async fn serve(mut listener: impl Listener, app: Router) -> ! {
     let mut builder = Builder::new(TokioExecutor::new());
     builder
         .http1()
-        .max_buf_size(READ_BUFFER)
+        .max_buf_size(MAX_HEADER_BYTES)
         .timer(TokioTimer::new())
         .header_read_timeout(IDLE_TIMEOUT);
     builder.http2().enable_connect_protocol();
@@ -126,5 +126,46 @@ async fn serve(mut listener: impl Listener, app: Router) -> ! {
                 .await
                 .unwrap_or_else(|e| tracing::trace!(error = %e, "failed to serve connection"))
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    async fn status_for_header_of(size: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, Router::new().route("/", get(|| async { "ok" }))));
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
+            "a".repeat(size)
+        );
+        stream.write_all(request.as_bytes()).await.unwrap_or_default();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap_or_default();
+        String::from_utf8_lossy(&response)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn headers_up_to_a_mebibyte_are_accepted_like_go() {
+        assert_eq!(status_for_header_of(1 << 20).await, "HTTP/1.1 200 OK");
+    }
+
+    #[tokio::test]
+    async fn headers_over_the_go_limit_are_rejected() {
+        assert_eq!(
+            status_for_header_of(2 << 20).await,
+            "HTTP/1.1 431 Request Header Fields Too Large"
+        );
     }
 }
