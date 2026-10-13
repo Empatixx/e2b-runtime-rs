@@ -1,26 +1,80 @@
+use std::time::{Duration, Instant};
+
+use axum::extract::Request;
+use axum::middleware::Next as AxumNext;
+use axum::response::Response;
 use connectrpc::interceptor::{
     Next, NextStream, PayloadStream, StreamRequest, StreamResponse, UnaryRequest, UnaryResponse,
 };
-use connectrpc::{ConnectError, Interceptor, Protocol, RequestContext, async_trait};
+use connectrpc::{ConnectError, Interceptor, Protocol, RequestContext, Spec, async_trait};
+use http::{HeaderMap, HeaderName};
+
+use crate::proto::filesystem::FILESYSTEM_WATCH_DIR_SPEC;
+use crate::proto::process::{PROCESS_CONNECT_SPEC, PROCESS_START_SPEC, PROCESS_STREAM_INPUT_SPEC};
 
 const CONNECT_TIMEOUT_HEADER: &str = "connect-timeout-ms";
 const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
 const MAX_CONNECT_DIGITS: usize = 10;
 const MAX_GRPC_VALUE: i64 = 99_999_999;
 const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
+const STREAMING: [Spec; 4] = [
+    PROCESS_CONNECT_SPEC,
+    PROCESS_START_SPEC,
+    PROCESS_STREAM_INPUT_SPEC,
+    FILESYSTEM_WATCH_DIR_SPEC,
+];
 
 pub struct ConnectTimeout;
+
+#[derive(Clone)]
+struct HeldTimeout {
+    headers: HeaderMap,
+    arrived: Instant,
+}
+
+impl HeldTimeout {
+    fn take_from(headers: &mut HeaderMap) -> Self {
+        Self {
+            headers: [CONNECT_TIMEOUT_HEADER, GRPC_TIMEOUT_HEADER]
+                .into_iter()
+                .filter_map(|name| headers.remove(name).map(|value| (HeaderName::from_static(name), value)))
+                .collect(),
+            arrived: Instant::now(),
+        }
+    }
+
+    fn unexpired(&self, protocol: Option<Protocol>) -> Result<(), ConnectError> {
+        match asserted_nanos(&self.headers, protocol)? {
+            Some(nanos) if self.is_past(nanos) => Err(deadline_exceeded()),
+            _ => Ok(()),
+        }
+    }
+
+    fn is_past(&self, nanos: i128) -> bool {
+        nanos <= 0 || u64::try_from(nanos).is_ok_and(|nanos| self.arrived.elapsed() >= Duration::from_nanos(nanos))
+    }
+}
+
+pub async fn hold_unary_timeout(mut request: Request, next: AxumNext) -> Response {
+    if is_unary(request.uri().path()) {
+        let held = HeldTimeout::take_from(request.headers_mut());
+        request.extensions_mut().insert(held);
+    }
+    next.run(request).await
+}
+
+fn is_unary(path: &str) -> bool {
+    STREAMING.iter().all(|spec| spec.procedure != path)
+}
 
 #[async_trait]
 impl Interceptor for ConnectTimeout {
     async fn intercept_unary(&self, req: UnaryRequest, next: Next<'_>) -> Result<UnaryResponse, ConnectError> {
-        unexpired(&req.ctx)?;
-        match req.ctx.deadline() {
-            Some(deadline) => tokio::time::timeout_at(deadline.into(), next.run(req))
-                .await
-                .unwrap_or_else(|_| Err(deadline_exceeded())),
-            None => next.run(req).await,
-        }
+        req.ctx
+            .extensions()
+            .get::<HeldTimeout>()
+            .map_or(Ok(()), |held| held.unexpired(req.ctx.protocol()))?;
+        next.run(req).await
     }
 
     async fn intercept_streaming(
@@ -35,7 +89,7 @@ impl Interceptor for ConnectTimeout {
 }
 
 fn unexpired(ctx: &RequestContext) -> Result<(), ConnectError> {
-    match asserted_nanos(ctx)? {
+    match asserted_nanos(ctx.headers(), ctx.protocol())? {
         Some(nanos) if nanos <= 0 => Err(deadline_exceeded()),
         _ => Ok(()),
     }
@@ -45,14 +99,14 @@ fn deadline_exceeded() -> ConnectError {
     ConnectError::deadline_exceeded("context deadline exceeded")
 }
 
-fn asserted_nanos(ctx: &RequestContext) -> Result<Option<i128>, ConnectError> {
+fn asserted_nanos(headers: &HeaderMap, protocol: Option<Protocol>) -> Result<Option<i128>, ConnectError> {
     let header = |name: &str| {
-        ctx.headers()
+        headers
             .get(name)
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
             .filter(|text| !text.is_empty())
     };
-    match ctx.protocol() {
+    match protocol {
         Some(Protocol::Grpc | Protocol::GrpcWeb) => {
             header(GRPC_TIMEOUT_HEADER).map_or(Ok(None), |text| grpc_nanos(&text))
         }
@@ -141,8 +195,7 @@ mod tests {
             http::HeaderName::from_bytes(header.as_bytes()).unwrap(),
             value.parse().unwrap(),
         );
-        asserted_nanos(&RequestContext::new(headers).with_protocol(Some(protocol)))
-            .map_err(|e| e.message.unwrap_or_default())
+        asserted_nanos(&headers, Some(protocol)).map_err(|e| e.message.unwrap_or_default())
     }
 
     fn connect(value: &str) -> Result<Option<i128>, String> {
@@ -188,6 +241,25 @@ mod tests {
             grpc("123456789m"),
             Err("protocol error: timeout \"123456789m\" is too long".to_owned())
         );
+    }
+
+    #[test]
+    fn only_streaming_procedures_keep_their_timeout_header() {
+        assert!(is_unary("/filesystem.Filesystem/ListDir"));
+        assert!(is_unary("/process.Process/SendInput"));
+        assert!(!is_unary("/process.Process/Start"));
+        assert!(!is_unary("/filesystem.Filesystem/WatchDir"));
+    }
+
+    #[test]
+    fn a_held_timeout_expires_only_once_its_time_has_passed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECT_TIMEOUT_HEADER, "60000".parse().unwrap());
+        let held = HeldTimeout::take_from(&mut headers);
+        assert!(headers.is_empty());
+        assert!(held.unexpired(Some(Protocol::Connect)).is_ok());
+        assert!(held.is_past(0));
+        assert!(!held.is_past(60_000_000_000));
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod app;
 pub mod auth;
 pub mod cgroups;
 pub mod config;
+pub mod connection;
 pub mod controllers;
 pub mod cpus;
 pub mod envvars;

@@ -31,6 +31,7 @@ xattr = "1"
 notify = "8"
 tokio-stream = "0.1"
 rand = "0.10"
+flate2 = "1"
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 multer = "3"
 mime_guess = "2"

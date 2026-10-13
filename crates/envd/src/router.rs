@@ -14,9 +14,10 @@ use crate::controllers::{collapse, envs, files, freeze, fsfreeze, health, init, 
 use crate::middleware::accept_encoding::advertise_encodings;
 use crate::middleware::access_token::require_token;
 use crate::middleware::basic_auth::authenticate_user;
-use crate::middleware::connect_timeout::ConnectTimeout;
+use crate::middleware::connect_timeout::{ConnectTimeout, hold_unary_timeout};
 use crate::middleware::cors::cors;
 use crate::middleware::legacy_sdk::legacy_sdk;
+use crate::middleware::stream_end::end_stream_like_go;
 use crate::middleware::unary_framing::frame_unary;
 use crate::proto::filesystem::FilesystemExt;
 use crate::proto::process::ProcessExt;
@@ -49,9 +50,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/fsthaw", post(fsfreeze::post_fsthaw))
         .route("/collapse", post(collapse::post_collapse))
         .route("/upgrade", post(upgrade::post_upgrade))
-        .fallback_service(
-            from_fn(legacy_sdk).layer(from_fn(advertise_encodings).layer(from_fn(frame_unary).layer(connect))),
-        )
+        .fallback_service(from_fn(legacy_sdk).layer(from_fn(advertise_encodings).layer(
+            from_fn(frame_unary).layer(from_fn(end_stream_like_go).layer(from_fn(hold_unary_timeout).layer(connect))),
+        )))
         .layer(from_fn(authenticate_user))
         .layer(from_fn_with_state(state.clone(), require_token));
 

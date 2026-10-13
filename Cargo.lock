@@ -1779,6 +1779,7 @@ dependencies = [
  "chrono",
  "connectrpc",
  "connectrpc-build",
+ "flate2",
  "futures",
  "hex",
  "http",

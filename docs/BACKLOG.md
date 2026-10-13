@@ -9,10 +9,9 @@ Each line is a place where this runtime still differs from upstream Go or where 
 
 | Item | Target |
 |---|---|
-| hyper rejects a request with more than 100 headers with 431; Go has no count limit, only the 1 MiB size limit. A higher hyper limit allocates that many slots on every request | later |
-| A 431 from hyper has an empty body and no `Content-Type`; Go writes `431 Request Header Fields Too Large` as a `text/plain; charset=utf-8` body | later |
-| The error JSON at the end of a Connect stream keeps `<`, `>` and `&`, which Go writes as `\u003c`, `\u003e` and `\u0026` (unary answers already match). Both decode to the same values | later |
-| A unary RPC that runs past a valid timeout is cut off with `context deadline exceeded`; in Go a handler that ignores its context still finishes | later |
+| An HTTP/1.1 request without `Host` is served; Go answers `400 Bad Request: missing required Host header` | later |
+| A request target longer than 64 KiB gets 414 from hyper; Go accepts any target that fits in the 1 MiB header limit | later |
+| A malformed request gets 400 from hyper with an empty body; Go writes a `text/plain; charset=utf-8` body, `400 Bad Request` or `400 Bad Request: <reason>` | later |
 | `GET /files` copies through user space; Go serves a file with one `sendfile`, about 12 % faster on 2 CPUs | perf |
 | 50 to 100 concurrent 1 MiB uploads peak at higher RSS than Go (the hyper read buffer grows up to 1 MiB per connection, the Go header limit, plus chunks in flight) | perf |
 
@@ -56,4 +55,4 @@ Each line is a place where this runtime still differs from upstream Go or where 
 | Item | Target |
 |---|---|
 | A peer transition re-reads the diff from storage with the header it already holds; the chunker reads only uncompressed objects, so a build a Go peer uploads compressed is unreadable after the transition (upstream reloads the header and its frame table) | later |
-| `snapshot-cache-drop-provisional-header` is not read and the `orchestrator.sandbox.snapshot.dead_structure_outcome` and `dead_structure_bytes` counters are not recorded; the provisional header stays in the template until the entry goes | later |
+| `snapshot-cache-drop-provisional-header` is not read and `dead_structure_outcome` and `dead_structure_bytes` are recorded only for `dedup_index`, not for `template_provisional_header` and `upload_provisional_header`. The template keeps its build, provisional memfile header included, until the entry goes, because every resume reads it from there | later |

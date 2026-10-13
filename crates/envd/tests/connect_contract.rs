@@ -4,6 +4,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use common::spawn_server_with_state;
 use serde_json::{Value, json};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 fn basic_auth() -> String {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
@@ -109,25 +112,85 @@ async fn a_stream_with_an_unparsable_timeout_ends_with_the_error() {
     );
 }
 
+async fn list_dir_sent_slowly(addr: std::net::SocketAddr, timeout_ms: u64, delay: Duration) -> String {
+    let body = json!({ "path": "/" }).to_string();
+    let head = format!(
+        "POST /filesystem.Filesystem/ListDir HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nAuthorization: {}\r\nConnect-Timeout-Ms: {timeout_ms}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        basic_auth(),
+        body.len()
+    );
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    tokio::time::sleep(delay).await;
+    stream.write_all(body.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+
 #[tokio::test]
-async fn a_unary_call_past_its_deadline_fails_with_the_go_text() {
+async fn a_stream_error_escapes_html_like_connect_go() {
     let (addr, _) = spawn_server_with_state().await;
     let res = reqwest::Client::new()
-        .post(format!("http://{addr}/filesystem.Filesystem/ListDir"))
-        .header("content-type", "application/json")
+        .post(format!("http://{addr}/filesystem.Filesystem/WatchDir"))
+        .header("content-type", "application/connect+json")
         .header("authorization", basic_auth())
-        .header("connect-timeout-ms", "1")
-        .json(&json!({ "path": "/usr", "depth": 30 }))
+        .body(envelope(&json!({ "path": "/missing/<a&b>" })))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(res.status(), 504);
+    let body = res.bytes().await.unwrap();
+    let end = String::from_utf8_lossy(&body[5..]);
+    assert_eq!(body[0], 2);
+    assert!(end.contains(r"/missing/\u003ca\u0026b\u003e"), "{end}");
+}
+
+#[tokio::test]
+async fn a_gzipped_stream_ends_with_a_compressed_frame_like_connect_go() {
+    let (addr, _) = spawn_server_with_state().await;
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/filesystem.Filesystem/WatchDir"))
+        .header("content-type", "application/connect+json")
+        .header("connect-accept-encoding", "gzip")
+        .header("authorization", basic_auth())
+        .body(envelope(&json!({ "path": "/missing" })))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.headers()["connect-content-encoding"], "gzip");
+    let body = res.bytes().await.unwrap();
+    assert_eq!(body[0], 3);
+}
+
+#[tokio::test]
+async fn a_unary_call_whose_deadline_passes_before_the_handler_fails_with_the_go_text() {
+    let (addr, _) = spawn_server_with_state().await;
+    let response = list_dir_sent_slowly(addr, 50, Duration::from_millis(300)).await;
+
+    assert!(response.starts_with("HTTP/1.1 504"), "{response}");
+    assert!(response.ends_with(r#"{"code":"deadline_exceeded","message":"context deadline exceeded"}"#));
+}
+
+#[tokio::test]
+async fn a_unary_handler_that_runs_past_its_deadline_still_answers_like_go() {
+    let (addr, _) = spawn_server_with_state().await;
+    let dir = tempfile::tempdir().unwrap();
+    (0..20_000).for_each(|i| std::fs::write(dir.path().join(format!("f{i}")), "").unwrap());
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/filesystem.Filesystem/ListDir"))
+        .header("content-type", "application/json")
+        .header("authorization", basic_auth())
+        .header("connect-timeout-ms", "20")
+        .json(&json!({ "path": dir.path() }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
     let body: Value = res.json().await.unwrap();
-    assert_eq!(
-        body,
-        json!({ "code": "deadline_exceeded", "message": "context deadline exceeded" })
-    );
+    assert_eq!(body["entries"].as_array().unwrap().len(), 20_000);
 }
 
 #[tokio::test]

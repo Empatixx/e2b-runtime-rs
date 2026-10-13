@@ -6,9 +6,11 @@ use parking_lot::RwLock;
 use roaring::RoaringBitmap;
 
 use crate::storage::header::{Header, PAGE_SIZE};
+use crate::telemetry::dead_structure::{DropOutcome, record_dedup_index};
 use crate::telemetry::memfd::{ServePhase, record_inflight_serve};
 
 pub const BYTES_NOT_AVAILABLE: &str = "bytes not available";
+const PACKED_SEGMENT_BYTES: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PackedSegment {
@@ -38,6 +40,10 @@ impl PackedIndex {
             })
             .collect();
         Self { segments }
+    }
+
+    fn byte_size(&self) -> u64 {
+        (self.segments.capacity() * PACKED_SEGMENT_BYTES) as u64
     }
 
     pub fn translate(&self, offset: u64, length: u64) -> Option<u64> {
@@ -127,10 +133,18 @@ impl InflightMemfd {
 
     pub fn release(&self) {
         let mut mapped = self.mapped.write();
-        mapped.memfd = None;
-        if self.free_index {
+        if mapped.memfd.take().is_some() {
+            self.release_index(&mut mapped);
+        }
+    }
+
+    fn release_index(&self, mapped: &mut Mapped) {
+        let size = mapped.index.as_ref().map_or(0, PackedIndex::byte_size);
+        let outcome = DropOutcome::of(mapped.index.is_some(), self.free_index);
+        if outcome == DropOutcome::Dropped {
             mapped.index = None;
         }
+        record_dedup_index(outcome, size);
     }
 
     pub fn is_mapped(&self) -> bool {

@@ -1,4 +1,5 @@
 pub mod build;
+pub mod dead_structure;
 pub mod dirty_pages;
 pub mod endpoint;
 pub mod envd_defaults;
