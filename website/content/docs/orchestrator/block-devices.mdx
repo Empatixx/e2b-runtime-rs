@@ -87,4 +87,4 @@ One case still hangs: a process that serves a device and also has it open. On ex
 - A udev rule that stops systemd-udevd from probing the devices, for the same reason as with NBD: `ACTION=="add|change", KERNEL=="ublkb*", OPTIONS:="nowatch"`.
 - `libclang` at build time, because the libublk bindings are generated with bindgen.
 
-Open items are in `docs/BACKLOG.md`: zero copy (kernel 6.15 and newer), recovery of devices after an orchestrator restart, and a measurement inside Firecracker.
+Open items are in `docs/new-features.md`: zero copy (kernel 6.15 and newer), recovery of devices after an orchestrator restart, and a measurement inside Firecracker.

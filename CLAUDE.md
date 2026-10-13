@@ -30,11 +30,11 @@ Put unit tests at the bottom of the same file in `#[cfg(test)] mod tests`. Put H
 
 ## Backlog
 
-Deferred review findings live in `docs/BACKLOG.md`, each with the milestone where it starts to matter. Add every deferred minor there when a review ends, and delete the line when it is fixed.
+`docs/BACKLOG.md` lists only gaps to Go parity, each with the milestone where it starts to matter. Add every deferred parity gap there when a review ends, and delete the line when it is fixed. Anything that already behaves like Go does not belong there. Deliberate differences from Go and features upstream does not have go to `docs/new-features.md`, with their open items.
 
 ## Writing docs and posts
 
-Update the documentation in the same change as the code: `docs/BACKLOG.md`, the website pages under `website/content/docs/` in English and Czech, and the README when the change is visible there. A change is not done while a page still describes the old behaviour.
+Update the documentation in the same change as the code: `docs/BACKLOG.md`, `docs/new-features.md`, the website pages under `website/content/docs/` in English and Czech, and the README when the change is visible there. A change is not done while a page still describes the old behaviour.
 
 README, docs and the website use plain, short English (and a Czech translation on the website). Follow the `writing-blogs` skill. `scripts/check-prose.py` rejects AI-sounding words, arrows, dashes and emoji; the git pre-push hook (`git config core.hooksPath scripts/hooks`) and the Claude Code hook in `.claude/settings.json` run it before every push.
 
