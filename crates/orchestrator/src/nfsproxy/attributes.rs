@@ -11,7 +11,7 @@ pub fn of_stat(stat: &Stat, fileid: fileid3) -> fattr3 {
     fattr3 {
         ftype: file_type(stat.st_mode),
         mode: stat.st_mode & 0o7777,
-        nlink: u32::try_from(stat.st_nlink).unwrap_or(u32::MAX),
+        nlink: saturating(stat.st_nlink),
         uid: stat.st_uid,
         gid: stat.st_gid,
         size: u64::try_from(stat.st_size).unwrap_or_default(),
@@ -23,6 +23,10 @@ pub fn of_stat(stat: &Stat, fileid: fileid3) -> fattr3 {
         mtime: time(stat.st_mtime, stat.st_mtime_nsec),
         ctime: time(stat.st_ctime, stat.st_ctime_nsec),
     }
+}
+
+fn saturating<N: TryInto<u32>>(count: N) -> u32 {
+    count.try_into().unwrap_or(u32::MAX)
 }
 
 pub fn of_root(fileid: fileid3) -> fattr3 {

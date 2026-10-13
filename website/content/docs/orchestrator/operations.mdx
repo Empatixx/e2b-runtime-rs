@@ -17,6 +17,8 @@ The orchestrator is configured with environment variables, the same names as ups
 | `NBD_POOL_SIZE` | `64` | Ready NBD devices. |
 | `ORCHESTRATOR_BASE_PATH` | `/orchestrator` | Base of the local dirs: `sandbox/` (`SANDBOX_CACHE_DIR`), `template/` (`TEMPLATE_CACHE_DIR`) and `build/` (`DEFAULT_CACHE_DIR`). |
 | `PERSISTENT_VOLUME_MOUNTS` | | Volume types and their host dirs, for example `nfs:/data/volumes`. When set, the node serves volumes over NFS. |
+| `NFS_PROXY_HANDLE_CACHE_LIMIT` | `16384` | File handles the NFS proxy keeps for each volume. Past the limit, the least recently used handle is stale to the guest. |
+| `NFS_PROXY_METRICS`, `NFS_PROXY_LOGGING`, `NFS_PROXY_TRACING` | `true`, `false`, `false` | Call metrics, debug logs and spans of the NFS proxy. `NFS_PROXY_RECORD_STAT_CALLS` and `NFS_PROXY_RECORD_HANDLE_CALLS` add the stat and handle calls. |
 | `LAUNCH_DARKLY_API_KEY` | | Feature flags; without it, upstream's fallbacks. |
 | `OTEL_COLLECTOR_GRPC_ENDPOINT` | | Enables OTLP metrics, traces and logs. |
 

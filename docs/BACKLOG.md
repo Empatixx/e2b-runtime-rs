@@ -28,7 +28,9 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| The NFS proxy runs on nfsserve (vendored with a small patch), not go-nfs; the `NFS_PROXY_*` logging, tracing, metrics, handle cache limit and directory verifier settings are not read, and the handle table has no size limit | API |
+| The NFS proxy runs on nfsserve (vendored with a small patch), not go-nfs. `NFS_PROXY_LOG_LEVEL` (go-nfs's own log level) and `NFS_PROXY_DIR_VERIFIER_LIMIT` are not read, because nfsserve pages READDIR by the handle of the last entry instead of a cached listing | later |
+| Call metrics, logs and spans use go-nfs's operation names but follow the Rust calls, so the count per NFS request differs (go-nfs adds `FS.Stat` checks and opens files once per read or write) | later |
+| A rename moves the handles under the old path to the new one; Go makes the renamed entry's handle stale, and handles inside a renamed directory keep their old paths | later |
 | The portmapper answers 2049 for every program; Go answers 2049 only for NFS and mountd over TCP and 0 otherwise | later |
 
 ## Orchestrator: shared chunk cache

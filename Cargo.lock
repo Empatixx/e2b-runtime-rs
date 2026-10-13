@@ -3790,6 +3790,7 @@ dependencies = [
  "launchdarkly-server-sdk",
  "libublk",
  "linux-raw-sys 0.12.1",
+ "lru 0.18.5",
  "lz4",
  "moka",
  "netns-rs",

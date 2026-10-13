@@ -225,7 +225,9 @@ mod serve {
             Arc::new(move |ip| mounting.mounting_sandbox(ip)),
             Arc::new(move || live.live_lifecycles()),
             config.volume_mounts.clone(),
-        );
+            config.nfs_proxy,
+        )
+        .map_err(|e| format!("failed to create nfs proxy: {e}"))?;
         tokio::spawn(proxy.clone().serve_portmap(portmap));
         tokio::spawn(proxy.serve(nfs));
         Ok(())

@@ -54,4 +54,4 @@ Local diff files are kept for 25 hours, pinned until their upload finishes, and 
 
 A sandbox can mount persistent volumes. Each volume is a directory on the node, under the host dir of its type from `PERSISTENT_VOLUME_MOUNTS`, in `team-<team id>/vol-<volume id>`. envd mounts it over NFS version 3 from `192.0.2.1:/<volume name>`. The node redirects that address to its NFS proxy on port 5011 and the portmapper on port 5012, like upstream.
 
-The proxy finds the sandbox by the source address of the connection, so a sandbox sees only its own volumes. Each volume is confined to its directory, and file handles stay valid while the sandbox lives. The proxy runs on the nfsserve crate with a small patch, kept in `vendor/nfsserve`.
+The proxy finds the sandbox by the source address of the connection, so a sandbox sees only its own volumes. Each volume is confined to its directory and keeps up to `NFS_PROXY_HANDLE_CACHE_LIMIT` file handles, 16384 by default. Past that, the least recently used handle is stale to the guest, like upstream. The proxy runs on the nfsserve crate with a small patch, kept in `vendor/nfsserve`.

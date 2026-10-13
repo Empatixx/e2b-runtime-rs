@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
+use lru::LruCache;
 use nfsserve::nfs::fileid3;
 use parking_lot::Mutex;
 
@@ -37,6 +39,12 @@ impl Node {
         })
     }
 
+    fn ancestors(&self) -> Vec<Node> {
+        let mut ancestors: Vec<Node> = std::iter::successors(self.parent(), Node::parent).collect();
+        ancestors.reverse();
+        ancestors
+    }
+
     fn contains(&self, other: &Node) -> bool {
         self.volume == other.volume
             && (other.path == self.path || self.path.is_empty() || other.path.starts_with(&format!("{}/", self.path)))
@@ -51,74 +59,131 @@ impl Node {
 }
 
 pub struct Handles {
+    limit: NonZeroUsize,
     table: Mutex<Table>,
 }
 
 struct Table {
     next: fileid3,
-    nodes: HashMap<fileid3, Node>,
+    volumes: HashMap<usize, VolumeHandles>,
+}
+
+struct VolumeHandles {
+    recent: LruCache<fileid3, Node>,
     ids: HashMap<Node, fileid3>,
 }
 
-impl Default for Handles {
-    fn default() -> Self {
+impl VolumeHandles {
+    fn new(limit: NonZeroUsize) -> Self {
         Self {
-            table: Mutex::new(Table {
-                next: FIRST_ID,
-                nodes: HashMap::new(),
-                ids: HashMap::new(),
-            }),
+            recent: LruCache::new(limit),
+            ids: HashMap::new(),
         }
+    }
+
+    fn insert(&mut self, id: fileid3, node: Node) {
+        if let Some((evicted_id, evicted)) = self.recent.push(id, node.clone())
+            && self.ids.get(&evicted) == Some(&evicted_id)
+        {
+            self.ids.remove(&evicted);
+        }
+        self.ids.insert(node, id);
+    }
+
+    fn resolve(&mut self, id: fileid3) -> Option<Node> {
+        let node = self.recent.peek(&id)?.clone();
+        node.ancestors()
+            .iter()
+            .filter_map(|ancestor| self.ids.get(ancestor).copied())
+            .for_each(|ancestor| {
+                self.recent.get(&ancestor);
+            });
+        self.recent.get(&id);
+        Some(node)
+    }
+
+    fn forget(&mut self, gone: &Node) {
+        let ids: Vec<(Node, fileid3)> = self
+            .ids
+            .iter()
+            .filter(|(node, _)| gone.contains(node))
+            .map(|(node, id)| (node.clone(), *id))
+            .collect();
+        ids.into_iter().for_each(|(node, id)| {
+            self.recent.pop(&id);
+            self.ids.remove(&node);
+        });
+    }
+
+    fn moved(&mut self, from: &Node, to: &Node) {
+        self.forget(to);
+        let moved: Vec<(Node, fileid3)> = self
+            .ids
+            .iter()
+            .filter(|(node, _)| from.contains(node))
+            .map(|(node, id)| (node.clone(), *id))
+            .collect();
+        moved.into_iter().for_each(|(old, id)| {
+            let new = old.moved(from, to);
+            self.ids.remove(&old);
+            if let Some(entry) = self.recent.peek_mut(&id) {
+                *entry = new.clone();
+            }
+            self.ids.insert(new, id);
+        });
     }
 }
 
 impl Handles {
+    pub fn new(limit: NonZeroUsize) -> Self {
+        Self {
+            limit,
+            table: Mutex::new(Table {
+                next: FIRST_ID,
+                volumes: HashMap::new(),
+            }),
+        }
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit.get()
+    }
+
     pub fn node(&self, id: fileid3) -> Option<Node> {
-        self.table.lock().nodes.get(&id).cloned()
+        self.table
+            .lock()
+            .volumes
+            .values_mut()
+            .find(|volume| volume.recent.contains(&id))
+            .and_then(|volume| volume.resolve(id))
     }
 
     pub fn id_of(&self, node: Node) -> fileid3 {
         let mut table = self.table.lock();
-        if let Some(id) = table.ids.get(&node) {
-            return *id;
+        let Table { next, volumes } = &mut *table;
+        let volume = volumes
+            .entry(node.volume)
+            .or_insert_with(|| VolumeHandles::new(self.limit));
+        if let Some(id) = volume.ids.get(&node).copied() {
+            volume.recent.get(&id);
+            return id;
         }
-        let id = table.next;
-        table.next += 1;
-        table.nodes.insert(id, node.clone());
-        table.ids.insert(node, id);
+        let id = *next;
+        *next += 1;
+        volume.insert(id, node);
         id
     }
 
     pub fn forget(&self, gone: &Node) {
-        let mut table = self.table.lock();
-        let ids: Vec<fileid3> = table
-            .ids
-            .iter()
-            .filter(|(node, _)| gone.contains(node))
-            .map(|(_, id)| *id)
-            .collect();
-        ids.iter().for_each(|id| {
-            if let Some(node) = table.nodes.remove(id) {
-                table.ids.remove(&node);
-            }
-        });
+        if let Some(volume) = self.table.lock().volumes.get_mut(&gone.volume) {
+            volume.forget(gone);
+        }
     }
 
     pub fn moved(&self, from: &Node, to: &Node) {
-        self.forget(to);
-        let mut table = self.table.lock();
-        let moved: Vec<(fileid3, Node)> = table
-            .nodes
-            .iter()
-            .filter(|(_, node)| from.contains(node))
-            .map(|(id, node)| (*id, node.moved(from, to)))
-            .collect();
-        moved.into_iter().for_each(|(id, node)| {
-            if let Some(old) = table.nodes.insert(id, node.clone()) {
-                table.ids.remove(&old);
-            }
-            table.ids.insert(node, id);
-        });
+        if let Some(volume) = self.table.lock().volumes.get_mut(&from.volume) {
+            volume.moved(from, to);
+        }
     }
 }
 
@@ -133,9 +198,13 @@ mod tests {
         }
     }
 
+    fn handles(limit: usize) -> Handles {
+        Handles::new(NonZeroUsize::new(limit).unwrap())
+    }
+
     #[test]
     fn the_same_path_keeps_its_id() {
-        let handles = Handles::default();
+        let handles = handles(16);
         let id = handles.id_of(node("a/b"));
         assert_eq!(handles.id_of(node("a/b")), id);
         assert_eq!(handles.node(id), Some(node("a/b")));
@@ -144,7 +213,7 @@ mod tests {
 
     #[test]
     fn forgetting_a_directory_forgets_what_is_inside() {
-        let handles = Handles::default();
+        let handles = handles(16);
         let dir = handles.id_of(node("a"));
         let inside = handles.id_of(node("a/b"));
         let sibling = handles.id_of(node("ab"));
@@ -155,7 +224,7 @@ mod tests {
 
     #[test]
     fn a_rename_moves_the_ids_of_the_tree() {
-        let handles = Handles::default();
+        let handles = handles(16);
         let dir = handles.id_of(node("a"));
         let inside = handles.id_of(node("a/b"));
         let replaced = handles.id_of(node("c"));
@@ -172,5 +241,47 @@ mod tests {
         assert_eq!(node("a").parent(), Some(node("")));
         assert_eq!(node("").parent(), None);
         assert_eq!(node("").child("x"), node("x"));
+        assert_eq!(node("a/b/c").ancestors(), vec![node(""), node("a"), node("a/b")]);
+    }
+
+    #[test]
+    fn the_least_recently_used_handle_goes_stale_past_the_limit() {
+        let handles = handles(2);
+        let first = handles.id_of(node("a"));
+        let second = handles.id_of(node("b"));
+        handles.node(first);
+        let third = handles.id_of(node("c"));
+
+        assert_eq!(handles.node(second), None);
+        assert_eq!(handles.node(first), Some(node("a")));
+        assert_eq!(handles.node(third), Some(node("c")));
+        assert_ne!(handles.id_of(node("b")), second);
+    }
+
+    #[test]
+    fn using_a_file_keeps_its_directories_fresh() {
+        let handles = handles(3);
+        let dir = handles.id_of(node("d"));
+        let file = handles.id_of(node("d/f"));
+        let other = handles.id_of(node("o"));
+        handles.node(file);
+        handles.id_of(node("n"));
+
+        assert_eq!(handles.node(other), None);
+        assert_eq!(handles.node(dir), Some(node("d")));
+        assert_eq!(handles.node(file), Some(node("d/f")));
+    }
+
+    #[test]
+    fn each_volume_has_its_own_limit() {
+        let handles = handles(1);
+        let first = handles.id_of(node("a"));
+        let elsewhere = handles.id_of(Node {
+            volume: 1,
+            path: "a".to_owned(),
+        });
+
+        assert_eq!(handles.node(first), Some(node("a")));
+        assert!(handles.node(elsewhere).is_some());
     }
 }

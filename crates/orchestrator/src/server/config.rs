@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub mod binaries;
+pub mod nfs_proxy;
 pub mod runtime;
 mod storage;
 pub mod volume_mounts;
@@ -24,6 +25,7 @@ use crate::storage::local_upload::UploadSigner;
 use crate::storage::spec::{Provider, StorageSpec};
 use crate::telemetry::identity::service_name;
 use binaries::Binaries;
+use nfs_proxy::NfsProxySettings;
 use runtime::RuntimeFlags;
 use storage::StorageEnv;
 use volume_mounts::VolumeMounts;
@@ -75,6 +77,7 @@ pub struct NodeConfig {
     pub clickhouse: Option<String>,
     pub clickhouse_additional: Vec<String>,
     pub volume_mounts: VolumeMounts,
+    pub nfs_proxy: NfsProxySettings,
     pub rootfs_exposure: Transport,
 }
 
@@ -149,6 +152,7 @@ impl NodeConfig {
             clickhouse: clickhouse.0,
             clickhouse_additional: clickhouse.1,
             volume_mounts: VolumeMounts::from_vars(vars)?,
+            nfs_proxy: NfsProxySettings::from_vars(vars)?,
             rootfs_exposure: Transport::parse(var("ROOTFS_EXPOSURE").as_deref())?,
         })
     }

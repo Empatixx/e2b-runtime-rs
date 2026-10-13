@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use nfsserve::context::RPCContext;
@@ -8,7 +9,9 @@ use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
 
+use super::calls::Calls;
 use super::sandbox_fs::{SandboxVolumes, VolumeRoot};
+use crate::server::config::nfs_proxy::NfsProxySettings;
 use crate::server::config::volume_mounts::VolumeMounts;
 
 const ADVERTISED_PORT: u16 = 2049;
@@ -34,17 +37,26 @@ pub struct NfsProxy {
     source: MountSource,
     live: LiveLifecycles,
     paths: VolumeMounts,
+    handle_limit: NonZeroUsize,
+    calls: Calls,
     mounted: Mutex<HashMap<String, Arc<SandboxVolumes>>>,
 }
 
 impl NfsProxy {
-    pub fn new(source: MountSource, live: LiveLifecycles, paths: VolumeMounts) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(
+        source: MountSource,
+        live: LiveLifecycles,
+        paths: VolumeMounts,
+        settings: NfsProxySettings,
+    ) -> Result<Arc<Self>, String> {
+        Ok(Arc::new(Self {
             source,
             live,
             paths,
+            handle_limit: settings.handle_limit()?,
+            calls: Calls::new(&settings),
             mounted: Mutex::default(),
-        })
+        }))
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
@@ -59,7 +71,7 @@ impl NfsProxy {
     pub async fn serve_portmap(self: Arc<Self>, listener: TcpListener) {
         loop {
             match listener.accept().await {
-                Ok((socket, peer)) => spawn_connection(socket, peer, Arc::new(SandboxVolumes::new(Vec::new()))),
+                Ok((socket, peer)) => spawn_connection(socket, peer, Arc::new(self.sandbox_volumes(Vec::new()))),
                 Err(error) => tracing::warn!(%error, "portmap accept failed"),
             }
         }
@@ -80,9 +92,17 @@ impl NfsProxy {
         Some(
             mounted
                 .entry(sandbox.lifecycle_id.clone())
-                .or_insert_with(|| Arc::new(SandboxVolumes::new(self.roots(&sandbox))))
+                .or_insert_with(|| Arc::new(self.sandbox_volumes(self.roots(&sandbox))))
                 .clone(),
         )
+    }
+
+    fn sandbox_volumes(&self, volumes: Vec<VolumeRoot>) -> SandboxVolumes {
+        SandboxVolumes::builder()
+            .volumes(volumes)
+            .handle_limit(self.handle_limit)
+            .calls(self.calls.clone())
+            .build()
     }
 
     fn roots(&self, sandbox: &MountingSandbox) -> Vec<VolumeRoot> {

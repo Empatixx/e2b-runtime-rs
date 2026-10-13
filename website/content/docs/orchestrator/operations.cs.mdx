@@ -17,6 +17,8 @@ Orchestrator se nastavuje proměnnými prostředí se stejnými názvy jako v Go
 | `NBD_POOL_SIZE` | `64` | Připravená NBD zařízení. |
 | `ORCHESTRATOR_BASE_PATH` | `/orchestrator` | Základ lokálních adresářů: `sandbox/` (`SANDBOX_CACHE_DIR`), `template/` (`TEMPLATE_CACHE_DIR`) a `build/` (`DEFAULT_CACHE_DIR`). |
 | `PERSISTENT_VOLUME_MOUNTS` | | Typy volumes a jejich adresáře na hostu, například `nfs:/data/volumes`. Když je nastavená, node sdílí volumes přes NFS. |
+| `NFS_PROXY_HANDLE_CACHE_LIMIT` | `16384` | Kolik file handlů si NFS proxy pamatuje pro každý volume. Nad limit je nejdéle nepoužitý handle pro hosta neplatný. |
+| `NFS_PROXY_METRICS`, `NFS_PROXY_LOGGING`, `NFS_PROXY_TRACING` | `true`, `false`, `false` | Metriky volání, debug logy a spany NFS proxy. `NFS_PROXY_RECORD_STAT_CALLS` a `NFS_PROXY_RECORD_HANDLE_CALLS` přidají volání stat a handlů. |
 | `LAUNCH_DARKLY_API_KEY` | | Feature flagy; bez něj výchozí hodnoty z Go. |
 | `OTEL_COLLECTOR_GRPC_ENDPOINT` | | Zapne OTLP metriky, trace a logy. |
 
