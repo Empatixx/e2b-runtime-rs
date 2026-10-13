@@ -29,7 +29,7 @@ socket2 = { version = "0.6", features = ["all"] }
 subtle = "2"
 rustls-native-certs = "0.8"
 ipnet = "2"
-nix = { version = "0.29", features = ["event", "fs", "ioctl", "mman", "net", "process", "socket", "uio", "user"] }
+nix = { version = "0.29", features = ["event", "fs", "ioctl", "mman", "net", "process", "signal", "socket", "uio", "user"] }
 object_store = { version = "0.14", features = ["aws", "azure", "gcp"] }
 p12-keystore = "0.3"
 p224 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }

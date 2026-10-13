@@ -63,7 +63,6 @@ Every final review ends with minors and deferred rulings. They are collected her
 | Item | Target |
 |---|---|
 | Local expiry is opt-in (`E2B_LOCAL_EXPIRY=1`); default leaves expiry and auto-pause to the API evictor like upstream | API |
-| Startup sweep removes every `ns-<N>` netns and all of `/sys/fs/cgroup/e2b/*` and `SANDBOX_CACHE_DIR`; assumes a dedicated node | API |
 
 ## Orchestrator: fast resume (M9)
 

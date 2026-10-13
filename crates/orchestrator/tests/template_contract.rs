@@ -195,6 +195,7 @@ fn node_config(host: &Host, dir: &Path, ensure_free_disk: bool) -> NodeConfig {
         clickhouse_additional: Vec::new(),
         volume_mounts: Default::default(),
         nfs_proxy: Default::default(),
+        disable_startup_reclaim: false,
         rootfs_exposure: Default::default(),
     }
 }

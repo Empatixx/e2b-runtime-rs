@@ -38,6 +38,8 @@ pub mod sandbox;
 pub mod sandbox_logs;
 pub mod sandbox_observer;
 pub mod server;
+#[cfg(target_os = "linux")]
+pub mod startup_reclaim;
 pub mod storage;
 pub mod system;
 pub mod tcpfirewall;

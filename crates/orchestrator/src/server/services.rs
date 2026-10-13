@@ -45,6 +45,12 @@ impl Services {
         self.types.contains(&ServiceType::TemplateManager)
     }
 
+    pub fn uses_sandbox_runtime(&self) -> bool {
+        self.types
+            .iter()
+            .any(|kind| matches!(kind, ServiceType::Orchestrator | ServiceType::TemplateManager))
+    }
+
     pub fn roles(&self) -> Vec<ServiceInfoRole> {
         self.types.iter().map(ServiceType::role).collect()
     }

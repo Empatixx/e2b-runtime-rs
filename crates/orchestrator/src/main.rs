@@ -114,7 +114,9 @@ mod serve {
             let _ = node.host_stats.set(host_stats.clone());
         }
         node.events.install(event_sinks);
-        node.sweep().await;
+        if config.services.uses_sandbox_runtime() && !config.disable_startup_reclaim {
+            node.reclaim_leftovers().await;
+        }
         let setup = config.open_build_storage()?.map(|build| TemplateManagerSetup {
             build,
             builder: config.builder.clone(),

@@ -53,4 +53,4 @@ Logy, které uživatel u sandboxu vidí, node posílá na `LOGS_COLLECTOR_ADDRES
 
 Po `SIGTERM` se node ohlásí jako vypínající se, počká 15 s (pokud není `ENVIRONMENT=local`), aby na něj API přestalo plánovat, nechá doběhnout běžící buildy šablon a pak čeká, dokud API neodstraní všechny sandboxy a nedoběhnou všechny uploady. `FORCE_STOP=true` čekání přeskočí.
 
-Při startu smaže, co po sobě nechal předchozí běh (namespaces `ns-*`, `/sys/fs/cgroup/e2b/*`, pracovní složku), takže počítá s tím, že node patří jen jemu.
+Při startu uklidí, co po sobě nechal předchozí běh, stejně jako Go: zabije všechny skupiny procesů `firecracker` na hostu, odpojí připojená NBD zařízení a smaže namespaces slotů `ns-*`, cgroupy `sbx-*` pod `/sys/fs/cgroup/e2b` a složky sandboxů v `SANDBOX_CACHE_DIR`. Počítá tedy s tím, že node patří jen jemu. Počty jdou do `orchestrator.startup_reclaim.reclaimed` a `orchestrator.startup_reclaim.failed` a `DISABLE_STARTUP_RECLAIM=true` úklid vypne.

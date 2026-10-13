@@ -47,6 +47,16 @@ impl Cgroup {
         })
     }
 
+    pub fn existing(path: PathBuf) -> Self {
+        Self {
+            path,
+            peak: None,
+            proc_root: PathBuf::from(PROC_ROOT),
+            vcpu_threads_confined: false,
+            removed: false,
+        }
+    }
+
     pub fn stats(&self) -> CgroupStats {
         CgroupStats {
             path: self.path.clone(),

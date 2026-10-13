@@ -46,6 +46,8 @@ crates/orchestrator/   orchestrator crate (same layout rules as envd below)
                        iptables REDIRECTs; HostSlots), pool.rs (NetworkPool: 32 new, 100 reused, 3s return delay, configure/reset egress), storage.rs (SlotStorage: index allocation,
                        leaked namespaces), firewall.rs (nftables slot-firewall: sets, DSCP, EgressRules),
                        settings.rs (SANDBOX_* network env), prerequisites.rs (NETWORK_VERSION=2 checks)
+  src/startup_reclaim.rs startup reclaim like upstream pkg/startupreclaim: firecracker/ (kill orphaned VMMs by /proc cmdline), NBD,
+                       ns-N slots, sbx-* cgroups, sandbox dirs; orchestrator.startup_reclaim.* counters
   src/tcpfirewall/     egress TCP proxy on 5016/5017/5018: rules.rs (domain/CIDR allow-deny), sniff.rs (HTTP Host,
                        TLS SNI), proxy.rs (SO_ORIGINAL_DST, 30s dial)
   src/hyperloop/       hyperloop server on 5010 for the guest: server.rs (/me, /logs), logs.rs (SourceSandbox)

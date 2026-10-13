@@ -209,6 +209,7 @@ async fn cluster(host: &Host, pool: Pool, local_expiry: bool, max_sandboxes: i64
         clickhouse_additional: Vec::new(),
         volume_mounts: Default::default(),
         nfs_proxy: Default::default(),
+        disable_startup_reclaim: false,
         rootfs_exposure: Default::default(),
     };
     let node = Arc::new(Node::new(&config).unwrap());

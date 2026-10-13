@@ -213,6 +213,36 @@ fn spawn_worker(control: File) -> JoinHandle<io::Result<()>> {
     })
 }
 
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DISCONNECT_POLL_INTERVAL: Duration = Duration::from_micros(100);
+
+pub fn connected_devices() -> Vec<u32> {
+    connected_in(Path::new("/sys/block"), device_count())
+}
+
+fn connected_in(block_dir: &Path, count: u32) -> Vec<u32> {
+    (0..count)
+        .filter(|index| block_dir.join(format!("nbd{index}")).join("pid").exists())
+        .collect()
+}
+
+pub async fn disconnect_device(index: u32) -> Result<(), String> {
+    request_disconnect(index).map_err(|e| e.to_string())?;
+    let deadline = tokio::time::Instant::now() + DISCONNECT_TIMEOUT;
+    while pid_path(index).exists() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err("context deadline exceeded".to_owned());
+        }
+        tokio::time::sleep(DISCONNECT_POLL_INTERVAL).await;
+    }
+    Ok(())
+}
+
+fn request_disconnect(index: u32) -> io::Result<()> {
+    let device = OpenOptions::new().read(true).write(true).open(device_path(index))?;
+    ioctl::disconnect(&device).and_then(|()| ioctl::clear_sock(&device))
+}
+
 fn device_count() -> u32 {
     std::fs::read_to_string("/sys/module/nbd/parameters/nbds_max")
         .ok()
@@ -242,4 +272,40 @@ fn sys_path(index: u32) -> PathBuf {
 
 fn pid_path(index: u32) -> PathBuf {
     sys_path(index).join("pid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_devices_are_the_ones_with_a_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        ["nbd0", "nbd1", "nbd2"]
+            .iter()
+            .for_each(|name| std::fs::create_dir(dir.path().join(name)).unwrap());
+        ["nbd0", "nbd2"]
+            .iter()
+            .for_each(|name| std::fs::write(dir.path().join(name).join("pid"), b"1").unwrap());
+
+        assert_eq!(connected_in(dir.path(), 3), vec![0, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_device_left_without_its_server_is_disconnected() {
+        if !nix::unistd::geteuid().is_root() || !device_path(0).exists() {
+            eprintln!("skipping: needs root and nbd");
+            return;
+        }
+        let (kernel, server) = UnixStream::pair().unwrap();
+        let device = NbdDevice::attach(kernel, 1 << 20, 4096).await.unwrap();
+        let index = device.index();
+        assert!(connected_devices().contains(&index));
+        drop(server);
+
+        let (disconnected, _) = tokio::join!(disconnect_device(index), device.wait());
+
+        assert_eq!(disconnected, Ok(()));
+        assert!(!pid_path(index).exists());
+    }
 }

@@ -53,4 +53,4 @@ The node writes the logs a user sees for a sandbox to `LOGS_COLLECTOR_ADDRESS`, 
 
 On `SIGTERM` the node reports itself as draining, waits 15 s (unless `ENVIRONMENT=local`) so the API stops scheduling to it, lets running template builds finish, then waits until the API has removed every sandbox and every upload has landed. `FORCE_STOP=true` skips the waits.
 
-At startup it removes what a previous run left behind (`ns-*` namespaces, `/sys/fs/cgroup/e2b/*`, the work directory), so it expects to own the node.
+At startup it reclaims what a previous run left behind, like upstream: it kills every `firecracker` process group on the host, disconnects connected NBD devices, and removes the `ns-*` slot namespaces, the `sbx-*` cgroups under `/sys/fs/cgroup/e2b` and the sandbox dirs in `SANDBOX_CACHE_DIR`. So it expects to own the node. The counts go to `orchestrator.startup_reclaim.reclaimed` and `orchestrator.startup_reclaim.failed`, and `DISABLE_STARTUP_RECLAIM=true` turns the reclaim off.

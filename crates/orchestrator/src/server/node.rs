@@ -75,6 +75,7 @@ use crate::sandbox::config::sandbox_builder::{
 use crate::sandbox::rootfs::recovery::RecoveryRecord;
 use crate::sandbox::snapshot::provisional::ProvisionalMemfile;
 use crate::sandbox::snapshot::{LocalSnapshot, SnapshotOptions};
+use crate::startup_reclaim::{self, ReclaimPaths, Summary};
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::Header;
@@ -94,7 +95,6 @@ const DEADLINE_EXCEEDED: &str = "context deadline exceeded\nrequest timed out";
 const TEMPLATE_DEFAULT_USER: &str = "user";
 pub(super) const SANDBOX_TYPE: &str = "sandbox";
 pub const BUILD_SANDBOX_TYPE: &str = "build";
-const CGROUP_ROOT: &str = "/sys/fs/cgroup/e2b";
 
 pub type BaseSandbox =
     SetHugePages<SetSandboxType<SetHyperloopIp<SetWorkDir<SetKernel<SetFirecracker<SetTemplateId<SetId>>>>>>>;
@@ -777,22 +777,8 @@ impl Node {
         }
     }
 
-    pub async fn sweep(&self) {
-        let slots: Vec<Slot> = std::fs::read_dir("/var/run/netns")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter_map(|name| name.strip_prefix("ns-")?.parse().ok())
-            .filter_map(|index| Slot::new(index).ok())
-            .collect();
-        for slot in slots {
-            if let Err(e) = slot.destroy().await {
-                tracing::warn!(slot = slot.index, error = %e, "could not remove a leftover slot");
-            }
-        }
-        sweep_cgroups(Path::new(CGROUP_ROOT));
-        let _ = std::fs::remove_dir_all(&self.work_dir);
+    pub async fn reclaim_leftovers(&self) -> Summary {
+        startup_reclaim::run(&ReclaimPaths::builder().sandbox_cache_dir(self.work_dir.clone()).build()).await
     }
 
     async fn start(self: &Arc<Self>, request: StartRequest) -> Result<SandboxHandle, StartFailure> {
@@ -1255,19 +1241,6 @@ fn discard_snapshot_dir(dir: &Path) {
 
 fn slot_taken_back() -> StartFailure {
     StartFailure::Failed("the network slot was taken back".to_owned())
-}
-
-fn sweep_cgroups(root: &Path) {
-    std::fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .for_each(|cgroup| {
-            let _ = std::fs::write(cgroup.join("cgroup.kill"), "1");
-            let _ = std::fs::remove_dir(&cgroup);
-        });
 }
 
 #[cfg(test)]

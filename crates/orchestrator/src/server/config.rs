@@ -78,6 +78,7 @@ pub struct NodeConfig {
     pub clickhouse_additional: Vec<String>,
     pub volume_mounts: VolumeMounts,
     pub nfs_proxy: NfsProxySettings,
+    pub disable_startup_reclaim: bool,
     pub rootfs_exposure: Transport,
 }
 
@@ -153,6 +154,7 @@ impl NodeConfig {
             clickhouse_additional: clickhouse.1,
             volume_mounts: VolumeMounts::from_vars(vars)?,
             nfs_proxy: NfsProxySettings::from_vars(vars)?,
+            disable_startup_reclaim: env_bool(var("DISABLE_STARTUP_RECLAIM").as_deref(), "DisableStartupReclaim")?,
             rootfs_exposure: Transport::parse(var("ROOTFS_EXPOSURE").as_deref())?,
         })
     }
