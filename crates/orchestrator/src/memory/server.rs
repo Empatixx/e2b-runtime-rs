@@ -35,6 +35,7 @@ mod wp_failures;
 mod write_protect;
 
 pub use self::counters::ServeStats;
+pub use self::write_protect::Support;
 
 const MAX_FAULTS_IN_FLIGHT: usize = 4096;
 const RETRY_DELAY: Duration = Duration::from_millis(1);
@@ -169,6 +170,10 @@ impl MemoryServer {
 
     pub fn write_protecting(&self) -> bool {
         self.state.write_protecting()
+    }
+
+    pub fn write_protect_support(&self) -> Support {
+        self.state.write_protect_support()
     }
 
     pub fn empty_pages(&self) -> RoaringBitmap {

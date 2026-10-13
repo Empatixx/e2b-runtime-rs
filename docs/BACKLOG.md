@@ -55,7 +55,7 @@ Every final review ends with minors and deferred rulings. They are collected her
 
 | Item | Target |
 |---|---|
-| If write-protect is unavailable the resumed pause falls back to resident−empty (correct but large); surface it as a metric | API |
+| If write-protect is unconfirmed or unsupported, the pause takes resident minus empty (correct but large) where Go always reads the pagemap; `orchestrator.sandbox.snapshot.memory.dirty_source` counts it, a metric Go does not have | later |
 | No KVM test with multiple memory regions (guests above the MMIO gap) | API |
 
 ## Orchestrator: gRPC (M8)

@@ -1,4 +1,5 @@
 pub mod build;
+pub mod dirty_pages;
 pub mod endpoint;
 pub mod envd_defaults;
 pub mod envd_init;

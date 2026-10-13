@@ -5,7 +5,7 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 
 use super::counters::{ServeCounters, ServeStats};
 use super::wp_failures::WpFailures;
-use super::write_protect::WriteProtect;
+use super::write_protect::{Support, WriteProtect};
 use crate::memory::balloon_mode::BalloonMode;
 use crate::memory::cow_window::CowWindow;
 use crate::memory::page_tracker::{PageState, PageTracker};
@@ -68,6 +68,10 @@ impl SharedState {
 
     pub fn write_protecting(&self) -> bool {
         self.write_protect.confirmed()
+    }
+
+    pub fn write_protect_support(&self) -> Support {
+        self.write_protect.support()
     }
 
     pub fn balloon_mode(&self) -> BalloonMode {

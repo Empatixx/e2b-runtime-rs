@@ -22,13 +22,14 @@ use crate::block::overlay::Overlay;
 use crate::firecracker::client::FirecrackerClient;
 use crate::firecracker::memory_info::GuestRegion;
 use crate::memory::dedup::config::DedupConfig;
-use crate::memory::server::MemoryServer;
+use crate::memory::server::{MemoryServer, Support};
 use crate::memory::snapshot::{BuildFileBase, GuestMemory, diff_metadata, export_deduped, export_pages, memfile_pages};
 use crate::proto::SchedulingMetadata;
 use crate::server::scheduling::from_headers;
 use crate::storage::backend::{ObjectMetadata, Storage};
 use crate::storage::build::Build;
 use crate::storage::header::{BuildMapping, DiffMetadata, Header, Metadata};
+use crate::telemetry::dirty_pages::{DirtySource, Divergence, record_dirty_source};
 use crate::telemetry::server::in_place::record_rootfs_seal;
 use crate::telemetry::snapshot_diff::{record_snapshot_dedup, record_snapshot_diff};
 
@@ -362,24 +363,51 @@ impl Sandbox {
         }
         let regions = client.memory_mappings().await?;
         let removed = self.settled_removals().await?;
-        let tracked = self
-            .resources
-            .memory
-            .as_ref()
-            .filter(|memory| memory.write_protecting());
-        let (dirty, empty) = match tracked {
-            Some(_) => (client.memory_dirty().await?, RoaringBitmap::new()),
-            None => {
+        let source = self.dirty_source();
+        record_dirty_source(source);
+        let (dirty, empty) = match source {
+            DirtySource::Pagemap => (self.pagemap_dirty(client, &regions).await?, RoaringBitmap::new()),
+            _ => {
                 let info = client.memory_info().await?;
-                (&info.resident - &info.empty, info.empty)
+                (memfile_pages(&regions, &(&info.resident - &info.empty))?, info.empty)
             }
         };
         Ok(MemoryPages {
-            tracked_writes: tracked.is_some(),
-            dirty: memfile_pages(&regions, &dirty)?,
+            tracked_writes: source == DirtySource::Pagemap,
+            dirty,
             empty: memfile_pages(&regions, &empty)? | removed,
             regions,
         })
+    }
+
+    fn dirty_source(&self) -> DirtySource {
+        match self
+            .resources
+            .memory
+            .as_ref()
+            .map(|memory| memory.write_protect_support())
+        {
+            Some(Support::On) => DirtySource::Pagemap,
+            Some(Support::Unknown) => DirtySource::Unconfirmed,
+            Some(Support::Off) => DirtySource::Unsupported,
+            None => DirtySource::NoUffd,
+        }
+    }
+
+    async fn pagemap_dirty(
+        &self,
+        client: &FirecrackerClient,
+        regions: &[GuestRegion],
+    ) -> Result<RoaringBitmap, String> {
+        let tracker = match (self.uses_sync_wp(), self.resources.memory.as_ref()) {
+            (true, Some(memory)) => Some(memory.export_page_states().await?.dirty),
+            _ => None,
+        };
+        let pagemap = memfile_pages(regions, &client.memory_dirty().await?)?;
+        if let Some(tracker) = tracker {
+            Divergence::between(&tracker, &pagemap).record();
+        }
+        Ok(pagemap)
     }
 
     async fn tracker_pages(&self, client: &FirecrackerClient) -> Result<MemoryPages, String> {
