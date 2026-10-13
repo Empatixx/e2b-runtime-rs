@@ -16,6 +16,13 @@ done
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 docker build -q -t envd-rs-test -f docker/test.Dockerfile docker >/dev/null
+status=0
 docker run --rm --privileged -v /dev:/dev --tmpfs /tmp:exec -e CARGO_INCREMENTAL=0 \
   -v "$PWD":/src -v envd-rs-target:/src/target -v envd-rs-cargo:/usr/local/cargo/registry \
-  -w /src envd-rs-test "$@"
+  -w /src envd-rs-test "$@" || status=$?
+# cargo never deletes old test binaries: keep the two newest of each test and drop the rest.
+docker run --rm -v envd-rs-target:/target envd-rs-test sh -c \
+  "find /target -path '*/deps/*' -maxdepth 4 -type f -perm -u+x ! -name '*.so' -printf '%T@ %p\n' \
+  | sort -rn | awk '{ name = \$2; sub(/-[0-9a-f]+\$/, \"\", name); if (++seen[name] > 2) print \$2 }' \
+  | xargs -r rm -f" || true
+exit "$status"

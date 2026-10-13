@@ -10,3 +10,9 @@ nfsserve = { path = "vendor/nfsserve" }
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
