@@ -1,0 +1,189 @@
+---
+title: How it works
+description: The node, the layers, create, pause, resume on another node, the network, volumes, template builds and what lives in S3.
+---
+
+This page follows one sandbox through its life. Each section has a diagram and the numbers we measured on the Azure test VM (see [Numbers](../#numbers)).
+
+## Inside one node
+
+A node is one process, `e2b-node`, running as root. It starts the ublk daemon from AgentENV as a child process.
+
+| Part | File | What it does |
+|---|---|---|
+| API | `api/` | the E2B REST API: sandboxes, pause, connect, snapshots, volumes |
+| forwarding | `api/forward.rs` | sends a call for a sandbox on another node to that node |
+| proxy | `proxy.rs` | sends sandbox traffic to envd in the guest |
+| sandboxes | `sandbox.rs` | the running sandboxes of this node; paused ones live only in S3 |
+| warm pool | `sandbox/warm_pool.rs` | 4 Firecracker processes started ahead of time, each with a network slot |
+| shared memory | `storage/shared_memory.rs` | one read-only memory device per checkpoint |
+| layers | `layers.rs` | layers named by sha256, a local cache, uploads to S3 |
+| ublk daemon | from AgentENV | serves `/dev/ublkbN` block devices made of OverlayBD layers |
+
+## Layers: how a disk is put together
+
+OverlayBD stacks layers. A read goes from the top layer down and returns the first layer that has the block. Every write goes to the top layer, which is local and writable.
+
+<Mermaid chart={`
+flowchart TB
+  G["guest sees /dev/vda, an ext4 disk"] --> U["/dev/ublkb7: OverlayBD device"]
+  U --> L0[runtime upper layer: local, writable, every write goes here]
+  L0 --> L1[sha256 d623: changes from the last pause, read only]
+  L1 --> L2[sha256 9629: ext4 from the Docker image, read only]
+  L2 --> Q{layer in the local cache?}
+  Q -->|yes| F[read the local file]
+  Q -->|no| R[read the S3 object block by block, then cache it]
+`} />
+
+Layers are named by the sha256 of their content. The same name is the key in S3 and the file name in the local cache. So a node never needs to ask whether its copy is up to date: the same name always means the same bytes.
+
+**Memory** uses the same layers, read only. Firecracker maps the memory device as its memory file:
+
+- A guest read of a page comes from the page cache of the device. Every sandbox from the same checkpoint shares that page cache.
+- A guest write of a page makes a private copy in the Firecracker process (copy on write).
+- The node keeps the device open for 60 seconds after its last sandbox stops. Linux drops the page cache of a block device when its last user closes it.
+
+## Create
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant S3
+  participant VM as Firecracker and guest
+  SDK->>A: POST /v2/sandboxes (templateID: base)
+  A->>S3: read templates/base.json and the checkpoint record
+  A->>A: take a Firecracker from the warm pool
+  A->>A: open the rootfs device (pooled, about 1 ms) and the shared memory device
+  A->>VM: load the snapshot (about 5 ms)
+  A->>VM: write the sandbox id and token hash to MMDS
+  A->>VM: envd /health and /init (about 50 ms, mostly page faults)
+  A->>S3: write sandboxes/id.json with owner A
+  A-->>SDK: 201 with sandboxID, domain of node A, envd token
+`} />
+
+A create takes about 58 ms. The VM restore is about 6 ms of it.
+
+## Pause
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant S3
+  SDK->>A: POST /sandboxes/id/pause
+  A->>A: pause the vCPUs, save vmstate (25 KB)
+  A->>A: read the dirty memory ranges and write them as a memory layer
+  A->>A: fsync and seal the rootfs upper layer (volumes the same way)
+  A->>S3: upload the new layers, vmstate and the checkpoint record
+  A->>S3: write sandboxes/id.json with no owner and the checkpoint id
+  A-->>SDK: 204
+  A->>A: in the background: stop Firecracker, return devices and the slot
+`} />
+
+A pause takes about 34 ms, including the upload. The memory layer holds only the pages the guest wrote since the last capture. After a pause the sandbox belongs to no node, and its whole state is in S3.
+
+The guest is not synced before a pause. Memory and disk are captured together, so the guest page cache is part of the snapshot.
+
+## Resume on another node
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant B as node B
+  participant S3
+  SDK->>B: POST /v2/sandboxes/id/connect
+  B->>S3: read sandboxes/id.json (etag e1): no owner, checkpoint y
+  B->>S3: write owner B with If-Match: e1
+  Note over B,S3: if another node wrote first, S3 answers 412 and B gives up
+  B->>S3: download vmstate of checkpoint y (25 KB)
+  B->>B: open devices, layers missing in the cache come from S3 on demand
+  B->>B: load the snapshot, envd /init
+  B-->>SDK: 201 with the domain of node B
+`} />
+
+A resume on another node takes about 125 ms, against about 93 ms on the same node. The conditional write (`If-Match`) makes sure that two nodes never resume the same sandbox.
+
+After the resume, the SDK sends sandbox traffic straight to node B. A call that still reaches node A, for example a kill, is forwarded:
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant B as node B
+  SDK->>A: DELETE /sandboxes/id
+  A->>A: not here, the record says owner B
+  A->>B: the same request, with the header x-e2b-simple-forwarded
+  B-->>A: 204
+  A-->>SDK: 204
+`} />
+
+The forwarded kill takes about 3 ms. The header stops a request from going around in a loop.
+
+## The network of one sandbox
+
+Every guest has the same IP address, 169.254.0.21, because it wakes up from a snapshot with the address it had at build time. A network namespace per slot keeps the guests apart.
+
+<Mermaid chart={`
+flowchart LR
+  G[guest eth0 169.254.0.21] --- T[tap0 169.254.0.22]
+  subgraph NS[network namespace e2bs-7]
+    T --- NAT[NAT: guest IP to slot IP 10.11.0.7]
+    NAT --- VN[eth0 10.12.0.30]
+  end
+  VN ---|veth pair| VH[host e2bv7 10.12.0.29]
+  P[node proxy] -->|10.11.0.7:49983| VH
+  VH -->|MASQUERADE| I[internet]
+`} />
+
+The host firewall blocks:
+
+- traffic from one sandbox to another (10.11.0.0/16),
+- traffic from a sandbox to the host (INPUT from `e2bv+`, except replies),
+- private networks and the Azure metadata address 168.63.129.16.
+
+`examples/sdk-smoke/isolation.mjs` checks these rules from inside a sandbox.
+
+## Volumes
+
+A volume is an ext4 disk made of layers, like the root disk. It has its own record in S3 and can be mounted by one sandbox at a time.
+
+1. Every template reserves two drive slots, `vdb` and `vdc`. At build time they point at an empty placeholder file.
+2. A create with a volume takes the volume with a conditional write to its record (`attached_to`).
+3. The node links the slot to the ublk device of the volume and loads the snapshot. A `PATCH /drives` tells the guest the new disk size. envd mounts the disk.
+4. A kill syncs the guest, seals the upper layer of the volume and uploads it. The record gets the new layer and no owner.
+5. The next sandbox can mount the volume on any node.
+
+## Template build
+
+<Mermaid chart={`
+flowchart LR
+  I[Docker image ubuntu:24.04] --> D[docker build: user, sudo, python3, envd, init script]
+  D --> E[docker export, mkfs.ext4]
+  E --> L[OverlayBD layer, uploaded to S3]
+  L --> B[cold boot of Firecracker]
+  B --> C[wait for envd, capture like a pause]
+  C --> T[templates/base.json]
+`} />
+
+A build takes about 7 seconds when Docker has the image cached.
+
+## What lives in S3
+
+| Key | Size | What it is |
+|---|---|---|
+| `layers/sha256:<hex>` | 20 KB to 160 MB | a layer: base image, memory, disk changes, volume changes |
+| `checkpoints/<id>.json` | under 1 KB | layer lists, drives, CPU count and memory size |
+| `checkpoints/<id>/vmstate` | about 25 KB | Firecracker CPU and device state |
+| `templates/<name>.json` | under 1 KB | the checkpoint of a template or snapshot |
+| `volumes/<id>.json` | under 1 KB | the layers of a volume and the sandbox that mounts it |
+| `sandboxes/<id>.json` | about 1 KB | sandbox details, the owner node or none, the checkpoint |
+
+Layers never change once written. The local disk of a node holds only copies:
+
+| Local path | What it is |
+|---|---|
+| `layers/` | the layer cache, as hard links to the sealed files |
+| `checkpoints/<id>/vmstate` | the vmstate cache |
+| `sandboxes/vm-<id>/` | a running VM: the writable upper layer, the Firecracker socket |
+| `memory/<checkpoint>/` | the image config of a shared memory device |

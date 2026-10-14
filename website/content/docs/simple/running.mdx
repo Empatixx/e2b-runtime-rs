@@ -1,0 +1,82 @@
+---
+title: Running it
+description: What a node needs, how to build a template, start one or two nodes and point the E2B SDK at them.
+---
+
+## What a node needs
+
+- Linux 6.8 or newer with the `ublk_drv` module, and `/dev/kvm`.
+- The AgentENV build of Firecracker, version `1.15.1-patch-v1`. It adds the endpoint that lists the dirty memory ranges.
+- Docker, for template builds.
+- Root, for ublk, network namespaces and iptables.
+- An S3 bucket. For a local test, [Silo](https://hub.docker.com/r/pgsty/silo) works. It is a fork of MinIO, whose images are no longer published.
+
+`e2b-runtime-simple/scripts/setup-node.sh` installs the packages and downloads Firecracker, the guest kernel and the ublk daemon into `/mnt/simple/deps`.
+
+## Start a local S3
+
+```bash
+docker run -d --name minio -p 127.0.0.1:9000:9000 \
+  -e MINIO_ROOT_USER=e2bsimple -e MINIO_ROOT_PASSWORD=e2bsimple-secret \
+  pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
+curl -X PUT --user e2bsimple:e2bsimple-secret --aws-sigv4 "aws:amz:us-east-1:s3" \
+  http://127.0.0.1:9000/e2b-simple
+```
+
+## Build a template
+
+```bash
+cd e2b-runtime-simple
+cargo build --release
+export E2B_SIMPLE_S3_ENDPOINT=http://127.0.0.1:9000 E2B_SIMPLE_S3_BUCKET=e2b-simple
+export E2B_SIMPLE_S3_ACCESS_KEY=e2bsimple E2B_SIMPLE_S3_SECRET_KEY=e2bsimple-secret
+sudo -E target/release/e2b-node build-template --name base --envd target/release/envd
+```
+
+The build writes the layers, the checkpoint and `templates/base.json` to the bucket.
+
+## Start one node
+
+```bash
+sudo -E E2B_API_KEY=e2b_local target/release/e2b-node serve
+```
+
+The API listens on port 3000 and the sandbox proxy on port 3001. Point the SDK at them:
+
+```bash
+export E2B_API_URL=http://localhost:3000
+export E2B_SANDBOX_URL=http://localhost:3001
+export E2B_API_KEY=e2b_local
+cd examples/sdk-smoke && npm install && node smoke.mjs
+```
+
+`smoke.mjs` creates a sandbox, runs commands, writes files, pauses, resumes, takes a snapshot, creates a sandbox from it and checks that a volume keeps its files after a kill.
+
+## Start two nodes on one machine
+
+`scripts/two-nodes.sh` starts node A on ports 3000 and 3001 and node B on ports 3100 and 3101. Each node has its own data folder and its own range of network slots, and both use the same bucket.
+
+```bash
+sudo -E sh scripts/two-nodes.sh
+cd examples/sdk-smoke && E2B_API_KEY=e2b_simple_local node two-nodes.mjs
+```
+
+`two-nodes.mjs` creates a sandbox on node A, starts a process in it and pauses it. It resumes the sandbox on node B and checks that the file and the running process are still there. Then it pauses the sandbox through node A, which forwards the call to node B, and resumes it on node A again.
+
+## Settings
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `E2B_SIMPLE_DATA` | `/mnt/simple/data` | the local cache and the folders of running VMs |
+| `E2B_SIMPLE_S3_ENDPOINT` | `http://127.0.0.1:9000` | the S3 endpoint |
+| `E2B_SIMPLE_S3_BUCKET` | `e2b-simple` | the bucket |
+| `E2B_SIMPLE_S3_ACCESS_KEY`, `E2B_SIMPLE_S3_SECRET_KEY` | none | the S3 credentials |
+| `E2B_SIMPLE_NODE_ID` | `node-a` | the name of the node in sandbox records |
+| `E2B_SIMPLE_NODE_API_URL` | `http://127.0.0.1:3000` | where other nodes forward calls for this node |
+| `E2B_DOMAIN` | `localhost` | the domain the SDK uses for sandbox traffic of this node |
+| `E2B_SIMPLE_SLOT_BASE` | `0` | the first network slot, so that nodes on one machine do not collide |
+| `E2B_API_KEY` | none | the API key the SDK must send |
+
+## Checks in CI
+
+The `simple` job in `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy` with warnings as errors, and the unit tests of the node and of envd. The SDK tests need KVM and ublk, so they run on a Linux node by hand.

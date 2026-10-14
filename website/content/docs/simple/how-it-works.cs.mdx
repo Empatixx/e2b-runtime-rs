@@ -1,0 +1,189 @@
+---
+title: Jak to funguje
+description: Node, vrstvy, create, pause, resume na jiném nodu, síť, volumes, build šablon a co leží v S3.
+---
+
+Tahle stránka provede jeden sandbox celým jeho životem. Každá sekce má diagram a čísla, která jsme naměřili na testovacím Azure VM (viz [Čísla](../)).
+
+## Uvnitř jednoho nodu
+
+Node je jeden proces, `e2b-node`, a běží jako root. Jako podřízený proces spouští ublk daemon z AgentENV.
+
+| Část | Soubor | Co dělá |
+|---|---|---|
+| API | `api/` | E2B REST API: sandboxy, pause, connect, snapshoty, volumes |
+| předávání | `api/forward.rs` | volání pro sandbox na jiném nodu pošle tomu nodu |
+| proxy | `proxy.rs` | posílá provoz sandboxu do envd v guestu |
+| sandboxy | `sandbox.rs` | běžící sandboxy tohoto nodu; pauznuté jsou jen v S3 |
+| warm pool | `sandbox/warm_pool.rs` | 4 procesy Firecrackeru spuštěné dopředu, každý se síťovým slotem |
+| sdílená paměť | `storage/shared_memory.rs` | jedno read-only paměťové zařízení na checkpoint |
+| vrstvy | `layers.rs` | vrstvy pojmenované podle sha256, lokální cache, nahrávání do S3 |
+| ublk daemon | z AgentENV | obsluhuje bloková zařízení `/dev/ublkbN` složená z vrstev OverlayBD |
+
+## Vrstvy: jak se skládá disk
+
+OverlayBD skládá vrstvy na sebe. Čtení jde od horní vrstvy dolů a vrátí první vrstvu, která daný blok má. Každý zápis jde do horní vrstvy, která je lokální a zapisovatelná.
+
+<Mermaid chart={`
+flowchart TB
+  G["guest vidí /dev/vda, disk ext4"] --> U["/dev/ublkb7: zařízení OverlayBD"]
+  U --> L0[runtime upper: lokální, zapisovatelná, sem jdou všechny zápisy]
+  L0 --> L1[sha256 d623: změny z poslední pause, jen pro čtení]
+  L1 --> L2[sha256 9629: ext4 z Docker image, jen pro čtení]
+  L2 --> Q{je vrstva v lokální cache?}
+  Q -->|ano| F[čte lokální soubor]
+  Q -->|ne| R[čte objekt v S3 po blocích a uloží ho do cache]
+`} />
+
+Vrstvy se jmenují podle sha256 svého obsahu. Stejné jméno je klíčem v S3 i jménem souboru v lokální cache. Node se tak nikdy nemusí ptát, jestli je jeho kopie aktuální: stejné jméno znamená vždy stejné bajty.
+
+**Paměť** používá stejné vrstvy, jen pro čtení. Firecracker si paměťové zařízení namapuje jako soubor s pamětí:
+
+- Když guest čte stránku, dostane ji z page cache zařízení. Všechny sandboxy ze stejného checkpointu tu page cache sdílí.
+- Když guest stránku zapíše, vznikne její soukromá kopie v procesu Firecrackeru (copy on write).
+- Node nechá zařízení otevřené ještě 60 sekund po posledním sandboxu. Linux page cache blokového zařízení zahodí, když ho zavře poslední uživatel.
+
+## Create
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant S3
+  participant VM as Firecracker a guest
+  SDK->>A: POST /v2/sandboxes (templateID: base)
+  A->>S3: načte templates/base.json a záznam checkpointu
+  A->>A: vezme Firecracker z warm poolu
+  A->>A: otevře zařízení rootfs (z poolu, asi 1 ms) a sdílené paměťové zařízení
+  A->>VM: načte snapshot (asi 5 ms)
+  A->>VM: zapíše do MMDS id sandboxu a hash tokenu
+  A->>VM: envd /health a /init (asi 50 ms, hlavně page faulty)
+  A->>S3: zapíše sandboxes/id.json s vlastníkem A
+  A-->>SDK: 201 se sandboxID, doménou nodu A a tokenem pro envd
+`} />
+
+Create trvá asi 58 ms. Samotná obnova VM z toho je asi 6 ms.
+
+## Pause
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant S3
+  SDK->>A: POST /sandboxes/id/pause
+  A->>A: zastaví vCPU, uloží vmstate (25 KB)
+  A->>A: přečte zapsané úseky paměti a uloží je jako vrstvu paměti
+  A->>A: fsync a zapečetění horní vrstvy rootfs (volumes stejně)
+  A->>S3: nahraje nové vrstvy, vmstate a záznam checkpointu
+  A->>S3: zapíše sandboxes/id.json bez vlastníka a s id checkpointu
+  A-->>SDK: 204
+  A->>A: na pozadí: zastaví Firecracker, vrátí zařízení a slot
+`} />
+
+Pause trvá asi 34 ms včetně nahrání. Vrstva paměti obsahuje jen stránky, které guest zapsal od posledního zachycení. Po pause sandbox nepatří žádnému nodu a celý jeho stav je v S3.
+
+Před pause se guest nesynchronizuje. Paměť a disk se zachytí spolu, takže page cache guestu je součástí snapshotu.
+
+## Resume na jiném nodu
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant B as node B
+  participant S3
+  SDK->>B: POST /v2/sandboxes/id/connect
+  B->>S3: načte sandboxes/id.json (etag e1): bez vlastníka, checkpoint y
+  B->>S3: zapíše vlastníka B s If-Match: e1
+  Note over B,S3: když jiný node zapsal dřív, S3 odpoví 412 a B to vzdá
+  B->>S3: stáhne vmstate checkpointu y (25 KB)
+  B->>B: otevře zařízení, vrstvy, které nemá v cache, čte z S3 podle potřeby
+  B->>B: načte snapshot, envd /init
+  B-->>SDK: 201 s doménou nodu B
+`} />
+
+Resume na jiném nodu trvá asi 125 ms, na stejném nodu asi 93 ms. Podmíněný zápis (`If-Match`) zajistí, že dva nody nikdy neobnoví stejný sandbox.
+
+Po resume posílá SDK provoz sandboxu rovnou na node B. Volání, které i tak dorazí na node A, třeba kill, node A předá dál:
+
+<Mermaid chart={`
+sequenceDiagram
+  participant SDK
+  participant A as node A
+  participant B as node B
+  SDK->>A: DELETE /sandboxes/id
+  A->>A: tady neběží, záznam říká vlastník B
+  A->>B: stejný request s hlavičkou x-e2b-simple-forwarded
+  B-->>A: 204
+  A-->>SDK: 204
+`} />
+
+Předaný kill trvá asi 3 ms. Hlavička zabrání tomu, aby request kroužil dokola.
+
+## Síť jednoho sandboxu
+
+Každý guest má stejnou IP adresu 169.254.0.21, protože se probouzí ze snapshotu s adresou, kterou měl při buildu. Guesty od sebe odděluje síťový namespace pro každý slot.
+
+<Mermaid chart={`
+flowchart LR
+  G[guest eth0 169.254.0.21] --- T[tap0 169.254.0.22]
+  subgraph NS[síťový namespace e2bs-7]
+    T --- NAT[NAT: IP guestu na IP slotu 10.11.0.7]
+    NAT --- VN[eth0 10.12.0.30]
+  end
+  VN ---|pár veth| VH[host e2bv7 10.12.0.29]
+  P[proxy nodu] -->|10.11.0.7:49983| VH
+  VH -->|MASQUERADE| I[internet]
+`} />
+
+Firewall hostu blokuje:
+
+- provoz z jednoho sandboxu do druhého (10.11.0.0/16),
+- provoz ze sandboxu na host (INPUT z `e2bv+`, kromě odpovědí),
+- privátní sítě a adresu metadat Azure 168.63.129.16.
+
+`examples/sdk-smoke/isolation.mjs` tato pravidla kontroluje zevnitř sandboxu.
+
+## Volumes
+
+Volume je disk ext4 složený z vrstev, stejně jako kořenový disk. Má vlastní záznam v S3 a v jednu chvíli ho může mít připojený jen jeden sandbox.
+
+1. Každá šablona má dva rezervované sloty pro disky, `vdb` a `vdc`. Při buildu ukazují na prázdný soubor.
+2. Create s volume si volume zabere podmíněným zápisem do jeho záznamu (`attached_to`).
+3. Node propojí slot s ublk zařízením volume a načte snapshot. `PATCH /drives` řekne guestu novou velikost disku. envd disk připojí.
+4. Kill synchronizuje guest, zapečetí horní vrstvu volume a nahraje ji. Záznam dostane novou vrstvu a žádného vlastníka.
+5. Další sandbox může volume připojit na kterémkoli nodu.
+
+## Build šablony
+
+<Mermaid chart={`
+flowchart LR
+  I[Docker image ubuntu:24.04] --> D[docker build: uživatel, sudo, python3, envd, init skript]
+  D --> E[docker export, mkfs.ext4]
+  E --> L[vrstva OverlayBD, nahraná do S3]
+  L --> B[studený boot Firecrackeru]
+  B --> C[počká na envd, zachytí checkpoint jako při pause]
+  C --> T[templates/base.json]
+`} />
+
+Build trvá asi 7 sekund, když má Docker image v cache.
+
+## Co leží v S3
+
+| Klíč | Velikost | Co to je |
+|---|---|---|
+| `layers/sha256:<hex>` | 20 KB až 160 MB | vrstva: základní image, paměť, změny disku, změny volume |
+| `checkpoints/<id>.json` | pod 1 KB | seznamy vrstev, disky, počet CPU a velikost paměti |
+| `checkpoints/<id>/vmstate` | asi 25 KB | stav CPU a zařízení Firecrackeru |
+| `templates/<name>.json` | pod 1 KB | checkpoint šablony nebo snapshotu |
+| `volumes/<id>.json` | pod 1 KB | vrstvy volume a sandbox, který ho má připojený |
+| `sandboxes/<id>.json` | asi 1 KB | údaje o sandboxu, node vlastníka nebo žádný, checkpoint |
+
+Zapsaná vrstva se už nikdy nemění. Lokální disk nodu drží jen kopie:
+
+| Lokální cesta | Co to je |
+|---|---|
+| `layers/` | cache vrstev jako hardlinky na zapečetěné soubory |
+| `checkpoints/<id>/vmstate` | cache vmstate |
+| `sandboxes/vm-<id>/` | běžící VM: zapisovatelná horní vrstva, socket Firecrackeru |
+| `memory/<checkpoint>/` | konfigurace obrazu sdíleného paměťového zařízení |

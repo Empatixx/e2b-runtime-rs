@@ -1,0 +1,82 @@
+---
+title: Spuštění
+description: Co node potřebuje, jak postavit šablonu, pustit jeden nebo dva nody a nasměrovat na ně E2B SDK.
+---
+
+## Co node potřebuje
+
+- Linux 6.8 nebo novější s modulem `ublk_drv` a `/dev/kvm`.
+- Build Firecrackeru z AgentENV, verzi `1.15.1-patch-v1`. Přidává endpoint, který vypíše zapsané úseky paměti.
+- Docker pro build šablon.
+- Root kvůli ublk, síťovým namespaces a iptables.
+- S3 bucket. Pro lokální test stačí [Silo](https://hub.docker.com/r/pgsty/silo). Je to fork MinIO, jehož image už nevychází.
+
+`e2b-runtime-simple/scripts/setup-node.sh` nainstaluje balíčky a stáhne Firecracker, jádro guestu a ublk daemon do `/mnt/simple/deps`.
+
+## Lokální S3
+
+```bash
+docker run -d --name minio -p 127.0.0.1:9000:9000 \
+  -e MINIO_ROOT_USER=e2bsimple -e MINIO_ROOT_PASSWORD=e2bsimple-secret \
+  pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
+curl -X PUT --user e2bsimple:e2bsimple-secret --aws-sigv4 "aws:amz:us-east-1:s3" \
+  http://127.0.0.1:9000/e2b-simple
+```
+
+## Build šablony
+
+```bash
+cd e2b-runtime-simple
+cargo build --release
+export E2B_SIMPLE_S3_ENDPOINT=http://127.0.0.1:9000 E2B_SIMPLE_S3_BUCKET=e2b-simple
+export E2B_SIMPLE_S3_ACCESS_KEY=e2bsimple E2B_SIMPLE_S3_SECRET_KEY=e2bsimple-secret
+sudo -E target/release/e2b-node build-template --name base --envd target/release/envd
+```
+
+Build zapíše do bucketu vrstvy, checkpoint a `templates/base.json`.
+
+## Jeden node
+
+```bash
+sudo -E E2B_API_KEY=e2b_local target/release/e2b-node serve
+```
+
+API poslouchá na portu 3000 a proxy do sandboxů na portu 3001. Nasměrujte na ně SDK:
+
+```bash
+export E2B_API_URL=http://localhost:3000
+export E2B_SANDBOX_URL=http://localhost:3001
+export E2B_API_KEY=e2b_local
+cd examples/sdk-smoke && npm install && node smoke.mjs
+```
+
+`smoke.mjs` vytvoří sandbox, spustí příkazy, zapíše soubory, sandbox pauzne a obnoví, udělá snapshot, z něj vytvoří nový sandbox a ověří, že volume si soubory podrží i po killu.
+
+## Dva nody na jednom stroji
+
+`scripts/two-nodes.sh` pustí node A na portech 3000 a 3001 a node B na portech 3100 a 3101. Každý node má vlastní datovou složku a vlastní rozsah síťových slotů a oba používají stejný bucket.
+
+```bash
+sudo -E sh scripts/two-nodes.sh
+cd examples/sdk-smoke && E2B_API_KEY=e2b_simple_local node two-nodes.mjs
+```
+
+`two-nodes.mjs` vytvoří sandbox na nodu A, spustí v něm proces a sandbox pauzne. Pak ho obnoví na nodu B a ověří, že soubor i běžící proces jsou pořád na místě. Potom sandbox pauzne přes node A, který volání předá nodu B, a znovu ho obnoví na nodu A.
+
+## Nastavení
+
+| Proměnná | Výchozí hodnota | Co nastavuje |
+|---|---|---|
+| `E2B_SIMPLE_DATA` | `/mnt/simple/data` | lokální cache a složky běžících VM |
+| `E2B_SIMPLE_S3_ENDPOINT` | `http://127.0.0.1:9000` | endpoint S3 |
+| `E2B_SIMPLE_S3_BUCKET` | `e2b-simple` | bucket |
+| `E2B_SIMPLE_S3_ACCESS_KEY`, `E2B_SIMPLE_S3_SECRET_KEY` | žádná | přístupové údaje k S3 |
+| `E2B_SIMPLE_NODE_ID` | `node-a` | jméno nodu v záznamech sandboxů |
+| `E2B_SIMPLE_NODE_API_URL` | `http://127.0.0.1:3000` | kam ostatní nody předávají volání pro tento node |
+| `E2B_DOMAIN` | `localhost` | doména, kterou SDK používá pro provoz sandboxů tohoto nodu |
+| `E2B_SIMPLE_SLOT_BASE` | `0` | první síťový slot, aby se nody na jednom stroji nesrazily |
+| `E2B_API_KEY` | žádná | API klíč, který musí SDK posílat |
+
+## Kontroly v CI
+
+Job `simple` v `.github/workflows/ci.yml` spouští `cargo fmt --check`, `cargo clippy` s varováními jako chybami a unit testy nodu a envd. Testy se SDK potřebují KVM a ublk, takže se pouští ručně na linuxovém nodu.

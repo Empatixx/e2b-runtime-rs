@@ -1,0 +1,85 @@
+---
+title: e2b-runtime-simple
+description: A small E2B runtime for the same SDK. One binary per node, disks and memory as OverlayBD layers, and S3 as the only thing nodes share.
+---
+
+**e2b-runtime-simple** is a second, much smaller runtime in this repository, in the folder `e2b-runtime-simple/`. It keeps what the E2B SDK sees and drops everything else. It does not follow the internals of the Go version.
+
+- One binary per node serves the E2B API and the sandbox proxy.
+- Sandboxes are Firecracker microVMs, like in E2B.
+- Disks and memory are layers in the [OverlayBD](https://github.com/containerd/overlaybd) format, served through ublk. The storage code comes from [AgentENV](https://github.com/kvcache-ai/AgentENV).
+- Nodes share one S3 bucket and nothing else. A sandbox paused on one node can resume on any other.
+- About 3,000 lines of Rust in the node, next to the envd from this repository.
+
+It is a proof of concept. The [known gaps](#known-gaps) are listed at the end of this page.
+
+## One idea: the checkpoint
+
+E2B has templates, build layers, snapshots and paused sandboxes. In e2b-runtime-simple they are all one thing, a **checkpoint**:
+
+| Part | What it holds |
+|---|---|
+| `vm_state` | Firecracker CPU and device state, about 25 KB |
+| `memory_layers` | guest memory as OverlayBD layers, oldest first |
+| `rootfs_layers` | the root disk as OverlayBD layers, oldest first |
+| `drives` | volumes mounted in the guest, with their layers |
+
+Every operation either makes a checkpoint or starts a VM from one:
+
+- **Template**: a name that points to a checkpoint.
+- **Pause**: capture a checkpoint, stop the VM.
+- **Resume** and **create**: start a VM from a checkpoint.
+- **Snapshot**: capture a checkpoint, keep the VM running, save it as a template.
+
+A capture adds one new layer to each stack. The disk layer holds the blocks written since the last capture. The memory layer holds only the pages the guest wrote.
+
+## The big picture
+
+<Mermaid chart={`
+flowchart TB
+  SDK[E2B SDK]
+  subgraph A[node A]
+    APIA[API and proxy]
+    VMA[Firecracker VMs]
+    CA[local layer cache]
+  end
+  subgraph B[node B]
+    APIB[API and proxy]
+    VMB[Firecracker VMs]
+    CB[local layer cache]
+  end
+  S3[(S3 bucket: layers and JSON records)]
+  SDK -->|API calls| APIA
+  SDK -->|sandbox traffic| APIB
+  APIA <-->|forward calls to the owner| APIB
+  CA --- S3
+  CB --- S3
+`} />
+
+- The SDK sends API calls to any node. A node forwards a call for a sandbox that runs elsewhere to the node that owns it.
+- The SDK sends sandbox traffic (commands, files, ports) straight to the owner node. Each node puts its own domain into the API answer.
+- The local disk of a node is only a cache. The S3 bucket is the source of truth.
+
+## Numbers
+
+Measured on 2026-10-14 on an Azure Standard_E4ds_v4 VM with nested KVM and kernel 7.0. The template is Ubuntu 24.04 with 2 vCPUs and 1 GiB of memory. We timed each call with curl on the node. AgentENV ran on the same VM from its Docker image `aenv-server:latest`, with the same calls.
+
+| Step | e2b-runtime-simple | AgentENV |
+|---|---|---|
+| create from a template | about 58 ms | about 110 ms |
+| pause, layers uploaded to S3 | about 34 ms | about 44 ms |
+| resume on the same node | about 93 ms | about 130 ms |
+| resume on another node | about 125 ms | not measured |
+| kill sent to a node that does not own the sandbox | about 3 ms | not measured |
+
+The VM restore itself takes about 6 ms. Most of the rest is page faults after the restore: the guest touches about 1,500 memory pages before envd answers. Nested virtualization makes each fault cost about 15 µs.
+
+[How it works](./how-it-works/) explains each step with diagrams. [Running it](./running/) shows how to start one node or two.
+
+## Known gaps
+
+- No garbage collection of checkpoints and layers, locally or in S3.
+- Every pause adds a layer. OverlayBD allows 255, so long lived sandboxes will need their layers merged.
+- A node that dies keeps the records of its running sandboxes in S3. They need a lease or a sweep.
+- `GET /v2/sandboxes` reads one record per sandbox from S3.
+- Not built yet: template builds through the SDK, fork, metrics, logs, the volume content API, `allowOut` and `denyOut` rules, traffic access tokens and auto resume.

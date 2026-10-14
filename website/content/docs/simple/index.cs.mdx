@@ -1,0 +1,85 @@
+---
+title: e2b-runtime-simple
+description: Malý E2B runtime pro stejné SDK. Jeden binár na node, disky a paměť jako vrstvy OverlayBD a S3 jako jediná věc, kterou nody sdílí.
+---
+
+**e2b-runtime-simple** je druhý, mnohem menší runtime v tomto repozitáři, ve složce `e2b-runtime-simple/`. Nechává to, co vidí E2B SDK, a všechno ostatní vynechává. Nekopíruje vnitřek Go verze.
+
+- Jeden binár na node obsluhuje E2B API i proxy do sandboxů.
+- Sandboxy jsou microVM ve Firecrackeru, stejně jako v E2B.
+- Disky a paměť jsou vrstvy ve formátu [OverlayBD](https://github.com/containerd/overlaybd), které obsluhuje ublk. Kód pro úložiště pochází z [AgentENV](https://github.com/kvcache-ai/AgentENV).
+- Nody sdílí jeden S3 bucket a nic jiného. Sandbox pauznutý na jednom nodu jde obnovit na kterémkoli jiném.
+- Node má asi 3 000 řádků v Rustu, k tomu envd z tohoto repozitáře.
+
+Je to proof of concept. [Co zatím chybí](#co-zatím-chybí), je vypsané na konci stránky.
+
+## Jeden pojem: checkpoint
+
+E2B má šablony, vrstvy buildu, snapshoty a pauznuté sandboxy. V e2b-runtime-simple je to všechno jedna věc, **checkpoint**:
+
+| Část | Co obsahuje |
+|---|---|
+| `vm_state` | stav CPU a zařízení Firecrackeru, asi 25 KB |
+| `memory_layers` | paměť guestu jako vrstvy OverlayBD, od nejstarší |
+| `rootfs_layers` | kořenový disk jako vrstvy OverlayBD, od nejstarší |
+| `drives` | volumes připojené v guestu, s jejich vrstvami |
+
+Každá operace checkpoint buď vyrobí, nebo z něj spustí VM:
+
+- **Šablona**: jméno, které ukazuje na checkpoint.
+- **Pause**: zachytit checkpoint a zastavit VM.
+- **Resume** a **create**: spustit VM z checkpointu.
+- **Snapshot**: zachytit checkpoint, nechat VM běžet a uložit checkpoint jako šablonu.
+
+Každé zachycení přidá na každý zásobník jednu vrstvu. Vrstva disku obsahuje bloky zapsané od posledního zachycení. Vrstva paměti obsahuje jen stránky, které guest zapsal.
+
+## Celkový obrázek
+
+<Mermaid chart={`
+flowchart TB
+  SDK[E2B SDK]
+  subgraph A[node A]
+    APIA[API a proxy]
+    VMA[VM ve Firecrackeru]
+    CA[lokální cache vrstev]
+  end
+  subgraph B[node B]
+    APIB[API a proxy]
+    VMB[VM ve Firecrackeru]
+    CB[lokální cache vrstev]
+  end
+  S3[(S3 bucket: vrstvy a JSON záznamy)]
+  SDK -->|volání API| APIA
+  SDK -->|provoz sandboxu| APIB
+  APIA <-->|předání volání vlastníkovi| APIB
+  CA --- S3
+  CB --- S3
+`} />
+
+- SDK posílá volání API na kterýkoli node. Volání pro sandbox, který běží jinde, node předá nodu, který ho vlastní.
+- Provoz sandboxu (příkazy, soubory, porty) posílá SDK rovnou na node, který sandbox vlastní. Každý node dává do odpovědi API svou vlastní doménu.
+- Lokální disk nodu je jen cache. Zdrojem pravdy je S3 bucket.
+
+## Čísla
+
+Měřeno 2026-10-14 na Azure VM Standard_E4ds_v4 s vnořeným KVM a jádrem 7.0. Šablona je Ubuntu 24.04 se 2 vCPU a 1 GiB paměti. Každé volání jsme měřili přes curl přímo na nodu. AgentENV běžel na stejném VM z Docker image `aenv-server:latest` se stejnými voláními.
+
+| Krok | e2b-runtime-simple | AgentENV |
+|---|---|---|
+| create ze šablony | asi 58 ms | asi 110 ms |
+| pause, včetně nahrání vrstev do S3 | asi 34 ms | asi 44 ms |
+| resume na stejném nodu | asi 93 ms | asi 130 ms |
+| resume na jiném nodu | asi 125 ms | neměřeno |
+| kill poslaný na node, který sandbox nevlastní | asi 3 ms | neměřeno |
+
+Samotná obnova VM trvá asi 6 ms. Většinu zbytku tvoří page faulty po obnově: guest sáhne na asi 1 500 stránek paměti, než envd odpoví. Kvůli vnořené virtualizaci stojí každý fault asi 15 µs.
+
+[Jak to funguje](./how-it-works/) vysvětluje každý krok s diagramy. [Spuštění](./running/) ukazuje, jak pustit jeden nebo dva nody.
+
+## Co zatím chybí
+
+- Úklid starých checkpointů a vrstev, lokálně ani v S3.
+- Každá pause přidá vrstvu. OverlayBD jich unese 255, takže dlouho žijící sandboxy budou potřebovat vrstvy slučovat.
+- Node, který spadne, nechá v S3 záznamy svých běžících sandboxů. Je potřeba lease nebo pravidelný úklid.
+- `GET /v2/sandboxes` čte z S3 jeden záznam na každý sandbox.
+- Ještě není: build šablon přes SDK, fork, metriky, logy, API pro obsah volumes, pravidla `allowOut` a `denyOut`, traffic access tokeny a automatické resume.
