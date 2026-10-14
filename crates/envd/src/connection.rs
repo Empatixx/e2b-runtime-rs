@@ -7,8 +7,7 @@ use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 
 const MAX_HEADER_BYTES: usize = (1 << 20) + 4096;
-const MAX_HEADERS: usize = MAX_HEADER_BYTES / SHORTEST_HEADER_LINE.len();
-const SHORTEST_HEADER_LINE: &[u8] = b"a:\r\n";
+const MAX_HEADERS: usize = 8192;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(640);
 
 pub async fn serve(mut listener: impl Listener, app: Router) -> ! {
