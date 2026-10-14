@@ -98,6 +98,8 @@ There are no huge pages, like in AgentENV: the memory file is shared between san
 
 The SDK smoke test passes: create, commands, files, pause, connect (resume), snapshot, create from a snapshot, and a volume mounted at `/home/user/data` that keeps its files after the sandbox is killed.
 
+Sandboxes reach the internet, but not each other, the node or private networks (`examples/sdk-smoke/isolation.mjs`).
+
 ## Not done yet
 
 - Layers stay on the local disk. Upload to S3 and lazy loading from S3 are not wired up.

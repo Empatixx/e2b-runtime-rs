@@ -8,6 +8,13 @@ const GUEST_IP: &str = "169.254.0.21";
 const TAP_IP: &str = "169.254.0.22/30";
 const TAP_MAC: &str = "02:fc:00:00:00:01";
 const SANDBOX_RANGE: &str = "10.11.0.0/16";
+const PRIVATE_RANGES: [&str; 5] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "168.63.129.16/32",
+];
 
 #[derive(Debug, Clone)]
 pub struct Slot {
@@ -152,14 +159,8 @@ impl Slot {
 impl Network {
     pub async fn prepare_host() -> Result<()> {
         run("sysctl", &["-qw", "net.ipv4.ip_forward=1"]).await?;
-        for rule in [
-            ["-t", "nat", "POSTROUTING", "-s", SANDBOX_RANGE, "-j", "MASQUERADE"],
-            ["-t", "filter", "FORWARD", "-s", SANDBOX_RANGE, "-j", "ACCEPT"],
-            ["-t", "filter", "FORWARD", "-d", SANDBOX_RANGE, "-j", "ACCEPT"],
-        ] {
-            ensure_rule(&rule).await?;
-        }
-        Ok(())
+        allow_internet().await?;
+        isolate_sandboxes().await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -184,19 +185,27 @@ impl Network {
     }
 }
 
-async fn ensure_rule(rule: &[&str; 7]) -> Result<()> {
-    let [_, table, chain, rest @ ..] = *rule;
-    let check: Vec<&str> = ["-t", table, "-C", chain]
-        .into_iter()
-        .chain(rest.iter().copied())
-        .collect();
+async fn allow_internet() -> Result<()> {
+    ensure_rule("nat", "POSTROUTING", &["-s", SANDBOX_RANGE, "-j", "MASQUERADE"]).await?;
+    ensure_rule("filter", "FORWARD", &["-s", SANDBOX_RANGE, "-j", "ACCEPT"]).await?;
+    ensure_rule("filter", "FORWARD", &["-d", SANDBOX_RANGE, "-j", "ACCEPT"]).await
+}
+
+async fn isolate_sandboxes() -> Result<()> {
+    for destination in PRIVATE_RANGES {
+        ensure_rule("filter", "FORWARD", &["-s", SANDBOX_RANGE, "-d", destination, "-j", "DROP"]).await?;
+    }
+    ensure_rule("filter", "INPUT", &["-i", "e2bv+", "-j", "DROP"]).await?;
+    let replies = ["-i", "e2bv+", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"];
+    ensure_rule("filter", "INPUT", &replies).await
+}
+
+async fn ensure_rule(table: &str, chain: &str, rule: &[&str]) -> Result<()> {
+    let check: Vec<&str> = ["-t", table, "-C", chain].into_iter().chain(rule.iter().copied()).collect();
     if run("iptables", &check).await.is_ok() {
         return Ok(());
     }
-    let insert: Vec<&str> = ["-t", table, "-I", chain]
-        .into_iter()
-        .chain(rest.iter().copied())
-        .collect();
+    let insert: Vec<&str> = ["-t", table, "-I", chain].into_iter().chain(rule.iter().copied()).collect();
     run("iptables", &insert).await
 }
 
