@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 
 const GUEST_IP: &str = "169.254.0.21";
 const TAP_IP: &str = "169.254.0.22/30";
+const TAP_MAC: &str = "02:fc:00:00:00:01";
 const SANDBOX_RANGE: &str = "10.11.0.0/16";
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ impl Slot {
     async fn create_tap(&self) -> Result<()> {
         let ns = self.namespace.as_str();
         run("ip", &["-n", ns, "tuntap", "add", "tap0", "mode", "tap"]).await?;
+        run("ip", &["-n", ns, "link", "set", "tap0", "address", TAP_MAC]).await?;
         run("ip", &["-n", ns, "addr", "add", TAP_IP, "dev", "tap0"]).await?;
         run("ip", &["-n", ns, "link", "set", "tap0", "up"]).await
     }
@@ -155,6 +157,7 @@ impl Network {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire(&self) -> Result<Slot> {
         if let Some(slot) = self.free.lock().await.pop() {
             return Ok(slot);

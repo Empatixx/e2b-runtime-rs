@@ -28,7 +28,7 @@ Capturing adds one new layer on top of each stack:
 - **memory**: only the pages the guest wrote since the last checkpoint, read with `process_vm_readv` from the Firecracker process.
 - **volumes**: the same as rootfs, the new layer belongs to the volume.
 
-On resume, the memory layers become one read-only ublk device. Firecracker maps it as its memory file and copies pages on write, so there is no userfaultfd handler.
+On resume, the memory layers become one read-only ublk device. Firecracker maps it as its memory file and copies pages on write, so there is no userfaultfd handler. Sandboxes from the same checkpoint share the device, and the node keeps it open for 60 seconds after the last one stops, so its page cache stays warm.
 
 ## Layout
 
@@ -81,9 +81,13 @@ Azure Standard_E4ds_v4 with nested KVM, kernel 7.0, template `base` (Ubuntu 24.0
 
 | Step | Time |
 |---|---|
-| create from template | about 200 ms |
-| pause | about 195 ms |
-| resume | about 220 ms |
+| create from template | about 160 ms |
+| of that, VM restore (ublk devices, Firecracker, snapshot load) | about 19 ms |
+| of that, envd first answers (`/health`, `/init`) | about 140 ms |
+| pause | about 30 ms |
+| resume | about 175 ms |
+
+The envd part is page faults. After the restore, the guest touches about 9,800 pages (40 MB) and each one is a copy on write fault in the Firecracker process. On nested virtualization each fault costs about 15 µs.
 
 The template memory layer is 91 MB of 1 GiB, because only written pages are stored.
 
@@ -99,5 +103,5 @@ The SDK smoke test passes: create, commands, files, pause, connect (resume), sna
 - Sandbox state lives in memory. A node restart forgets running and paused sandboxes.
 - Template build through the SDK (`Template.build`), fork, metrics, logs and the volume content API.
 - Network rules (`allowOut`, `denyOut`), traffic access tokens, auto resume.
-- One memory device per sandbox. Sandboxes from the same template could share one.
+- Guest memory uses 4 KiB pages. Huge pages would cut the faults after a restore, but Firecracker supports them only with anonymous or userfaultfd memory.
 - Multi node.

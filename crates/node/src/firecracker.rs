@@ -53,6 +53,7 @@ impl FirecrackerApi {
         self.start().await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn load(&self, vm_state: &Path, memory_device: &Path) -> Result<()> {
         self.put(
             "/snapshot/load",
@@ -66,15 +67,18 @@ impl FirecrackerApi {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn set_metadata(&self, metadata: &Metadata) -> Result<()> {
         self.put("/mmds", serde_json::to_value(metadata)?).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn refresh_drive(&self, slot: usize) -> Result<()> {
         let drive = json!({ "drive_id": drive_id(slot), "path_on_host": drive_file(slot) });
         self.patch(&format!("/drives/{}", drive_id(slot)), drive).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn pause(&self) -> Result<()> {
         self.patch("/vm", json!({ "state": "Paused" })).await
     }
@@ -83,11 +87,13 @@ impl FirecrackerApi {
         self.patch("/vm", json!({ "state": "Resumed" })).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn save_state(&self, vm_state: &Path) -> Result<()> {
         let snapshot = json!({ "snapshot_type": "Diff", "snapshot_path": vm_state });
         self.put("/snapshot/create", snapshot).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn dirty_memory(&self) -> Result<DirtyMemory> {
         let body = self.get("/vm/dirty-memory-ranges").await?;
         Ok(serde_json::from_slice(&body)?)

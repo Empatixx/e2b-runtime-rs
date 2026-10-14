@@ -20,8 +20,13 @@ pub struct Vm {
 struct Resources {
     slot: Slot,
     rootfs: Disk,
-    memory: Option<Disk>,
+    memory: Option<SharedMemoryLease>,
     drives: Vec<AttachedDrive>,
+}
+
+struct SharedMemoryLease {
+    checkpoint_id: String,
+    disk: Disk,
 }
 
 struct AttachedDrive {
@@ -38,7 +43,7 @@ pub struct Captured {
 
 impl Vm {
     pub async fn boot(host: &Host, dir: &Path, rootfs_layers: Vec<PathBuf>, size: MachineSize) -> Result<Self> {
-        let resources = Resources::acquire(host, dir, &rootfs_layers, &[], Vec::new()).await?;
+        let resources = Resources::acquire(host, dir, &rootfs_layers, None, Vec::new()).await?;
         let started = start_fresh(host, dir, &resources, size).await;
         let process = resources.release_on_error(host, started).await?;
         Ok(Self {
@@ -50,9 +55,9 @@ impl Vm {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn restore(host: &Host, dir: &Path, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Self> {
-        let resources =
-            Resources::acquire(host, dir, &checkpoint.rootfs_layers, &checkpoint.memory_layers, drives).await?;
+        let resources = Resources::acquire(host, dir, &checkpoint.rootfs_layers, Some(checkpoint), drives).await?;
         let started = start_from_checkpoint(host, dir, &resources, checkpoint).await;
         let process = resources.release_on_error(host, started).await?;
         Ok(Self {
@@ -62,6 +67,10 @@ impl Vm {
             rootfs_layers: checkpoint.rootfs_layers.clone(),
             memory_layers: checkpoint.memory_layers.clone(),
         })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn slot(&self) -> &Slot {
@@ -76,6 +85,7 @@ impl Vm {
         self.resources.drives.iter().map(|drive| &drive.state)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn capture(&mut self, host: &Host, checkpoint_dir: &Path) -> Result<Captured> {
         std::fs::create_dir_all(checkpoint_dir)?;
         let vm_state = checkpoint_dir.join("vmstate");
@@ -105,12 +115,14 @@ impl Vm {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn shutdown(self, host: &Host) {
         self.process.kill().await;
         self.resources.release(host).await;
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn capture_memory(&mut self, layer: &Path) -> Result<()> {
         let dirty = self.api().dirty_memory().await?;
         write_memory_layer(self.process.pid, &dirty, layer).await?;
@@ -118,6 +130,7 @@ impl Vm {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn seal_rootfs(&mut self, host: &Host, layer: &Path) -> Result<()> {
         host.storage.seal(&self.resources.rootfs, layer).await?;
         self.rootfs_layers.push(layer.to_path_buf());
@@ -126,11 +139,12 @@ impl Vm {
 }
 
 impl Resources {
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire(
         host: &Host,
         dir: &Path,
         rootfs_layers: &[PathBuf],
-        memory_layers: &[PathBuf],
+        memory_from: Option<&Checkpoint>,
         drives: Vec<DriveState>,
     ) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
@@ -140,7 +154,7 @@ impl Resources {
             memory: None,
             drives: Vec::new(),
         };
-        let opened = resources.open_memory_and_drives(host, dir, memory_layers, drives).await;
+        let opened = resources.open_memory_and_drives(host, dir, memory_from, drives).await;
         resources.release_on_error(host, opened).await?;
         resources.link_drives(dir, &host.config.placeholder_drive())?;
         Ok(resources)
@@ -150,11 +164,15 @@ impl Resources {
         &mut self,
         host: &Host,
         dir: &Path,
-        memory_layers: &[PathBuf],
+        memory_from: Option<&Checkpoint>,
         drives: Vec<DriveState>,
     ) -> Result<()> {
-        if !memory_layers.is_empty() {
-            self.memory = Some(host.storage.open_read_only(&dir.join("memory"), memory_layers).await?);
+        if let Some(checkpoint) = memory_from {
+            let disk = host.memory.acquire(&checkpoint.id, &checkpoint.memory_layers).await?;
+            self.memory = Some(SharedMemoryLease {
+                checkpoint_id: checkpoint.id.clone(),
+                disk,
+            });
         }
         for state in drives {
             let disk = host
@@ -197,7 +215,7 @@ impl Resources {
     async fn close_disks(&self, host: &Host) {
         host.storage.close(&self.rootfs).await;
         if let Some(memory) = &self.memory {
-            host.storage.close(memory).await;
+            host.memory.release(&memory.checkpoint_id).await;
         }
         for drive in &self.drives {
             host.storage.close(&drive.disk).await;
@@ -215,6 +233,7 @@ async fn start_fresh(host: &Host, dir: &Path, resources: &Resources, size: Machi
     Ok(process)
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn start_from_checkpoint(
     host: &Host,
     dir: &Path,
@@ -225,7 +244,7 @@ async fn start_from_checkpoint(
     let process = FirecrackerProcess::spawn(&host.config.firecracker, &resources.slot.namespace, dir).await?;
     process
         .api
-        .load(&checkpoint.vm_state, &memory.device)
+        .load(&checkpoint.vm_state, &memory.disk.device)
         .await
         .context("load snapshot")?;
     for drive in &resources.drives {

@@ -31,6 +31,10 @@ impl Config {
         self.data_dir.join("templates")
     }
 
+    pub fn memory_dir(&self) -> PathBuf {
+        self.data_dir.join("memory")
+    }
+
     pub fn volumes_dir(&self) -> PathBuf {
         self.data_dir.join("volumes")
     }

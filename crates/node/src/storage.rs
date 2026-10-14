@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod shared_memory;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +42,7 @@ impl Storage {
         Ok(Self { client, global_config })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn open_writable(&self, dir: &Path, layers: &[PathBuf]) -> Result<Disk> {
         let source = write_image_config(&dir.join("source.json"), layers)?;
         let runtime_dir = dir.join("runtime");
@@ -63,18 +65,21 @@ impl Storage {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn open_read_only(&self, dir: &Path, layers: &[PathBuf]) -> Result<Disk> {
         let image = write_image_config(&dir.join("image.json"), layers)?;
         let (dev_id, device) = self.client.create_overlaybd(&image, &self.global_config).await?;
         Ok(Disk { dev_id, device })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn seal(&self, disk: &Disk, layer: &Path) -> Result<PathBuf> {
         flush_host_cache(&disk.device).await?;
         self.client.restack_snapshot(disk.dev_id, layer).await?;
         Ok(layer.to_path_buf())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn close(&self, disk: &Disk) {
         self.client
             .delete(disk.dev_id)
@@ -83,6 +88,7 @@ impl Storage {
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn flush_host_cache(device: &Path) -> Result<()> {
     let device = device.to_path_buf();
     tokio::task::spawn_blocking(move || std::fs::File::open(&device)?.sync_all())

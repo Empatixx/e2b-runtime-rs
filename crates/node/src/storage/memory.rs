@@ -31,6 +31,7 @@ pub struct DirtyRange {
     pub length: u64,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn write_memory_layer(pid: u32, dirty: &DirtyMemory, layer: &Path) -> Result<()> {
     ensure!(
         dirty.page_size == PAGE,

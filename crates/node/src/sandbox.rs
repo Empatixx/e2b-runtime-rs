@@ -80,6 +80,7 @@ impl Sandboxes {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn create(&self, request: CreateRequest) -> Result<SandboxInfo> {
         let template = self.templates.get(&request.template_id)?;
         let checkpoint = Checkpoint::load(&self.host.config.checkpoints_dir(), &template.checkpoint)?;
@@ -123,23 +124,25 @@ impl Sandboxes {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn pause(&self, sandbox_id: &str) -> Result<()> {
         let entry = self.entry(sandbox_id).await.context("sandbox not found")?;
         let sandbox = &mut *entry.lock().await;
         let State::Running(vm) = &mut sandbox.state else {
             bail!("sandbox {sandbox_id} is not running");
         };
-        let captured = self.capture(&sandbox.info, vm).await?;
+        let captured = self.capture(vm).await?;
         let checkpoint = self.save_checkpoint(&sandbox.info, captured)?;
         self.commit_volumes(&checkpoint.drives, false).await?;
         if let State::Running(vm) = std::mem::replace(&mut sandbox.state, State::Paused(checkpoint)) {
-            vm.shutdown(&self.host).await;
+            self.shutdown_in_background(vm);
         }
         sandbox.info.paused = true;
         tracing::info!(sandbox_id, "sandbox paused");
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn connect(&self, sandbox_id: &str, timeout: Duration) -> Result<(SandboxInfo, bool)> {
         let entry = self.entry(sandbox_id).await.context("sandbox not found")?;
         let sandbox = &mut *entry.lock().await;
@@ -171,7 +174,7 @@ impl Sandboxes {
         let State::Running(vm) = &mut sandbox.state else {
             bail!("sandbox {sandbox_id} is paused");
         };
-        let captured = self.capture(&sandbox.info, vm).await?;
+        let captured = self.capture(vm).await?;
         vm.resume().await?;
         self.commit_volumes(&captured.drives, false).await?;
         let checkpoint = self.save_checkpoint(&sandbox.info, detach_volumes(captured))?;
@@ -230,8 +233,13 @@ impl Sandboxes {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn start_vm(&self, info: &SandboxInfo, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Box<Vm>> {
-        let dir = self.host.config.sandboxes_dir().join(&info.sandbox_id);
+        let dir = self
+            .host
+            .config
+            .sandboxes_dir()
+            .join(new_id(&format!("{}-", info.sandbox_id)));
         let vm = Vm::restore(&self.host, &dir, checkpoint, drives).await?;
         match self.start_session(info, &vm).await {
             Ok(()) => Ok(Box::new(vm)),
@@ -242,6 +250,7 @@ impl Sandboxes {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn start_session(&self, info: &SandboxInfo, vm: &Vm) -> Result<()> {
         vm.api().set_metadata(&metadata(info)).await?;
         let envd = Envd::new(vm.slot().host_ip);
@@ -250,8 +259,8 @@ impl Sandboxes {
         envd.init(&info.envd_token, &info.env_vars, mounts).await
     }
 
-    async fn capture(&self, info: &SandboxInfo, vm: &mut Vm) -> Result<Captured> {
-        sync_guest(info, vm).await;
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn capture(&self, vm: &mut Vm) -> Result<Captured> {
         let checkpoint_dir = self.host.config.checkpoints_dir().join(new_id("ckpt"));
         vm.capture(&self.host, &checkpoint_dir).await
     }
@@ -311,13 +320,18 @@ impl Sandboxes {
         if has_volumes {
             sync_guest(info, &vm).await;
             vm.api().pause().await?;
-            let scratch = self.host.config.sandboxes_dir().join(&info.sandbox_id).join("final");
+            let scratch = vm.dir().join("final");
             vm.seal_drives(&self.host, &scratch).await?;
             let drives: Vec<DriveState> = vm.mounted_drives().cloned().collect();
             self.commit_volumes(&drives, true).await?;
         }
-        vm.shutdown(&self.host).await;
+        self.shutdown_in_background(vm);
         Ok(())
+    }
+
+    fn shutdown_in_background(&self, vm: Box<Vm>) {
+        let host = self.host.clone();
+        tokio::spawn(async move { vm.shutdown(&host).await });
     }
 
     async fn insert(&self, sandbox: Sandbox) {

@@ -50,6 +50,7 @@ impl Envd {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn wait_ready(&self) -> Result<()> {
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         while Instant::now() < deadline {
@@ -61,6 +62,7 @@ impl Envd {
         bail!("envd at {} did not become healthy", self.base_url)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn init(&self, token: &str, env_vars: &HashMap<String, String>, mounts: Vec<VolumeMount>) -> Result<()> {
         let request = InitRequest {
             env_vars,
@@ -88,6 +90,7 @@ impl Envd {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn sync_disks(&self, token: &str) -> Result<()> {
         let response = self
             .http

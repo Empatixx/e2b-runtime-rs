@@ -1,15 +1,19 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use crate::config::Config;
 use crate::network::{Network, run};
 use crate::storage::Storage;
+use crate::storage::shared_memory::SharedMemory;
 use crate::volume::Volumes;
 
 const PLACEHOLDER_SIZE: &str = "1M";
 
 pub struct Host {
     pub config: Config,
-    pub storage: Storage,
+    pub storage: Arc<Storage>,
+    pub memory: SharedMemory,
     pub network: Network,
     pub volumes: Volumes,
 }
@@ -19,8 +23,10 @@ impl Host {
         std::fs::create_dir_all(&config.data_dir)?;
         Network::prepare_host().await?;
         create_placeholder_drive(&config).await?;
+        let storage = Arc::new(Storage::start(&config).await?);
         Ok(Self {
-            storage: Storage::start(&config).await?,
+            memory: SharedMemory::new(storage.clone(), config.memory_dir()),
+            storage,
             network: Network::default(),
             volumes: Volumes::new(config.volumes_dir()),
             config,

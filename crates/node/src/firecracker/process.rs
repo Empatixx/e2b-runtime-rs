@@ -19,6 +19,7 @@ pub struct FirecrackerProcess {
 }
 
 impl FirecrackerProcess {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn spawn(binary: &Path, namespace: &str, dir: &Path) -> Result<Self> {
         let socket = dir.join(SOCKET);
         let _ = std::fs::remove_file(&socket);
@@ -43,6 +44,7 @@ impl FirecrackerProcess {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn kill(mut self) {
         let _ = self.child.kill().await;
     }
