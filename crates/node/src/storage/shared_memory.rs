@@ -75,12 +75,17 @@ impl SharedMemory {
     }
 
     async fn close_if_unused(&self, checkpoint_id: &str, generation: u64) {
+        let Some(SharedDevice { disk, .. }) = self.take_unused(checkpoint_id, generation).await else {
+            return;
+        };
+        self.storage.close(&disk).await;
+    }
+
+    async fn take_unused(&self, checkpoint_id: &str, generation: u64) -> Option<SharedDevice> {
         let mut devices = self.devices.lock().await;
         let unused = devices
             .get(checkpoint_id)
             .is_some_and(|shared| shared.users == 0 && shared.generation == generation);
-        if let Some(shared) = unused.then(|| devices.remove(checkpoint_id)).flatten() {
-            self.storage.close(&shared.disk).await;
-        }
+        unused.then(|| devices.remove(checkpoint_id)).flatten()
     }
 }

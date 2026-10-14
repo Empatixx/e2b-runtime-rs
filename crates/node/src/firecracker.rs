@@ -14,7 +14,7 @@ use crate::storage::memory::DirtyMemory;
 pub const ROOTFS_DRIVE: &str = "rootfs.dev";
 pub const DRIVE_SLOTS: usize = 2;
 const GUEST_MAC: &str = "02:FC:00:00:00:05";
-const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off rw quiet init=/sbin/e2b-init";
+const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off rw quiet mitigations=off init=/sbin/e2b-init";
 
 pub fn drive_file(slot: usize) -> String {
     format!("vol{slot}.dev")

@@ -1,5 +1,6 @@
 pub mod envd;
 pub mod vm;
+pub mod warm_pool;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,8 +16,10 @@ use crate::host::Host;
 use crate::template::{Template, Templates};
 use envd::{Envd, VolumeMount, hash_token};
 use vm::{Captured, Vm};
+use warm_pool::WarmPool;
 
 const REAPER_INTERVAL: Duration = Duration::from_secs(1);
+const WARM_VMS: usize = 4;
 const GUEST_DRIVE_NAMES: [&str; DRIVE_SLOTS] = ["/dev/vdb", "/dev/vdc"];
 
 #[derive(Debug, Clone)]
@@ -67,6 +70,7 @@ enum State {
 pub struct Sandboxes {
     host: Arc<Host>,
     templates: Templates,
+    warm_pool: Arc<WarmPool>,
     entries: RwLock<HashMap<String, Arc<Mutex<Sandbox>>>>,
 }
 
@@ -74,6 +78,7 @@ impl Sandboxes {
     pub fn new(host: Arc<Host>) -> Arc<Self> {
         let templates = Templates::new(host.config.templates_dir());
         Arc::new(Self {
+            warm_pool: WarmPool::new(host.clone(), WARM_VMS),
             host,
             templates,
             entries: RwLock::default(),
@@ -235,12 +240,8 @@ impl Sandboxes {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn start_vm(&self, info: &SandboxInfo, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Box<Vm>> {
-        let dir = self
-            .host
-            .config
-            .sandboxes_dir()
-            .join(new_id(&format!("{}-", info.sandbox_id)));
-        let vm = Vm::restore(&self.host, &dir, checkpoint, drives).await?;
+        let warm = self.warm_pool.take().await?;
+        let vm = Vm::restore(&self.host, warm, checkpoint, drives).await?;
         match self.start_session(info, &vm).await {
             Ok(()) => Ok(Box::new(vm)),
             Err(e) => {

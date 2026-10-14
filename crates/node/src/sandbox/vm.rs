@@ -9,6 +9,8 @@ use crate::network::Slot;
 use crate::storage::Disk;
 use crate::storage::memory::write_memory_layer;
 
+use super::warm_pool::WarmVm;
+
 pub struct Vm {
     dir: PathBuf,
     process: FirecrackerProcess,
@@ -42,13 +44,18 @@ pub struct Captured {
 }
 
 impl Vm {
-    pub async fn boot(host: &Host, dir: &Path, rootfs_layers: Vec<PathBuf>, size: MachineSize) -> Result<Self> {
-        let resources = Resources::acquire(host, dir, &rootfs_layers, None, Vec::new()).await?;
-        let started = start_fresh(host, dir, &resources, size).await;
-        let process = resources.release_on_error(host, started).await?;
+    pub async fn boot(host: &Host, warm: WarmVm, rootfs_layers: Vec<PathBuf>, size: MachineSize) -> Result<Self> {
+        let resources = Resources::acquire(host, &warm.dir, warm.slot, &rootfs_layers, None, Vec::new()).await?;
+        let booted = warm
+            .process
+            .api
+            .boot(&host.config.kernel, size)
+            .await
+            .context("boot firecracker");
+        resources.release_on_error(host, booted).await?;
         Ok(Self {
-            dir: dir.to_path_buf(),
-            process,
+            dir: warm.dir,
+            process: warm.process,
             resources,
             rootfs_layers,
             memory_layers: Vec::new(),
@@ -56,13 +63,14 @@ impl Vm {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn restore(host: &Host, dir: &Path, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Self> {
-        let resources = Resources::acquire(host, dir, &checkpoint.rootfs_layers, Some(checkpoint), drives).await?;
-        let started = start_from_checkpoint(host, dir, &resources, checkpoint).await;
-        let process = resources.release_on_error(host, started).await?;
+    pub async fn restore(host: &Host, warm: WarmVm, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Self> {
+        let layers = &checkpoint.rootfs_layers;
+        let resources = Resources::acquire(host, &warm.dir, warm.slot, layers, Some(checkpoint), drives).await?;
+        let loaded = load_checkpoint(&warm.process.api, &resources, checkpoint).await;
+        resources.release_on_error(host, loaded).await?;
         Ok(Self {
-            dir: dir.to_path_buf(),
-            process,
+            dir: warm.dir,
+            process: warm.process,
             resources,
             rootfs_layers: checkpoint.rootfs_layers.clone(),
             memory_layers: checkpoint.memory_layers.clone(),
@@ -143,14 +151,21 @@ impl Resources {
     async fn acquire(
         host: &Host,
         dir: &Path,
+        slot: Slot,
         rootfs_layers: &[PathBuf],
         memory_from: Option<&Checkpoint>,
         drives: Vec<DriveState>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(dir)?;
+        let rootfs = match host.storage.open_writable(&dir.join("rootfs"), rootfs_layers).await {
+            Ok(rootfs) => rootfs,
+            Err(e) => {
+                host.network.release(slot).await;
+                return Err(e);
+            }
+        };
         let mut resources = Self {
-            slot: host.network.acquire().await?,
-            rootfs: host.storage.open_writable(&dir.join("rootfs"), rootfs_layers).await?,
+            slot,
+            rootfs,
             memory: None,
             drives: Vec::new(),
         };
@@ -213,44 +228,26 @@ impl Resources {
     }
 
     async fn close_disks(&self, host: &Host) {
-        host.storage.close(&self.rootfs).await;
+        host.storage.release_writable(&self.rootfs).await;
         if let Some(memory) = &self.memory {
             host.memory.release(&memory.checkpoint_id).await;
         }
         for drive in &self.drives {
-            host.storage.close(&drive.disk).await;
+            host.storage.release_writable(&drive.disk).await;
         }
     }
 }
 
-async fn start_fresh(host: &Host, dir: &Path, resources: &Resources, size: MachineSize) -> Result<FirecrackerProcess> {
-    let process = FirecrackerProcess::spawn(&host.config.firecracker, &resources.slot.namespace, dir).await?;
-    process
-        .api
-        .boot(&host.config.kernel, size)
-        .await
-        .context("boot firecracker")?;
-    Ok(process)
-}
-
 #[tracing::instrument(level = "debug", skip_all)]
-async fn start_from_checkpoint(
-    host: &Host,
-    dir: &Path,
-    resources: &Resources,
-    checkpoint: &Checkpoint,
-) -> Result<FirecrackerProcess> {
+async fn load_checkpoint(api: &FirecrackerApi, resources: &Resources, checkpoint: &Checkpoint) -> Result<()> {
     let memory = resources.memory.as_ref().context("checkpoint without memory")?;
-    let process = FirecrackerProcess::spawn(&host.config.firecracker, &resources.slot.namespace, dir).await?;
-    process
-        .api
-        .load(&checkpoint.vm_state, &memory.disk.device)
+    api.load(&checkpoint.vm_state, &memory.disk.device)
         .await
         .context("load snapshot")?;
     for drive in &resources.drives {
-        process.api.refresh_drive(drive.state.slot).await?;
+        api.refresh_drive(drive.state.slot).await?;
     }
-    Ok(process)
+    Ok(())
 }
 
 fn next_drive_layer(host: &Host, checkpoint_dir: &Path, drive: &DriveState) -> PathBuf {

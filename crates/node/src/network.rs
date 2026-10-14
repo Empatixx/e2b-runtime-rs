@@ -58,9 +58,14 @@ impl Slot {
 
     async fn create_namespace(&self) -> Result<()> {
         let ns = self.namespace.as_str();
-        let _ = run("ip", &["netns", "del", ns]).await;
+        self.remove_leftovers().await;
         run("ip", &["netns", "add", ns]).await?;
         run("ip", &["-n", ns, "link", "set", "lo", "up"]).await
+    }
+
+    async fn remove_leftovers(&self) {
+        let _ = run("ip", &["netns", "del", &self.namespace]).await;
+        let _ = run("ip", &["link", "del", &self.veth_name()]).await;
     }
 
     async fn create_tap(&self) -> Result<()> {

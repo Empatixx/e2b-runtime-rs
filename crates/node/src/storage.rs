@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use overlaybd::config::{CacheConfig, GlobalConfig, ImageConfig, LayerConfig, LogConfig, UpperMode};
-use uvm_ublk_daemon::{CreateOverlaybdRuntimeDeviceRequest, UblkDaemonClient, UblkDaemonSpawnConfig};
+use uvm_ublk_daemon::{CreateOverlaybdRuntimeDeviceRequest, PoolConfig, UblkDaemonClient, UblkDaemonSpawnConfig};
 
 use crate::config::Config;
 
@@ -33,7 +33,7 @@ impl Storage {
             app_config: None,
             log_file: Some(&config.data_dir.join("ublk-daemon.log")),
             metrics_listen_addr: "127.0.0.1:9102",
-            pool_config: None,
+            pool_config: Some(&warm_devices()),
             p2p_publish_url: None,
             runtime_device_timeout: Duration::from_secs(30),
         })
@@ -80,11 +80,28 @@ impl Storage {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn release_writable(&self, disk: &Disk) {
+        self.client
+            .release_overlaybd(disk.dev_id)
+            .await
+            .unwrap_or_else(|e| tracing::warn!(dev_id = disk.dev_id, error = %e, "ublk release failed"));
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn close(&self, disk: &Disk) {
         self.client
             .delete(disk.dev_id)
             .await
             .unwrap_or_else(|e| tracing::warn!(dev_id = disk.dev_id, error = %e, "ublk delete failed"));
+    }
+}
+
+fn warm_devices() -> PoolConfig {
+    PoolConfig {
+        low_watermark: 4,
+        high_watermark: 16,
+        maintenance_enabled: true,
+        startup_prewarm: true,
     }
 }
 

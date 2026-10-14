@@ -12,6 +12,7 @@ use crate::host::Host;
 use crate::network::run;
 use crate::sandbox::envd::Envd;
 use crate::sandbox::vm::Vm;
+use crate::sandbox::warm_pool::WarmVm;
 use crate::storage::package_raw_file;
 
 const SETTLE_AFTER_BOOT: Duration = Duration::from_secs(2);
@@ -146,8 +147,8 @@ async fn boot_and_capture(
         vcpus: request.vcpus,
         memory_mib: request.memory_mib,
     };
-    let vm_dir = host.config.sandboxes_dir().join(format!("build-{}", request.name));
-    let mut vm = Vm::boot(host, &vm_dir, vec![base_layer], size).await?;
+    let warm = WarmVm::spawn(host).await?;
+    let mut vm = Vm::boot(host, warm, vec![base_layer], size).await?;
     let captured = async {
         Envd::new(vm.slot().host_ip).wait_ready().await?;
         tokio::time::sleep(SETTLE_AFTER_BOOT).await;

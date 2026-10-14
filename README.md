@@ -77,19 +77,22 @@ cd examples/sdk-smoke && npm install && node smoke.mjs
 
 ## Numbers
 
-Azure Standard_E4ds_v4 with nested KVM, kernel 7.0, template `base` (Ubuntu 24.04, 2 vCPU, 1 GiB), measured with curl on the node:
+Azure Standard_E4ds_v4 with nested KVM, kernel 7.0, template on Ubuntu 24.04 (2 vCPU, 1 GiB), measured with curl on the node. AgentENV ran on the same machine (Docker image `aenv-server:latest`) with the same calls:
 
-| Step | Time |
-|---|---|
-| create from template | about 160 ms |
-| of that, VM restore (ublk devices, Firecracker, snapshot load) | about 19 ms |
-| of that, envd first answers (`/health`, `/init`) | about 140 ms |
-| pause | about 30 ms |
-| resume | about 175 ms |
+| Step | e2b-runtime-simple | AgentENV |
+|---|---|---|
+| create from template | about 60 ms | about 110 ms |
+| pause | about 8 ms | about 44 ms |
+| resume | about 82 ms | about 130 ms |
 
-The envd part is page faults. After the restore, the guest touches about 9,800 pages (40 MB) and each one is a copy on write fault in the Firecracker process. On nested virtualization each fault costs about 15 µs.
+What made the difference:
 
-The template memory layer is 91 MB of 1 GiB, because only written pages are stored.
+- **Warm pools, like AgentENV.** Firecracker processes with their network slot are started ahead of time, and the ublk daemon keeps a pool of writable devices. The VM restore takes about 6 ms.
+- **One memory device per checkpoint.** Sandboxes from the same template share it. The node keeps the device open, because Linux drops the page cache of a block device when its last user closes it.
+- **Fewer page faults after a restore.** envd asked hyper for room for about 263,000 headers on every connection, which allocated and zeroed about 17 MB per request. After a restore every one of those pages is a fault in the host. With hyper's default the guest touches about 1,500 pages after a restore instead of 9,800 (AgentENV: about 2,800).
+- **Pause does not wait.** The guest is not synced (memory and disk are captured together), and the VM shuts down in the background.
+
+There are no huge pages, like in AgentENV: the memory file is shared between sandboxes through the page cache, and huge pages would end that sharing.
 
 ## What works
 
@@ -103,5 +106,4 @@ The SDK smoke test passes: create, commands, files, pause, connect (resume), sna
 - Sandbox state lives in memory. A node restart forgets running and paused sandboxes.
 - Template build through the SDK (`Template.build`), fork, metrics, logs and the volume content API.
 - Network rules (`allowOut`, `denyOut`), traffic access tokens, auto resume.
-- Guest memory uses 4 KiB pages. Huge pages would cut the faults after a restore, but Firecracker supports them only with anonymous or userfaultfd memory.
 - Multi node.

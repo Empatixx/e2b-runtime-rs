@@ -21,6 +21,7 @@ pub struct Host {
 impl Host {
     pub async fn start(config: Config) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)?;
+        remove_stale_vms(&config).await;
         Network::prepare_host().await?;
         create_placeholder_drive(&config).await?;
         let storage = Arc::new(Storage::start(&config).await?);
@@ -32,6 +33,11 @@ impl Host {
             config,
         })
     }
+}
+
+async fn remove_stale_vms(config: &Config) {
+    let _ = run("pkill", &["-f", "firecracker --api-sock fc.sock"]).await;
+    let _ = std::fs::remove_dir_all(config.sandboxes_dir());
 }
 
 async fn create_placeholder_drive(config: &Config) -> Result<()> {
