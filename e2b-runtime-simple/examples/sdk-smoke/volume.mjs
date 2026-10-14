@@ -1,0 +1,10 @@
+import { Sandbox, Volume } from 'e2b'
+const volume = await Volume.create(`home-${Date.now()}`)
+const first = await Sandbox.create('base', { volumeMounts: { '/home/user/data': volume } })
+console.log('first', first.sandboxId, (await first.commands.run('mount | grep vdb; df -h /home/user/data')).stdout)
+await first.files.write('/home/user/data/kept.txt', 'kept in volume')
+await first.kill()
+const again = await Sandbox.create('base', { volumeMounts: { '/home/user/data': volume } })
+console.log('again', again.sandboxId)
+console.log(await again.commands.run('cat /home/user/data/kept.txt').catch(e => e.message))
+await again.kill()
