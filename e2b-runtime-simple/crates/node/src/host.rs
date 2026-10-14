@@ -20,6 +20,7 @@ const PLACEHOLDER_SIZE: &str = "1M";
 pub struct Host {
     pub config: Config,
     pub store: Arc<Store>,
+    pub layers: Arc<Layers>,
     pub storage: Arc<Storage>,
     pub memory: SharedMemory,
     pub network: Network,
@@ -36,7 +37,7 @@ impl Host {
         create_placeholder_drive(&config).await?;
         let store = Arc::new(Store::new(&config.s3)?);
         let layers = Arc::new(Layers::new(store.clone(), config.layers_dir()));
-        let storage = Arc::new(Storage::start(&config, layers).await?);
+        let storage = Arc::new(Storage::start(&config, layers.clone()).await?);
         Ok(Self {
             memory: SharedMemory::new(storage.clone(), config.memory_dir()),
             network: Network::new(config.slot_base),
@@ -44,6 +45,7 @@ impl Host {
             templates: Templates::new(store.clone()),
             volumes: Volumes::new(store.clone(), storage.clone(), config.volumes_dir()),
             storage,
+            layers,
             store,
             config,
         })

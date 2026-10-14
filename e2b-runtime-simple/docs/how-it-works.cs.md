@@ -211,3 +211,52 @@ Lokální disk nodu je jen cache, takže jeho ztráta nic nerozbije:
  data-a/sandboxes/vm-…/          běžící VM: horní vrstva disku, fc.sock, symlinky
  data-a/memory/<ckpt>/           image.json sdíleného paměťového zařízení
 ```
+
+## 11. Úklid
+
+### Node, který spadne
+
+```
+ každý node, každých 5 s:   PUT nodes/node-a.json { alive_until: teď + 30 s }
+
+ node A čte sandboxes/<id>.json { owner: node-b }
+    └─ nodes/node-b.json alive_until < teď ?
+          ne  → předá volání na B (jako dřív)
+          ano → B je pryč:
+                 volumes připojené k sandboxu → attached_to: nikdo (If-Match)
+                 smazat checkpoint, ze kterého byl obnovený
+                 smazat záznam → SDK dostane 404
+
+ node B se restartuje → nejdřív zapomene svoje záznamy (jeho VM restart nepřežily)
+```
+
+Naměřeno: hned po `kill -9` nodu B vrací volání na jeho sandbox 502. Po 37 s vrací 404, sandbox zmizí ze seznamu a jeho volume jde připojit na nodu A.
+
+### Slučování vrstev
+
+```
+ rozpočet vlastních vrstev = 32 - sdílené / 4   (minimálně 1, pravidlo z AgentENV)
+
+ 41. pause, 3 sdílené vrstvy šablony:      po sloučení:
+ ┌───────────────────────┐                 ┌───────────────────────┐
+ │ pause #33             │ ┐               │ sloučená sha256:86cf… │ ← jedna nová vrstva v S3
+ │ …                     │ │ 33 vlastních  ├───────────────────────┤
+ │ pause #1              │ ┘ > 32          │ vrstvy šablony        │ ┐ sdílené,
+ ├───────────────────────┤                 │ (nikdy se neslučují)  │ ┘ beze změny
+ │ vrstvy šablony        │                 └───────────────────────┘
+ └───────────────────────┘
+```
+
+Vlastní vrstvy, které jsou jen v S3 (po resume na jiném nodu), se nejdřív stáhnou do cache. `examples/sdk-smoke/many-pauses.mjs` udělá 40 kol zápisu, pause a resume; na konci má kořenový disk 11 vrstev a všechny soubory jsou na místě.
+
+### Staré checkpointy a lokální cache
+
+```
+ pause:  nový checkpoint uložen → smazat checkpoint, ze kterého byl sandbox obnovený
+ kill:   smazat poslední checkpoint pauznutého sandboxu
+ vrstvy: zůstávají v S3 (sdílí je šablony a další checkpointy), stejně jako v AgentENV
+
+ lokální cache, každých 30 min:  nad 95 % E2B_SIMPLE_CACHE_GB?
+                                 → smazat nejdéle nepoužité vrstvy, nečinné 10 min, až na 70 %
+                                 (každá vrstva je i v S3, takže se nic neztratí)
+```

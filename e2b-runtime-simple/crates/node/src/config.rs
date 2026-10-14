@@ -84,4 +84,6 @@ pub struct ServeConfig {
     pub node_id: String,
     #[arg(long, env = "E2B_SIMPLE_NODE_API_URL", default_value = "http://127.0.0.1:3000")]
     pub node_api_url: String,
+    #[arg(long, env = "E2B_SIMPLE_CACHE_GB", default_value_t = 50)]
+    pub cache_capacity_gb: u64,
 }

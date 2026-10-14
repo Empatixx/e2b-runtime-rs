@@ -187,3 +187,48 @@ Layers never change once written. The local disk of a node holds only copies:
 | `checkpoints/<id>/vmstate` | the vmstate cache |
 | `sandboxes/vm-<id>/` | a running VM: the writable upper layer, the Firecracker socket |
 | `memory/<checkpoint>/` | the image config of a shared memory device |
+
+## Housekeeping
+
+We copied each rule from AgentENV and kept S3 as the only shared thing.
+
+### A node that dies
+
+Every node writes `nodes/<id>.json` with an `alive_until` time every 5 seconds. A record whose owner has not written for 30 seconds counts as gone.
+
+<Mermaid chart={`
+flowchart TB
+  R[node A reads sandboxes/id.json: owner node B] --> Q{nodes/node-b.json still alive?}
+  Q -->|yes| F[forward the call to node B]
+  Q -->|no| C[release the volumes of the sandbox with If-Match]
+  C --> D[delete the checkpoint it was resumed from]
+  D --> X[delete the record: the SDK gets 404]
+`} />
+
+A node that restarts forgets its own records first, because its VMs did not survive. We measured it with `kill -9` on node B: calls for its sandbox failed with 502 at once, got 404 after 37 seconds, and the volume of the sandbox mounted on node A. AgentENV does the same with a 30 second binding TTL in its scheduler.
+
+### Merging layers
+
+Every pause adds a layer, and OverlayBD allows 255. The layers of the template are shared and never merged. The own layers of a sandbox are merged into one when there are more than `32 - shared / 4` of them, the rule from AgentENV.
+
+<Mermaid chart={`
+flowchart LR
+  subgraph Before[before the 41st pause]
+    O1[33 own layers from pauses]
+    T1[3 shared template layers]
+  end
+  subgraph After[after merging]
+    O2[1 merged layer, uploaded to S3]
+    T2[3 shared template layers, unchanged]
+  end
+  O1 -->|merge_files_ro| O2
+  T1 --- T2
+`} />
+
+Own layers that are only in S3, after a resume on another node, are downloaded into the cache first. `examples/sdk-smoke/many-pauses.mjs` runs 40 rounds of write, pause and resume. At the end the root disk has 11 layers and every file is there.
+
+### Old checkpoints and the local cache
+
+- A pause deletes the checkpoint the sandbox was resumed from. A kill deletes the last checkpoint of a paused sandbox.
+- Layers stay in S3, because templates and other checkpoints share them. AgentENV keeps its shared layers in S3 too.
+- Every 30 minutes, when the local cache is above 95 % of `E2B_SIMPLE_CACHE_GB`, the node deletes the least recently used layers that were idle for 10 minutes, down to 70 %. Every layer is also in S3, so the next read gets it from there.

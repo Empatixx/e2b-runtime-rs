@@ -5,6 +5,7 @@ mod firecracker;
 mod host;
 mod layers;
 mod network;
+mod nodes;
 mod proxy;
 mod sandbox;
 mod storage;
@@ -20,6 +21,7 @@ use tokio::net::TcpListener;
 
 use config::{Config, ServeConfig};
 use host::Host;
+use nodes::Nodes;
 use sandbox::Sandboxes;
 use sandbox::record::Owner;
 use template::BuildRequest;
@@ -58,8 +60,13 @@ async fn serve(host: Arc<Host>, config: ServeConfig) -> Result<()> {
         api_url: config.node_api_url.clone(),
         domain: config.domain.clone(),
     };
-    let sandboxes = Sandboxes::new(host.clone(), me);
+    let nodes = Nodes::new(host.store.clone(), config.node_id.clone());
+    nodes.beat().await?;
+    nodes.spawn_heartbeat();
+    let sandboxes = Sandboxes::new(host.clone(), me, nodes);
+    sandboxes.forget_own_records_after_restart().await?;
     sandboxes.spawn_reaper();
+    layers::cache::spawn_eviction(host.layers.clone(), config.cache_capacity_gb << 30);
     let api = api::router(api::ApiState {
         host,
         sandboxes: sandboxes.clone(),

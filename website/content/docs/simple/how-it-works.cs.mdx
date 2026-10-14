@@ -187,3 +187,48 @@ Zapsaná vrstva se už nikdy nemění. Lokální disk nodu drží jen kopie:
 | `checkpoints/<id>/vmstate` | cache vmstate |
 | `sandboxes/vm-<id>/` | běžící VM: zapisovatelná horní vrstva, socket Firecrackeru |
 | `memory/<checkpoint>/` | konfigurace obrazu sdíleného paměťového zařízení |
+
+## Úklid
+
+Každé pravidlo jsme převzali z AgentENV a jedinou sdílenou věcí zůstává S3.
+
+### Node, který spadne
+
+Každý node zapisuje každých 5 sekund `nodes/<id>.json` s časem `alive_until`. Záznam, jehož vlastník 30 sekund nic nezapsal, se bere jako ztracený.
+
+<Mermaid chart={`
+flowchart TB
+  R[node A čte sandboxes/id.json: vlastník node B] --> Q{je nodes/node-b.json pořád živý?}
+  Q -->|ano| F[předá volání nodu B]
+  Q -->|ne| C[uvolní volumes sandboxu přes If-Match]
+  C --> D[smaže checkpoint, ze kterého byl sandbox obnovený]
+  D --> X[smaže záznam: SDK dostane 404]
+`} />
+
+Node, který se restartuje, nejdřív zapomene svoje vlastní záznamy, protože jeho VM restart nepřežily. Změřili jsme to přes `kill -9` na nodu B: volání na jeho sandbox hned vracela 502, po 37 sekundách 404 a volume sandboxu šlo připojit na nodu A. AgentENV dělá totéž s 30sekundovým TTL vazby ve svém scheduleru.
+
+### Slučování vrstev
+
+Každá pause přidá vrstvu a OverlayBD jich unese 255. Vrstvy šablony jsou sdílené a nikdy se neslučují. Vlastní vrstvy sandboxu se sloučí do jedné, když jich je víc než `32 - sdílené / 4`, podle pravidla z AgentENV.
+
+<Mermaid chart={`
+flowchart LR
+  subgraph Before[před 41. pause]
+    O1[33 vlastních vrstev z pauz]
+    T1[3 sdílené vrstvy šablony]
+  end
+  subgraph After[po sloučení]
+    O2[1 sloučená vrstva, nahraná do S3]
+    T2[3 sdílené vrstvy šablony, beze změny]
+  end
+  O1 -->|merge_files_ro| O2
+  T1 --- T2
+`} />
+
+Vlastní vrstvy, které jsou po resume na jiném nodu jen v S3, se nejdřív stáhnou do cache. `examples/sdk-smoke/many-pauses.mjs` udělá 40 kol zápisu, pause a resume. Na konci má kořenový disk 11 vrstev a všechny soubory jsou na místě.
+
+### Staré checkpointy a lokální cache
+
+- Pause smaže checkpoint, ze kterého byl sandbox obnovený. Kill smaže poslední checkpoint pauznutého sandboxu.
+- Vrstvy zůstávají v S3, protože je sdílí šablony a další checkpointy. AgentENV nechává sdílené vrstvy v S3 také.
+- Každých 30 minut node zkontroluje lokální cache. Když je nad 95 % `E2B_SIMPLE_CACHE_GB`, smaže nejdéle nepoužité vrstvy, které 10 minut nikdo nečetl, až na 70 %. Každá vrstva je i v S3, takže další čtení si ji vezme odtamtud.

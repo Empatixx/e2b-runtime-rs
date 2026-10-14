@@ -78,8 +78,8 @@ Samotná obnova VM trvá asi 6 ms. Většinu zbytku tvoří page faulty po obnov
 
 ## Co zatím chybí
 
-- Úklid starých checkpointů a vrstev, lokálně ani v S3.
-- Každá pause přidá vrstvu. OverlayBD jich unese 255, takže dlouho žijící sandboxy budou potřebovat vrstvy slučovat.
-- Node, který spadne, nechá v S3 záznamy svých běžících sandboxů. Je potřeba lease nebo pravidelný úklid.
+- Vrstvy se z S3 nikdy nemažou. Uvolnil by je mark and sweep od šablon, sandboxů a volumes.
 - `GET /v2/sandboxes` čte z S3 jeden záznam na každý sandbox.
 - Ještě není: build šablon přes SDK, fork, metriky, logy, API pro obsah volumes, pravidla `allowOut` a `denyOut`, traffic access tokeny a automatické resume.
+
+Mrtvé nody, slučování vrstev, staré checkpointy a lokální cache řešíme stejně jako AgentENV. [Jak to funguje](./how-it-works/#úklid) vysvětluje každé pravidlo.

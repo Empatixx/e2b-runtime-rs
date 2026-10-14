@@ -1,6 +1,10 @@
+pub mod cache;
+pub mod merge;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use overlaybd::config::{ImageConfig, LayerConfig};
@@ -11,6 +15,7 @@ use crate::store::Store;
 
 const PREFIX: &str = "layers";
 const HASH_CHUNK: usize = 4 * 1024 * 1024;
+const MAX_OWN_LAYERS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Layer {
@@ -28,15 +33,47 @@ impl Layers {
         Self { store, dir }
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn publish(&self, sealed: &Path) -> Result<Layer> {
         let layer = describe(sealed).await?;
-        self.add_to_cache(sealed, &layer)?;
-        let key = format!("{PREFIX}/{}", layer.digest);
+        self.move_into_cache(sealed, &layer)?;
+        let key = object_key(&layer);
         if !self.store.exists(&key).await? {
             self.store.upload(&key, &self.cached(&layer)).await?;
         }
         Ok(layer)
+    }
+
+    pub async fn local_copy(&self, layer: &Layer) -> Result<PathBuf> {
+        let cached = self.cached(layer);
+        if !cached.exists() {
+            self.store.download(&object_key(layer), &cached).await?;
+        }
+        Ok(cached)
+    }
+
+    pub async fn compact(&self, stack: &mut Vec<Layer>, shared: usize, scratch: &Path) -> Result<()> {
+        if stack.len().saturating_sub(shared) <= own_layer_budget(shared) {
+            return Ok(());
+        }
+        let mut sources = Vec::new();
+        for layer in &stack[shared..] {
+            sources.push(self.local_copy(layer).await?);
+        }
+        merge::merge_layers(&sources, scratch).await?;
+        let merged = self.publish(scratch).await?;
+        tracing::info!(
+            layers = stack.len() - shared,
+            digest = merged.digest,
+            "merged own layers"
+        );
+        stack.truncate(shared);
+        stack.push(merged);
+        Ok(())
     }
 
     pub fn write_image_config(&self, path: &Path, layers: &[Layer]) -> Result<PathBuf> {
@@ -53,7 +90,7 @@ impl Layers {
 
     fn lower(&self, layer: &Layer) -> LayerConfig {
         let cached = self.cached(layer);
-        match cached.exists() {
+        match mark_used(&cached) {
             true => LayerConfig {
                 file: cached.display().to_string(),
                 ..Default::default()
@@ -66,18 +103,34 @@ impl Layers {
         }
     }
 
-    fn add_to_cache(&self, sealed: &Path, layer: &Layer) -> Result<()> {
+    fn move_into_cache(&self, sealed: &Path, layer: &Layer) -> Result<()> {
         let cached = self.cached(layer);
         if cached.exists() {
-            return Ok(());
+            return Ok(std::fs::remove_file(sealed)?);
         }
         std::fs::create_dir_all(&self.dir)?;
-        std::fs::hard_link(sealed, &cached).with_context(|| format!("cache layer {}", layer.digest))
+        std::fs::rename(sealed, &cached).with_context(|| format!("cache layer {}", layer.digest))
     }
 
     fn cached(&self, layer: &Layer) -> PathBuf {
         self.dir.join(format!("{}.commit", layer.digest))
     }
+}
+
+pub fn own_layer_budget(shared: usize) -> usize {
+    MAX_OWN_LAYERS.saturating_sub(shared / 4).max(1)
+}
+
+fn object_key(layer: &Layer) -> String {
+    format!("{PREFIX}/{}", layer.digest)
+}
+
+fn mark_used(cached: &Path) -> bool {
+    std::fs::File::options()
+        .write(true)
+        .open(cached)
+        .and_then(|file| file.set_modified(SystemTime::now()))
+        .is_ok()
 }
 
 async fn describe(path: &Path) -> Result<Layer> {
@@ -101,4 +154,17 @@ async fn describe(path: &Path) -> Result<Layer> {
         })
     })
     .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_shrinks_with_the_shared_prefix_like_agentenv() {
+        assert_eq!(own_layer_budget(0), 32);
+        assert_eq!(own_layer_budget(3), 32);
+        assert_eq!(own_layer_budget(32), 24);
+        assert_eq!(own_layer_budget(200), 1);
+    }
 }

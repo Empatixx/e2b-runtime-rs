@@ -1,4 +1,5 @@
 pub mod envd;
+pub mod liveness;
 pub mod record;
 pub mod vm;
 pub mod warm_pool;
@@ -15,6 +16,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::checkpoint::{Checkpoint, DriveState, checkpoint_id, new_id};
 use crate::firecracker::{DRIVE_SLOTS, Metadata};
 use crate::host::Host;
+use crate::nodes::Nodes;
 use crate::template::Template;
 use envd::{Envd, VolumeMount, hash_token};
 use record::{Claim, Owner, Records, SandboxRecord};
@@ -42,6 +44,8 @@ pub struct SandboxInfo {
     pub volume_mounts: Vec<MountRequest>,
     pub domain: String,
     pub paused: bool,
+    #[serde(default)]
+    pub resumed_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,14 +79,16 @@ struct Running {
 pub struct Sandboxes {
     host: Arc<Host>,
     me: Owner,
+    nodes: Arc<Nodes>,
     records: Records,
     warm_pool: Arc<WarmPool>,
     running: RwLock<HashMap<String, Arc<Mutex<Running>>>>,
 }
 
 impl Sandboxes {
-    pub fn new(host: Arc<Host>, me: Owner) -> Arc<Self> {
+    pub fn new(host: Arc<Host>, me: Owner, nodes: Arc<Nodes>) -> Arc<Self> {
         Arc::new(Self {
+            nodes,
             records: Records::new(host.store.clone()),
             warm_pool: WarmPool::new(host.clone(), WARM_VMS),
             host,
@@ -98,10 +104,10 @@ impl Sandboxes {
         let info = self.new_sandbox_info(&request, &template, &checkpoint);
         let drives = self.drives_for_new_sandbox(&info, &checkpoint).await?;
         let vm = self.start_vm(&info, &checkpoint, drives).await?;
+        self.insert(info.clone(), vm).await;
         self.records
             .save(&SandboxRecord::running(info.clone(), self.me.clone()))
             .await?;
-        self.insert(info.clone(), vm).await;
         tracing::info!(
             sandbox_id = info.sandbox_id,
             template_id = info.template_id,
@@ -114,7 +120,7 @@ impl Sandboxes {
         if self.entry(sandbox_id).await.is_some() {
             return Ok(Location::Here);
         }
-        let location = match self.records.get(sandbox_id).await? {
+        let location = match self.live_record(sandbox_id).await? {
             None => Location::Missing,
             Some(SandboxRecord { owner: None, .. }) => Location::Paused,
             Some(SandboxRecord { owner: Some(owner), .. }) if owner.node_id != self.me.node_id => {
@@ -129,13 +135,12 @@ impl Sandboxes {
         if let Some(entry) = self.entry(sandbox_id).await {
             return Ok(Some(entry.lock().await.info.clone()));
         }
-        Ok(self.records.get(sandbox_id).await?.map(|record| record.info))
+        Ok(self.live_record(sandbox_id).await?.map(|record| record.info))
     }
 
     pub async fn list(&self) -> Result<Vec<SandboxInfo>> {
         Ok(self
-            .records
-            .list()
+            .live_records()
             .await?
             .into_iter()
             .map(|record| record.info)
@@ -154,9 +159,11 @@ impl Sandboxes {
         let running = &mut *entry.lock().await;
         let vm = running.vm.as_mut().context("sandbox is stopping")?;
         let checkpoint = self.capture(&running.info, vm).await?;
+        self.host.checkpoints.save(&checkpoint).await?;
         self.commit_volumes(&checkpoint.drives, false).await?;
         let record = SandboxRecord::paused(running.info.clone(), checkpoint.id);
         self.records.save(&record).await?;
+        self.delete_resumed_from(&running.info).await;
         self.forget(sandbox_id, running).await;
         tracing::info!(sandbox_id, "sandbox paused");
         Ok(())
@@ -168,6 +175,9 @@ impl Sandboxes {
             let running = &mut *entry.lock().await;
             running.info.end_at = running.info.end_at.max(Utc::now() + timeout);
             return Ok((running.info.clone(), false));
+        }
+        if self.live_record(sandbox_id).await?.is_none() {
+            bail!("sandbox {sandbox_id} not found");
         }
         let record = match self.records.claim_paused(sandbox_id, &self.me).await? {
             Claim::Claimed(record) => record,
@@ -192,7 +202,8 @@ impl Sandboxes {
         let checkpoint = self.capture(&running.info, vm).await?;
         vm.resume().await?;
         self.commit_volumes(&checkpoint.drives, false).await?;
-        let copy = self.save_copy_without_volumes(checkpoint).await?;
+        let copy = checkpoint.into_template();
+        self.host.checkpoints.save(&copy).await?;
         let template_id = name.unwrap_or_else(|| new_id("snap"));
         self.host
             .templates
@@ -208,9 +219,11 @@ impl Sandboxes {
         if let Some(entry) = self.entry(sandbox_id).await {
             let running = &mut *entry.lock().await;
             self.stop_running(running).await?;
+            self.delete_resumed_from(&running.info).await;
             self.forget(sandbox_id, running).await;
-        } else if let Some(record) = self.records.get(sandbox_id).await? {
+        } else if let Some(record) = self.live_record(sandbox_id).await? {
             self.release_paused_volumes(&record).await?;
+            self.delete_paused_checkpoint(&record).await;
         } else {
             return Ok(false);
         }
@@ -270,6 +283,7 @@ impl Sandboxes {
                 end_at: Utc::now() + timeout,
                 domain: self.me.domain.clone(),
                 paused: false,
+                resumed_from: Some(checkpoint.id.clone()),
                 ..record.info.clone()
             };
             let vm = self.start_vm(&info, &checkpoint, checkpoint.drives.clone()).await?;
@@ -317,20 +331,19 @@ impl Sandboxes {
     async fn capture(&self, info: &SandboxInfo, vm: &mut Vm) -> Result<Checkpoint> {
         let checkpoint_dir = self.host.checkpoints.new_dir();
         let captured = vm.capture(&self.host, &checkpoint_dir).await?;
-        let checkpoint = checkpoint_from(checkpoint_id(&checkpoint_dir)?, info, captured);
-        self.host.checkpoints.save(&checkpoint).await?;
-        Ok(checkpoint)
+        Ok(checkpoint_from(checkpoint_id(&checkpoint_dir)?, info, captured))
     }
 
-    async fn save_copy_without_volumes(&self, checkpoint: Checkpoint) -> Result<Checkpoint> {
-        let drives = checkpoint
-            .drives
-            .into_iter()
-            .map(|drive| DriveState { volume: None, ..drive })
-            .collect();
-        let copy = Checkpoint { drives, ..checkpoint };
-        self.host.checkpoints.save(&copy).await?;
-        Ok(copy)
+    async fn delete_resumed_from(&self, info: &SandboxInfo) {
+        if let Some(checkpoint) = &info.resumed_from {
+            self.host.checkpoints.delete(checkpoint).await;
+        }
+    }
+
+    async fn delete_paused_checkpoint(&self, record: &SandboxRecord) {
+        if let Some(checkpoint) = &record.checkpoint {
+            self.host.checkpoints.delete(checkpoint).await;
+        }
     }
 
     async fn drives_for_new_sandbox(&self, info: &SandboxInfo, checkpoint: &Checkpoint) -> Result<Vec<DriveState>> {
@@ -338,7 +351,7 @@ impl Sandboxes {
         let mut free_slots = free_drive_slots(&drives).into_iter();
         for mount in &info.volume_mounts {
             let slot = free_slots.next().context("too many volume mounts")?;
-            let volume = self.host.volumes.attach(&mount.name, &info.sandbox_id).await?;
+            let volume = self.attach_volume(&mount.name, &info.sandbox_id).await?;
             drives.push(DriveState {
                 slot,
                 mount_path: mount.path.clone(),
@@ -420,6 +433,7 @@ impl Sandboxes {
             volume_mounts: request.volume_mounts.clone(),
             domain: self.me.domain.clone(),
             paused: false,
+            resumed_from: None,
         }
     }
 }
@@ -427,8 +441,10 @@ impl Sandboxes {
 fn checkpoint_from(id: String, info: &SandboxInfo, captured: Captured) -> Checkpoint {
     Checkpoint {
         id,
-        memory_layers: captured.memory_layers,
-        rootfs_layers: captured.rootfs_layers,
+        memory_layers: captured.memory.layers,
+        rootfs_layers: captured.rootfs.layers,
+        shared_memory_layers: captured.memory.shared,
+        shared_rootfs_layers: captured.rootfs.shared,
         drives: captured.drives,
         vcpus: info.vcpus,
         memory_mib: info.memory_mib,

@@ -134,13 +134,17 @@ The SDK smoke test passes: create, commands, files, pause, connect (resume), sna
 
 Sandboxes reach the internet, but not each other, the node or private networks (`examples/sdk-smoke/isolation.mjs`).
 
+## Housekeeping, the AgentENV way
+
+- **A node that dies.** Every node writes `nodes/<id>.json` with `alive_until` every 5 seconds. A record whose owner has not written for 30 seconds counts as gone: the next node that reads it releases its volumes and deletes it, and the SDK gets a 404. A node that restarts forgets its own records first. AgentENV does the same with a 30 second binding TTL in its scheduler.
+- **Merging layers.** The layers of the template are shared and never merged. When a sandbox has more own layers than `32 - shared / 4`, the pause merges them into one with OverlayBD's `merge_files_ro`, like AgentENV. `examples/sdk-smoke/many-pauses.mjs` pauses a sandbox 40 times and checks every file.
+- **Old checkpoints.** A pause deletes the checkpoint the sandbox was resumed from, and a kill deletes the last one. Layers stay in S3, as in AgentENV, because templates and other checkpoints share them.
+- **Local cache.** Sealed layers move into the cache. Every 30 minutes, when the cache is above 95 % of `E2B_SIMPLE_CACHE_GB`, the node deletes the least recently used layers that were idle for 10 minutes, down to 70 %. Every layer is also in S3, so a deleted one is read from there again.
+
 ## Not done yet
 
-- No garbage collection of checkpoints and layers, locally or in S3.
-- Every pause adds a layer. OverlayBD allows 255, so long lived sandboxes will need their layers merged.
+- Layers are never deleted from S3. A mark and sweep from templates, sandboxes and volumes would free them.
 - `GET /v2/sandboxes` lists the records in S3, one request per sandbox.
-- A node that dies keeps the records of its running sandboxes. They need a lease or a sweep.
-- Snapshots of a sandbox with a volume share the volume's layer files. Deleting the volume breaks the snapshot.
 - Template build through the SDK (`Template.build`), fork, metrics, logs and the volume content API.
 - Network rules (`allowOut`, `denyOut`), traffic access tokens, auto resume.
 - The memory of a sandbox resumed on a new node is read from S3 on demand. AgentENV prefetches it with a startup pack; that would help with a remote bucket.

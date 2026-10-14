@@ -92,6 +92,24 @@ impl Volumes {
         }
     }
 
+    pub async fn release_if_attached_to(&self, id_or_name: &str, sandbox_id: &str) -> Result<()> {
+        let Some(volume) = self.get(id_or_name).await? else {
+            return Ok(());
+        };
+        let current = self.versioned(&volume.volume_id).await?;
+        if current.value.attached_to.as_deref() != Some(sandbox_id) {
+            return Ok(());
+        }
+        let released = Volume {
+            attached_to: None,
+            ..current.value.clone()
+        };
+        self.store
+            .replace(&record_key(&volume.volume_id), &current, &released)
+            .await?;
+        Ok(())
+    }
+
     pub async fn commit(&self, volume_id: &str, layers: Vec<Layer>, detach: bool) -> Result<()> {
         let current = self.versioned(volume_id).await?.value;
         let committed = Volume {

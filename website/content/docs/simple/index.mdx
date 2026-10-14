@@ -78,8 +78,8 @@ The VM restore itself takes about 6 ms. Most of the rest is page faults after th
 
 ## Known gaps
 
-- No garbage collection of checkpoints and layers, locally or in S3.
-- Every pause adds a layer. OverlayBD allows 255, so long lived sandboxes will need their layers merged.
-- A node that dies keeps the records of its running sandboxes in S3. They need a lease or a sweep.
+- Layers are never deleted from S3. A mark and sweep from templates, sandboxes and volumes would free them.
 - `GET /v2/sandboxes` reads one record per sandbox from S3.
 - Not built yet: template builds through the SDK, fork, metrics, logs, the volume content API, `allowOut` and `denyOut` rules, traffic access tokens and auto resume.
+
+Dead nodes, merging layers, old checkpoints and the local cache are handled the way AgentENV handles them. [How it works](./how-it-works/#housekeeping) explains each rule.

@@ -164,16 +164,19 @@ async fn boot_and_capture(
     .await;
     vm.shutdown(host).await;
     let captured = captured?;
-    Ok(Checkpoint {
+    let checkpoint = Checkpoint {
         id: checkpoint_id(checkpoint_dir)?,
-        memory_layers: captured.memory_layers,
-        rootfs_layers: captured.rootfs_layers,
+        memory_layers: captured.memory.layers,
+        rootfs_layers: captured.rootfs.layers,
+        shared_memory_layers: 0,
+        shared_rootfs_layers: 0,
         drives: Vec::new(),
         vcpus: request.vcpus,
         memory_mib: request.memory_mib,
         disk_mb: request.disk_mb,
         envd_version: envd_version(&request.envd).await?,
-    })
+    };
+    Ok(checkpoint.into_template())
 }
 
 async fn envd_version(envd: &Path) -> Result<String> {

@@ -12,6 +12,10 @@ pub struct Checkpoint {
     pub id: String,
     pub memory_layers: Vec<Layer>,
     pub rootfs_layers: Vec<Layer>,
+    #[serde(default)]
+    pub shared_memory_layers: usize,
+    #[serde(default)]
+    pub shared_rootfs_layers: usize,
     pub drives: Vec<DriveState>,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -32,6 +36,22 @@ pub struct Checkpoints {
     dir: PathBuf,
 }
 
+impl Checkpoint {
+    pub fn into_template(self) -> Self {
+        let drives = self
+            .drives
+            .into_iter()
+            .map(|drive| DriveState { volume: None, ..drive })
+            .collect();
+        Self {
+            shared_memory_layers: self.memory_layers.len(),
+            shared_rootfs_layers: self.rootfs_layers.len(),
+            drives,
+            ..self
+        }
+    }
+}
+
 impl Checkpoints {
     pub fn new(store: Arc<Store>, dir: PathBuf) -> Self {
         Self { store, dir }
@@ -50,6 +70,17 @@ impl Checkpoints {
     pub async fn load(&self, id: &str) -> Result<Checkpoint> {
         let found = self.store.get(&record_key(id)).await?;
         Ok(found.with_context(|| format!("checkpoint {id} not found"))?.value)
+    }
+
+    pub async fn delete(&self, id: &str) {
+        let removed = async {
+            self.store.delete(&record_key(id)).await?;
+            self.store.delete(&vm_state_key(id)).await
+        }
+        .await;
+        removed
+            .unwrap_or_else(|e| tracing::warn!(checkpoint = id, error = format!("{e:#}"), "delete checkpoint failed"));
+        let _ = std::fs::remove_dir_all(self.dir.join(id));
     }
 
     pub async fn vm_state(&self, checkpoint: &Checkpoint) -> Result<PathBuf> {

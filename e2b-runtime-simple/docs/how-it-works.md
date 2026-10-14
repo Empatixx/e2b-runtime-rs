@@ -211,3 +211,52 @@ The local disk of a node is only a cache, so losing it breaks nothing:
  data-a/sandboxes/vm-…/          running VMs: upper disk layer, fc.sock, symlinks
  data-a/memory/<ckpt>/           image.json of the shared memory device
 ```
+
+## 11. Housekeeping
+
+### A node that dies
+
+```
+ every node, every 5 s:   PUT nodes/node-a.json { alive_until: now + 30 s }
+
+ node A reads sandboxes/<id>.json { owner: node-b }
+    └─ nodes/node-b.json alive_until < now ?
+          no  → forward the call to B (as before)
+          yes → B is gone:
+                 volumes attached to the sandbox → attached_to: none (If-Match)
+                 delete the checkpoint it was resumed from
+                 delete the record → the SDK gets 404
+
+ node B restarts → it forgets its own records first (its VMs did not survive)
+```
+
+Measured: right after `kill -9` of node B, calls for its sandbox fail with 502. After 37 s they get 404, the sandbox is gone from the list, and its volume mounts on node A.
+
+### Merging layers
+
+```
+ budget for own layers = 32 - shared / 4   (minimum 1, the AgentENV rule)
+
+ 41st pause, 3 shared template layers:     after merging:
+ ┌───────────────────────┐                 ┌───────────────────────┐
+ │ pause #33             │ ┐               │ merged sha256:86cf…   │ ← one new layer in S3
+ │ …                     │ │ 33 own > 32   ├───────────────────────┤
+ │ pause #1              │ ┘               │ template layers       │ ┐ shared,
+ ├───────────────────────┤                 │ (never merged)        │ ┘ unchanged
+ │ template layers       │                 └───────────────────────┘
+ └───────────────────────┘
+```
+
+Own layers that are only in S3 (after a resume on another node) are downloaded into the cache first. `examples/sdk-smoke/many-pauses.mjs` runs 40 rounds of write, pause and resume; at the end the root disk has 11 layers and every file is there.
+
+### Old checkpoints and the local cache
+
+```
+ pause:  new checkpoint saved → delete the checkpoint the sandbox was resumed from
+ kill:   delete the last checkpoint of a paused sandbox
+ layers: stay in S3 (templates and other checkpoints share them), like AgentENV
+
+ local cache, every 30 min:  above 95 % of E2B_SIMPLE_CACHE_GB?
+                             → delete least recently used layers idle for 10 min, down to 70 %
+                             (every layer is also in S3, so nothing is lost)
+```

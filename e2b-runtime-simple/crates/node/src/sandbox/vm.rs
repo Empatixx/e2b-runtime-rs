@@ -16,8 +16,14 @@ pub struct Vm {
     dir: PathBuf,
     process: FirecrackerProcess,
     resources: Resources,
-    rootfs_layers: Vec<Layer>,
-    memory_layers: Vec<Layer>,
+    rootfs: Stack,
+    memory: Stack,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Stack {
+    pub layers: Vec<Layer>,
+    pub shared: usize,
 }
 
 struct Resources {
@@ -38,8 +44,8 @@ struct AttachedDrive {
 }
 
 pub struct Captured {
-    pub memory_layers: Vec<Layer>,
-    pub rootfs_layers: Vec<Layer>,
+    pub memory: Stack,
+    pub rootfs: Stack,
     pub drives: Vec<DriveState>,
 }
 
@@ -57,8 +63,11 @@ impl Vm {
             dir: warm.dir,
             process: warm.process,
             resources,
-            rootfs_layers,
-            memory_layers: Vec::new(),
+            rootfs: Stack {
+                layers: rootfs_layers,
+                shared: 0,
+            },
+            memory: Stack::default(),
         })
     }
 
@@ -73,8 +82,14 @@ impl Vm {
             dir: warm.dir,
             process: warm.process,
             resources,
-            rootfs_layers: checkpoint.rootfs_layers.clone(),
-            memory_layers: checkpoint.memory_layers.clone(),
+            rootfs: Stack {
+                layers: checkpoint.rootfs_layers.clone(),
+                shared: checkpoint.shared_rootfs_layers,
+            },
+            memory: Stack {
+                layers: checkpoint.memory_layers.clone(),
+                shared: checkpoint.shared_memory_layers,
+            },
         })
     }
 
@@ -102,9 +117,10 @@ impl Vm {
         self.capture_memory(host, &checkpoint_dir.join("memory.commit")).await?;
         self.seal_rootfs(host, &checkpoint_dir.join("rootfs.commit")).await?;
         self.seal_drives(host, checkpoint_dir).await?;
+        self.merge_own_layers(host, checkpoint_dir).await?;
         Ok(Captured {
-            memory_layers: self.memory_layers.clone(),
-            rootfs_layers: self.rootfs_layers.clone(),
+            memory: self.memory.clone(),
+            rootfs: self.rootfs.clone(),
             drives: self.mounted_drives().cloned().collect(),
         })
     }
@@ -118,6 +134,9 @@ impl Vm {
             let sealed = sealed_drive_path(host, checkpoint_dir, &drive.state);
             let layer = host.storage.seal(&drive.disk, &sealed).await?;
             drive.state.layers.push(layer);
+            host.layers
+                .compact(&mut drive.state.layers, 0, &sealed.with_extension("merged"))
+                .await?;
         }
         Ok(())
     }
@@ -133,15 +152,27 @@ impl Vm {
     async fn capture_memory(&mut self, host: &Host, sealed: &Path) -> Result<()> {
         let dirty = self.api().dirty_memory().await?;
         write_memory_layer(self.process.pid, &dirty, sealed).await?;
-        self.memory_layers.push(host.storage.publish(sealed).await?);
+        self.memory.layers.push(host.storage.publish(sealed).await?);
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn seal_rootfs(&mut self, host: &Host, sealed: &Path) -> Result<()> {
         let layer = host.storage.seal(&self.resources.rootfs, sealed).await?;
-        self.rootfs_layers.push(layer);
+        self.rootfs.layers.push(layer);
         Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn merge_own_layers(&mut self, host: &Host, checkpoint_dir: &Path) -> Result<()> {
+        let rootfs_scratch = checkpoint_dir.join("rootfs-merged.commit");
+        let memory_scratch = checkpoint_dir.join("memory-merged.commit");
+        host.layers
+            .compact(&mut self.rootfs.layers, self.rootfs.shared, &rootfs_scratch)
+            .await?;
+        host.layers
+            .compact(&mut self.memory.layers, self.memory.shared, &memory_scratch)
+            .await
     }
 }
 
