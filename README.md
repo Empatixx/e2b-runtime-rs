@@ -9,6 +9,7 @@
 - **envd** runs inside every sandbox: processes, PTYs, files, watchers, uploads and port forwarding.
 - **The orchestrator** runs on every node: it resumes Firecracker microVMs from snapshots, pauses them with memory and disk diffs, and builds templates (the template-manager role).
 - The rest of E2B (API, client proxy, dashboard) stays upstream's Go and talks to a Rust node the same way it talks to a Go one.
+- **[e2b-runtime-simple](e2b-runtime-simple/README.md)** is a separate, much smaller runtime for the same SDK. One binary per node, disks and memory as OverlayBD layers over ublk, and S3 as the only thing nodes share. It does not follow the Go internals.
 
 ## Differences from E2B Runtime
 

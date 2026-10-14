@@ -880,6 +880,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nix 0.29.0",
+ "opendal",
  "overlaybd",
  "rand 0.8.8",
  "reqwest 0.12.28",

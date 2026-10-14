@@ -4,7 +4,7 @@ A small E2B sandbox runtime in Rust. One binary per node serves the E2B API and 
 
 Nodes share one S3 bucket and nothing else. A sandbox paused on one node can be resumed on any other.
 
-This is a proof of concept.
+This is a proof of concept. [How it works](docs/how-it-works.md) explains it step by step with diagrams ([česky](docs/how-it-works.cs.md)).
 
 ## One idea: the checkpoint
 

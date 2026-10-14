@@ -66,6 +66,26 @@ jobs:
       - run: file target/${{ matrix.target }}/release/envd | tee /dev/stderr | grep -Eq "static(-pie|ally) linked"
       - run: sudo -E env "PATH=$PATH" cargo test -p envd --target ${{ matrix.target }}
 
+  simple:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: e2b-runtime-simple
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libclang-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: e2b-runtime-simple
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked -p e2b-node
+      - run: cargo test --locked -p envd --lib
+
   kvm-spike:
     runs-on: ubuntu-24.04
     steps:
