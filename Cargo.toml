@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.dependencies]
+overlaybd = { git = "https://github.com/kvcache-ai/AgentENV", rev = "f9a39636caa3d234bbb96d2406685d7a6d3dabc4", features = ["io-uring"] }
+uvm-ublk-daemon = { git = "https://github.com/kvcache-ai/AgentENV", rev = "f9a39636caa3d234bbb96d2406685d7a6d3dabc4" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

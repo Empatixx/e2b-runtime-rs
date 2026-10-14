@@ -1,0 +1,7 @@
+{
+  "name": "sdk-smoke",
+  "private": true,
+  "type": "module",
+  "scripts": { "smoke": "node smoke.mjs" },
+  "dependencies": { "e2b": "2.56.0" }
+}
