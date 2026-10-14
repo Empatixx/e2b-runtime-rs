@@ -1,4 +1,5 @@
 pub mod error;
+pub mod forward;
 pub mod models;
 pub mod sandboxes;
 pub mod volumes;
@@ -20,13 +21,11 @@ pub struct ApiState {
     pub host: Arc<Host>,
     pub sandboxes: Arc<Sandboxes>,
     pub api_key: Arc<str>,
-    pub domain: Arc<str>,
+    pub http: reqwest::Client,
 }
 
 pub fn router(state: ApiState) -> Router {
-    let protected = Router::new()
-        .route("/sandboxes", post(sandboxes::create).get(sandboxes::list_running))
-        .route("/v2/sandboxes", post(sandboxes::create).get(sandboxes::list))
+    let one_sandbox = Router::new()
         .route("/sandboxes/{id}", get(sandboxes::detail).delete(sandboxes::kill))
         .route("/sandboxes/{id}/pause", post(sandboxes::pause))
         .route("/sandboxes/{id}/resume", post(sandboxes::resume))
@@ -35,8 +34,13 @@ pub fn router(state: ApiState) -> Router {
         .route("/sandboxes/{id}/timeout", post(sandboxes::set_timeout))
         .route("/sandboxes/{id}/refreshes", post(sandboxes::refresh))
         .route("/sandboxes/{id}/snapshots", post(sandboxes::snapshot))
+        .route_layer(from_fn_with_state(state.clone(), forward::to_owner));
+    let protected = Router::new()
+        .route("/sandboxes", post(sandboxes::create).get(sandboxes::list_running))
+        .route("/v2/sandboxes", post(sandboxes::create).get(sandboxes::list))
         .route("/volumes", post(volumes::create).get(volumes::list))
         .route("/volumes/{id}", get(volumes::detail).delete(volumes::delete))
+        .merge(one_sandbox)
         .route_layer(from_fn_with_state(state.clone(), require_api_key));
     Router::new()
         .route("/health", get(|| async { StatusCode::OK }))

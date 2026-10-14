@@ -23,7 +23,6 @@ pub struct Slot {
     pub host_ip: Ipv4Addr,
 }
 
-#[derive(Default)]
 pub struct Network {
     free: Mutex<Vec<Slot>>,
     next: Mutex<u32>,
@@ -157,6 +156,13 @@ impl Slot {
 }
 
 impl Network {
+    pub fn new(slot_base: u32) -> Self {
+        Self {
+            free: Mutex::default(),
+            next: Mutex::new(slot_base),
+        }
+    }
+
     pub async fn prepare_host() -> Result<()> {
         run("sysctl", &["-qw", "net.ipv4.ip_forward=1"]).await?;
         allow_internet().await?;
@@ -193,19 +199,39 @@ async fn allow_internet() -> Result<()> {
 
 async fn isolate_sandboxes() -> Result<()> {
     for destination in PRIVATE_RANGES {
-        ensure_rule("filter", "FORWARD", &["-s", SANDBOX_RANGE, "-d", destination, "-j", "DROP"]).await?;
+        ensure_rule(
+            "filter",
+            "FORWARD",
+            &["-s", SANDBOX_RANGE, "-d", destination, "-j", "DROP"],
+        )
+        .await?;
     }
     ensure_rule("filter", "INPUT", &["-i", "e2bv+", "-j", "DROP"]).await?;
-    let replies = ["-i", "e2bv+", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"];
+    let replies = [
+        "-i",
+        "e2bv+",
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "ESTABLISHED,RELATED",
+        "-j",
+        "ACCEPT",
+    ];
     ensure_rule("filter", "INPUT", &replies).await
 }
 
 async fn ensure_rule(table: &str, chain: &str, rule: &[&str]) -> Result<()> {
-    let check: Vec<&str> = ["-t", table, "-C", chain].into_iter().chain(rule.iter().copied()).collect();
+    let check: Vec<&str> = ["-t", table, "-C", chain]
+        .into_iter()
+        .chain(rule.iter().copied())
+        .collect();
     if run("iptables", &check).await.is_ok() {
         return Ok(());
     }
-    let insert: Vec<&str> = ["-t", table, "-I", chain].into_iter().chain(rule.iter().copied()).collect();
+    let insert: Vec<&str> = ["-t", table, "-I", chain]
+        .into_iter()
+        .chain(rule.iter().copied())
+        .collect();
     run("iptables", &insert).await
 }
 

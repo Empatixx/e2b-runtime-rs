@@ -6,14 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use overlaybd::config::{CacheConfig, GlobalConfig, ImageConfig, LayerConfig, LogConfig, UpperMode};
+use overlaybd::config::{CacheConfig, GlobalConfig, LogConfig, OssConfig, UpperMode};
 use uvm_ublk_daemon::{CreateOverlaybdRuntimeDeviceRequest, PoolConfig, UblkDaemonClient, UblkDaemonSpawnConfig};
 
-use crate::config::Config;
+use crate::config::{Config, S3Config};
+use crate::layers::{Layer, Layers};
+
+const REMOTE_IO_WORKERS: usize = 4;
 
 pub struct Storage {
     client: Arc<UblkDaemonClient>,
     global_config: PathBuf,
+    layers: Arc<Layers>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,8 +27,8 @@ pub struct Disk {
 }
 
 impl Storage {
-    pub async fn start(config: &Config) -> Result<Self> {
-        let global_config = write_global_config(&config.data_dir)?;
+    pub async fn start(config: &Config, layers: Arc<Layers>) -> Result<Self> {
+        let global_config = write_global_config(&config.data_dir, &config.s3)?;
         let client = UblkDaemonClient::new(UblkDaemonSpawnConfig {
             binary_path: &config.ublk_daemon,
             socket_path: config.data_dir.join("ublk.sock"),
@@ -32,19 +36,23 @@ impl Storage {
             resize_global_config: &global_config,
             app_config: None,
             log_file: Some(&config.data_dir.join("ublk-daemon.log")),
-            metrics_listen_addr: "127.0.0.1:9102",
+            metrics_listen_addr: "127.0.0.1:0",
             pool_config: Some(&warm_devices()),
             p2p_publish_url: None,
             runtime_device_timeout: Duration::from_secs(30),
         })
         .await
         .context("start ublk daemon")?;
-        Ok(Self { client, global_config })
+        Ok(Self {
+            client,
+            global_config,
+            layers,
+        })
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn open_writable(&self, dir: &Path, layers: &[PathBuf]) -> Result<Disk> {
-        let source = write_image_config(&dir.join("source.json"), layers)?;
+    pub async fn open_writable(&self, dir: &Path, layers: &[Layer]) -> Result<Disk> {
+        let source = self.layers.write_image_config(&dir.join("source.json"), layers)?;
         let runtime_dir = dir.join("runtime");
         let device = self
             .client
@@ -66,17 +74,22 @@ impl Storage {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn open_read_only(&self, dir: &Path, layers: &[PathBuf]) -> Result<Disk> {
-        let image = write_image_config(&dir.join("image.json"), layers)?;
+    pub async fn open_read_only(&self, dir: &Path, layers: &[Layer]) -> Result<Disk> {
+        let image = self.layers.write_image_config(&dir.join("image.json"), layers)?;
         let (dev_id, device) = self.client.create_overlaybd(&image, &self.global_config).await?;
         Ok(Disk { dev_id, device })
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn seal(&self, disk: &Disk, layer: &Path) -> Result<PathBuf> {
+    pub async fn seal(&self, disk: &Disk, sealed: &Path) -> Result<Layer> {
+        std::fs::create_dir_all(sealed.parent().context("sealed layer without parent")?)?;
         flush_host_cache(&disk.device).await?;
-        self.client.restack_snapshot(disk.dev_id, layer).await?;
-        Ok(layer.to_path_buf())
+        self.client.restack_snapshot(disk.dev_id, sealed).await?;
+        self.layers.publish(sealed).await
+    }
+
+    pub async fn publish(&self, sealed: &Path) -> Result<Layer> {
+        self.layers.publish(sealed).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -117,25 +130,7 @@ pub async fn package_raw_file(source: &Path, layer: &Path) -> Result<()> {
     overlaybd::tools::package_raw_as_overlaybd(source, layer).await
 }
 
-fn write_image_config(path: &Path, layers: &[PathBuf]) -> Result<PathBuf> {
-    let config = ImageConfig {
-        lowers: layers.iter().map(|layer| local_layer(layer)).collect(),
-        result_file: path.with_extension("result").display().to_string(),
-        ..Default::default()
-    };
-    std::fs::create_dir_all(path.parent().context("image config without parent")?)?;
-    std::fs::write(path, serde_json::to_vec_pretty(&config)?)?;
-    Ok(path.to_path_buf())
-}
-
-fn local_layer(path: &Path) -> LayerConfig {
-    LayerConfig {
-        file: path.display().to_string(),
-        ..Default::default()
-    }
-}
-
-fn write_global_config(data_dir: &Path) -> Result<PathBuf> {
+fn write_global_config(data_dir: &Path, s3: &S3Config) -> Result<PathBuf> {
     let cache = data_dir.join("cache");
     let logs = data_dir.join("logs");
     std::fs::create_dir_all(&cache)?;
@@ -154,9 +149,23 @@ fn write_global_config(data_dir: &Path) -> Result<PathBuf> {
             log_path: logs.join("overlaybd.log").display().to_string(),
             ..Default::default()
         },
+        oss_config: oss_config(s3),
+        remote_io_workers: REMOTE_IO_WORKERS,
         ..Default::default()
     };
     let path = data_dir.join("overlaybd.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
     Ok(path)
+}
+
+fn oss_config(s3: &S3Config) -> OssConfig {
+    OssConfig {
+        enable: true,
+        access_key_id: s3.access_key.clone(),
+        secret_access_key: s3.secret_key.clone(),
+        default_region: s3.region.clone(),
+        default_endpoint: s3.endpoint.clone(),
+        default_addressing_style: "path".to_owned(),
+        ..Default::default()
+    }
 }

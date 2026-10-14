@@ -7,9 +7,11 @@ use axum::http::StatusCode;
 use super::ApiState;
 use super::error::{ApiError, ApiResult};
 use super::models::{NewSandbox, NewSnapshot, Refresh, SandboxDetailModel, SandboxModel, SnapshotModel, Timeout};
-use crate::sandbox::CreateRequest;
+use crate::sandbox::{CreateRequest, SandboxInfo};
 
 const KNOWN_STATES: [&str; 2] = ["running", "paused"];
+const DEFAULT_RESUME_TIMEOUT: u64 = 15;
+const DEFAULT_REFRESH: u64 = 60;
 
 pub async fn create(
     State(state): State<ApiState>,
@@ -24,36 +26,28 @@ pub async fn create(
         volume_mounts: body.volume_mounts.into_iter().map(Into::into).collect(),
     };
     let info = state.sandboxes.create(request).await?;
-    Ok((StatusCode::CREATED, Json(SandboxModel::new(&info, &state.domain))))
+    Ok((StatusCode::CREATED, Json(SandboxModel::new(&info))))
 }
 
-pub async fn list_running(State(state): State<ApiState>) -> Json<Vec<SandboxDetailModel>> {
-    let running = state.sandboxes.list().await.into_iter().filter(|info| !info.paused);
-    Json(
-        running
-            .map(|info| SandboxDetailModel::new(&info, &state.domain))
-            .collect(),
-    )
+pub async fn list_running(State(state): State<ApiState>) -> ApiResult<Json<Vec<SandboxDetailModel>>> {
+    let sandboxes = state.sandboxes.list().await?;
+    let running = sandboxes.iter().filter(|info| !info.paused);
+    Ok(Json(running.map(SandboxDetailModel::new).collect()))
 }
 
-pub async fn list(State(state): State<ApiState>, RawQuery(query): RawQuery) -> Json<Vec<SandboxDetailModel>> {
+pub async fn list(
+    State(state): State<ApiState>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<Vec<SandboxDetailModel>>> {
     let wanted = requested_states(query.as_deref());
-    let sandboxes = state
-        .sandboxes
-        .list()
-        .await
-        .into_iter()
-        .map(|info| SandboxDetailModel::new(&info, &state.domain));
-    Json(sandboxes.filter(|sandbox| wanted.contains(&sandbox.state)).collect())
+    let sandboxes = state.sandboxes.list().await?;
+    let models = sandboxes.iter().map(SandboxDetailModel::new);
+    Ok(Json(models.filter(|sandbox| wanted.contains(&sandbox.state)).collect()))
 }
 
 pub async fn detail(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<SandboxDetailModel>> {
-    let info = state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
-    Ok(Json(SandboxDetailModel::new(&info, &state.domain)))
+    let info = existing(&state, &id).await?;
+    Ok(Json(SandboxDetailModel::new(&info)))
 }
 
 pub async fn kill(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
@@ -64,12 +58,7 @@ pub async fn kill(State(state): State<ApiState>, Path(id): Path<String>) -> ApiR
 }
 
 pub async fn pause(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
-    let info = state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
-    if info.paused {
+    if existing(&state, &id).await?.paused {
         return Err(ApiError::conflict(format!("sandbox {id} is already paused")));
     }
     state.sandboxes.pause(&id).await?;
@@ -81,17 +70,12 @@ pub async fn resume(
     Path(id): Path<String>,
     body: Option<Json<Timeout>>,
 ) -> ApiResult<(StatusCode, Json<SandboxModel>)> {
-    let info = state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
-    if !info.paused {
+    if !existing(&state, &id).await?.paused {
         return Err(ApiError::conflict(format!("sandbox {id} is already running")));
     }
-    let timeout = body.map_or(15, |Json(body)| body.timeout);
+    let timeout = body.map_or(DEFAULT_RESUME_TIMEOUT, |Json(body)| body.timeout);
     let (info, _) = state.sandboxes.connect(&id, Duration::from_secs(timeout)).await?;
-    Ok((StatusCode::CREATED, Json(SandboxModel::new(&info, &state.domain))))
+    Ok((StatusCode::CREATED, Json(SandboxModel::new(&info))))
 }
 
 pub async fn connect(
@@ -99,14 +83,10 @@ pub async fn connect(
     Path(id): Path<String>,
     Json(body): Json<Timeout>,
 ) -> ApiResult<(StatusCode, Json<SandboxModel>)> {
-    state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
+    existing(&state, &id).await?;
     let (info, resumed) = state.sandboxes.connect(&id, Duration::from_secs(body.timeout)).await?;
     let status = if resumed { StatusCode::CREATED } else { StatusCode::OK };
-    Ok((status, Json(SandboxModel::new(&info, &state.domain))))
+    Ok((status, Json(SandboxModel::new(&info))))
 }
 
 pub async fn set_timeout(
@@ -114,11 +94,7 @@ pub async fn set_timeout(
     Path(id): Path<String>,
     Json(body): Json<Timeout>,
 ) -> ApiResult<StatusCode> {
-    state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
+    existing(&state, &id).await?;
     state
         .sandboxes
         .set_timeout(&id, Duration::from_secs(body.timeout))
@@ -131,12 +107,8 @@ pub async fn refresh(
     Path(id): Path<String>,
     body: Option<Json<Refresh>>,
 ) -> ApiResult<StatusCode> {
-    state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
-    let seconds = body.and_then(|Json(body)| body.duration).unwrap_or(60);
+    existing(&state, &id).await?;
+    let seconds = body.and_then(|Json(body)| body.duration).unwrap_or(DEFAULT_REFRESH);
     state.sandboxes.set_timeout(&id, Duration::from_secs(seconds)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -146,11 +118,7 @@ pub async fn snapshot(
     Path(id): Path<String>,
     body: Option<Json<NewSnapshot>>,
 ) -> ApiResult<(StatusCode, Json<SnapshotModel>)> {
-    state
-        .sandboxes
-        .get(&id)
-        .await
-        .ok_or_else(|| ApiError::not_found("sandbox", &id))?;
+    existing(&state, &id).await?;
     let name = body.and_then(|Json(body)| body.name);
     let template_id = state.sandboxes.snapshot(&id, name).await?;
     let snapshot = SnapshotModel {
@@ -158,6 +126,14 @@ pub async fn snapshot(
         names: vec![format!("{template_id}:default")],
     };
     Ok((StatusCode::CREATED, Json(snapshot)))
+}
+
+async fn existing(state: &ApiState, id: &str) -> ApiResult<SandboxInfo> {
+    state
+        .sandboxes
+        .get(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("sandbox", id))
 }
 
 fn requested_states(query: Option<&str>) -> Vec<&'static str> {

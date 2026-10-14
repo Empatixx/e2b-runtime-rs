@@ -132,7 +132,7 @@ impl From<&MountRequest> for VolumeMountModel {
 }
 
 impl SandboxModel {
-    pub fn new(info: &SandboxInfo, domain: &str) -> Self {
+    pub fn new(info: &SandboxInfo) -> Self {
         Self {
             template_id: info.template_id.clone(),
             sandbox_id: info.sandbox_id.clone(),
@@ -140,13 +140,13 @@ impl SandboxModel {
             envd_version: info.envd_version.clone(),
             envd_access_token: info.envd_token.clone(),
             traffic_access_token: None,
-            domain: Some(domain.to_owned()),
+            domain: Some(info.domain.clone()),
         }
     }
 }
 
 impl SandboxDetailModel {
-    pub fn new(info: &SandboxInfo, domain: &str) -> Self {
+    pub fn new(info: &SandboxInfo) -> Self {
         Self {
             template_id: info.template_id.clone(),
             sandbox_id: info.sandbox_id.clone(),
@@ -160,7 +160,7 @@ impl SandboxDetailModel {
             state: if info.paused { "paused" } else { "running" },
             envd_version: info.envd_version.clone(),
             envd_access_token: info.envd_token.clone(),
-            domain: Some(domain.to_owned()),
+            domain: Some(info.domain.clone()),
             volume_mounts: info.volume_mounts.iter().map(VolumeMountModel::from).collect(),
         }
     }

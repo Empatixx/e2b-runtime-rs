@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -6,14 +7,16 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::checkpoint::{Checkpoint, new_id, read_json, write_json};
+use crate::checkpoint::{Checkpoint, checkpoint_id};
 use crate::firecracker::MachineSize;
 use crate::host::Host;
+use crate::layers::Layer;
 use crate::network::run;
 use crate::sandbox::envd::Envd;
 use crate::sandbox::vm::Vm;
 use crate::sandbox::warm_pool::WarmVm;
 use crate::storage::package_raw_file;
+use crate::store::Store;
 
 const SETTLE_AFTER_BOOT: Duration = Duration::from_secs(2);
 const INIT_SCRIPT: &str = include_str!("template/e2b-init.sh");
@@ -25,7 +28,7 @@ pub struct Template {
 }
 
 pub struct Templates {
-    dir: PathBuf,
+    store: Arc<Store>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -45,21 +48,24 @@ pub struct BuildRequest {
 }
 
 impl Templates {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub fn new(store: Arc<Store>) -> Self {
+        Self { store }
     }
 
-    pub fn get(&self, template_id: &str) -> Result<Template> {
-        read_json(&self.record(&normalize(template_id))).with_context(|| format!("template {template_id} not found"))
+    pub async fn get(&self, template_id: &str) -> Result<Template> {
+        let found = self.store.get(&record_key(&normalize(template_id))).await?;
+        Ok(found
+            .with_context(|| format!("template {template_id} not found"))?
+            .value)
     }
 
-    pub fn save(&self, template: &Template) -> Result<()> {
-        write_json(&self.record(&template.template_id), template)
+    pub async fn save(&self, template: &Template) -> Result<()> {
+        self.store.put(&record_key(&template.template_id), template).await
     }
+}
 
-    fn record(&self, template_id: &str) -> PathBuf {
-        self.dir.join(format!("{template_id}.json"))
-    }
+fn record_key(template_id: &str) -> String {
+    format!("templates/{template_id}.json")
 }
 
 fn normalize(template_id: &str) -> String {
@@ -69,23 +75,24 @@ fn normalize(template_id: &str) -> String {
 
 pub async fn build(host: &Host, request: &BuildRequest) -> Result<Template> {
     let build_dir = host.config.builds_dir().join(&request.name);
-    let checkpoint_id = new_id("ckpt");
-    let checkpoint_dir = Checkpoint::dir(&host.config.checkpoints_dir(), &checkpoint_id);
-    std::fs::create_dir_all(&checkpoint_dir)?;
-    let base_layer = checkpoint_dir.join("base.commit");
+    let checkpoint_dir = host.checkpoints.new_dir();
     let rootfs = build_rootfs(&build_dir, request).await?;
-    package_raw_file(&rootfs, &base_layer)
-        .await
-        .context("package rootfs layer")?;
+    let base_layer = publish_rootfs(host, &rootfs, &checkpoint_dir.join("base.commit")).await?;
     let checkpoint = boot_and_capture(host, request, &checkpoint_dir, base_layer).await?;
-    checkpoint.save(&host.config.checkpoints_dir())?;
+    host.checkpoints.save(&checkpoint).await?;
     let template = Template {
         template_id: request.name.clone(),
         checkpoint: checkpoint.id,
     };
-    Templates::new(host.config.templates_dir()).save(&template)?;
+    host.templates.save(&template).await?;
     let _ = std::fs::remove_dir_all(&build_dir);
     Ok(template)
+}
+
+async fn publish_rootfs(host: &Host, rootfs: &Path, sealed: &Path) -> Result<Layer> {
+    std::fs::create_dir_all(sealed.parent().context("layer without parent")?)?;
+    package_raw_file(rootfs, sealed).await.context("package rootfs layer")?;
+    host.storage.publish(sealed).await
 }
 
 async fn build_rootfs(build_dir: &Path, request: &BuildRequest) -> Result<PathBuf> {
@@ -141,7 +148,7 @@ async fn boot_and_capture(
     host: &Host,
     request: &BuildRequest,
     checkpoint_dir: &Path,
-    base_layer: PathBuf,
+    base_layer: Layer,
 ) -> Result<Checkpoint> {
     let size = MachineSize {
         vcpus: request.vcpus,
@@ -158,12 +165,7 @@ async fn boot_and_capture(
     vm.shutdown(host).await;
     let captured = captured?;
     Ok(Checkpoint {
-        id: checkpoint_dir
-            .file_name()
-            .context("checkpoint dir")?
-            .to_string_lossy()
-            .into_owned(),
-        vm_state: captured.vm_state,
+        id: checkpoint_id(checkpoint_dir)?,
         memory_layers: captured.memory_layers,
         rootfs_layers: captured.rootfs_layers,
         drives: Vec::new(),

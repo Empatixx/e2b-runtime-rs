@@ -7,6 +7,7 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 
 use super::{Disk, Storage};
+use crate::layers::Layer;
 
 const KEEP_WARM: Duration = Duration::from_secs(60);
 
@@ -34,7 +35,7 @@ impl SharedMemory {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn acquire(&self, checkpoint_id: &str, layers: &[PathBuf]) -> Result<Disk> {
+    pub async fn acquire(&self, checkpoint_id: &str, layers: &[Layer]) -> Result<Disk> {
         let mut devices = self.devices.lock().await;
         if let Some(shared) = devices.get_mut(checkpoint_id) {
             shared.users += 1;

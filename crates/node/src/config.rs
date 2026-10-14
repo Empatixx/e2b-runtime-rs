@@ -16,6 +16,28 @@ pub struct Config {
         default_value = "/mnt/simple/deps/uvm-ublk-daemon"
     )]
     pub ublk_daemon: PathBuf,
+    #[arg(long, env = "E2B_SIMPLE_SLOT_BASE", default_value_t = 0)]
+    pub slot_base: u32,
+    #[command(flatten)]
+    pub s3: S3Config,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct S3Config {
+    #[arg(
+        long = "s3-endpoint",
+        env = "E2B_SIMPLE_S3_ENDPOINT",
+        default_value = "http://127.0.0.1:9000"
+    )]
+    pub endpoint: String,
+    #[arg(long = "s3-bucket", env = "E2B_SIMPLE_S3_BUCKET", default_value = "e2b-simple")]
+    pub bucket: String,
+    #[arg(long = "s3-region", env = "E2B_SIMPLE_S3_REGION", default_value = "us-east-1")]
+    pub region: String,
+    #[arg(long = "s3-access-key", env = "E2B_SIMPLE_S3_ACCESS_KEY")]
+    pub access_key: String,
+    #[arg(long = "s3-secret-key", env = "E2B_SIMPLE_S3_SECRET_KEY")]
+    pub secret_key: String,
 }
 
 impl Config {
@@ -23,12 +45,12 @@ impl Config {
         self.data_dir.join("checkpoints")
     }
 
-    pub fn sandboxes_dir(&self) -> PathBuf {
-        self.data_dir.join("sandboxes")
+    pub fn layers_dir(&self) -> PathBuf {
+        self.data_dir.join("layers")
     }
 
-    pub fn templates_dir(&self) -> PathBuf {
-        self.data_dir.join("templates")
+    pub fn sandboxes_dir(&self) -> PathBuf {
+        self.data_dir.join("sandboxes")
     }
 
     pub fn memory_dir(&self) -> PathBuf {
@@ -58,4 +80,8 @@ pub struct ServeConfig {
     pub proxy_addr: String,
     #[arg(long, env = "E2B_DOMAIN", default_value = "localhost")]
     pub domain: String,
+    #[arg(long, env = "E2B_SIMPLE_NODE_ID", default_value = "node-a")]
+    pub node_id: String,
+    #[arg(long, env = "E2B_SIMPLE_NODE_API_URL", default_value = "http://127.0.0.1:3000")]
+    pub node_api_url: String,
 }

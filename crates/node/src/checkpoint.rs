@@ -1,14 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
+
+use crate::layers::Layer;
+use crate::store::Store;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: String,
-    pub vm_state: PathBuf,
-    pub memory_layers: Vec<PathBuf>,
-    pub rootfs_layers: Vec<PathBuf>,
+    pub memory_layers: Vec<Layer>,
+    pub rootfs_layers: Vec<Layer>,
     pub drives: Vec<DriveState>,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -21,45 +24,59 @@ pub struct DriveState {
     pub slot: usize,
     pub mount_path: String,
     pub volume: Option<String>,
-    pub layers: Vec<PathBuf>,
+    pub layers: Vec<Layer>,
 }
 
-impl Checkpoint {
-    pub fn dir(root: &Path, id: &str) -> PathBuf {
-        root.join(id)
+pub struct Checkpoints {
+    store: Arc<Store>,
+    dir: PathBuf,
+}
+
+impl Checkpoints {
+    pub fn new(store: Arc<Store>, dir: PathBuf) -> Self {
+        Self { store, dir }
     }
 
-    pub fn load(root: &Path, id: &str) -> Result<Self> {
-        read_json(&Self::dir(root, id).join("checkpoint.json"))
+    pub fn new_dir(&self) -> PathBuf {
+        self.dir.join(new_id("ckpt"))
     }
 
-    pub fn save(&self, root: &Path) -> Result<()> {
-        write_json(&Self::dir(root, &self.id).join("checkpoint.json"), self)
+    pub async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+        let vm_state = self.local_vm_state(&checkpoint.id);
+        self.store.upload(&vm_state_key(&checkpoint.id), &vm_state).await?;
+        self.store.put(&record_key(&checkpoint.id), checkpoint).await
+    }
+
+    pub async fn load(&self, id: &str) -> Result<Checkpoint> {
+        let found = self.store.get(&record_key(id)).await?;
+        Ok(found.with_context(|| format!("checkpoint {id} not found"))?.value)
+    }
+
+    pub async fn vm_state(&self, checkpoint: &Checkpoint) -> Result<PathBuf> {
+        let local = self.local_vm_state(&checkpoint.id);
+        if !local.exists() {
+            self.store.download(&vm_state_key(&checkpoint.id), &local).await?;
+        }
+        Ok(local)
+    }
+
+    fn local_vm_state(&self, id: &str) -> PathBuf {
+        self.dir.join(id).join("vmstate")
     }
 }
 
-pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    Ok(serde_json::from_slice(&bytes)?)
+pub fn checkpoint_id(dir: &Path) -> Result<String> {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .context("checkpoint directory without a name")
 }
 
-pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    std::fs::create_dir_all(path.parent().context("json path without parent")?)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
+fn record_key(id: &str) -> String {
+    format!("checkpoints/{id}.json")
 }
 
-pub fn list_json<T: DeserializeOwned>(dir: &Path) -> Vec<T> {
-    std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|path| read_json(&path).ok())
-        .collect()
+fn vm_state_key(id: &str) -> String {
+    format!("checkpoints/{id}/vmstate")
 }
 
 pub fn new_id(prefix: &str) -> String {

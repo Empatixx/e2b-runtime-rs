@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use crate::checkpoint::{Checkpoint, DriveState};
 use crate::firecracker::{DRIVE_SLOTS, FirecrackerApi, FirecrackerProcess, MachineSize, ROOTFS_DRIVE, drive_file};
 use crate::host::Host;
+use crate::layers::Layer;
 use crate::network::Slot;
 use crate::storage::Disk;
 use crate::storage::memory::write_memory_layer;
@@ -15,8 +16,8 @@ pub struct Vm {
     dir: PathBuf,
     process: FirecrackerProcess,
     resources: Resources,
-    rootfs_layers: Vec<PathBuf>,
-    memory_layers: Vec<PathBuf>,
+    rootfs_layers: Vec<Layer>,
+    memory_layers: Vec<Layer>,
 }
 
 struct Resources {
@@ -37,14 +38,13 @@ struct AttachedDrive {
 }
 
 pub struct Captured {
-    pub vm_state: PathBuf,
-    pub memory_layers: Vec<PathBuf>,
-    pub rootfs_layers: Vec<PathBuf>,
+    pub memory_layers: Vec<Layer>,
+    pub rootfs_layers: Vec<Layer>,
     pub drives: Vec<DriveState>,
 }
 
 impl Vm {
-    pub async fn boot(host: &Host, warm: WarmVm, rootfs_layers: Vec<PathBuf>, size: MachineSize) -> Result<Self> {
+    pub async fn boot(host: &Host, warm: WarmVm, rootfs_layers: Vec<Layer>, size: MachineSize) -> Result<Self> {
         let resources = Resources::acquire(host, &warm.dir, warm.slot, &rootfs_layers, None, Vec::new()).await?;
         let booted = warm
             .process
@@ -64,9 +64,10 @@ impl Vm {
 
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn restore(host: &Host, warm: WarmVm, checkpoint: &Checkpoint, drives: Vec<DriveState>) -> Result<Self> {
+        let vm_state = host.checkpoints.vm_state(checkpoint).await?;
         let layers = &checkpoint.rootfs_layers;
         let resources = Resources::acquire(host, &warm.dir, warm.slot, layers, Some(checkpoint), drives).await?;
-        let loaded = load_checkpoint(&warm.process.api, &resources, checkpoint).await;
+        let loaded = load_checkpoint(&warm.process.api, &resources, &vm_state).await;
         resources.release_on_error(host, loaded).await?;
         Ok(Self {
             dir: warm.dir,
@@ -96,14 +97,12 @@ impl Vm {
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn capture(&mut self, host: &Host, checkpoint_dir: &Path) -> Result<Captured> {
         std::fs::create_dir_all(checkpoint_dir)?;
-        let vm_state = checkpoint_dir.join("vmstate");
         self.api().pause().await?;
-        self.api().save_state(&vm_state).await?;
-        self.capture_memory(&checkpoint_dir.join("memory.commit")).await?;
+        self.api().save_state(&checkpoint_dir.join("vmstate")).await?;
+        self.capture_memory(host, &checkpoint_dir.join("memory.commit")).await?;
         self.seal_rootfs(host, &checkpoint_dir.join("rootfs.commit")).await?;
         self.seal_drives(host, checkpoint_dir).await?;
         Ok(Captured {
-            vm_state,
             memory_layers: self.memory_layers.clone(),
             rootfs_layers: self.rootfs_layers.clone(),
             drives: self.mounted_drives().cloned().collect(),
@@ -116,8 +115,8 @@ impl Vm {
 
     pub async fn seal_drives(&mut self, host: &Host, checkpoint_dir: &Path) -> Result<()> {
         for drive in &mut self.resources.drives {
-            let layer = next_drive_layer(host, checkpoint_dir, &drive.state);
-            host.storage.seal(&drive.disk, &layer).await?;
+            let sealed = sealed_drive_path(host, checkpoint_dir, &drive.state);
+            let layer = host.storage.seal(&drive.disk, &sealed).await?;
             drive.state.layers.push(layer);
         }
         Ok(())
@@ -131,17 +130,17 @@ impl Vm {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn capture_memory(&mut self, layer: &Path) -> Result<()> {
+    async fn capture_memory(&mut self, host: &Host, sealed: &Path) -> Result<()> {
         let dirty = self.api().dirty_memory().await?;
-        write_memory_layer(self.process.pid, &dirty, layer).await?;
-        self.memory_layers.push(layer.to_path_buf());
+        write_memory_layer(self.process.pid, &dirty, sealed).await?;
+        self.memory_layers.push(host.storage.publish(sealed).await?);
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn seal_rootfs(&mut self, host: &Host, layer: &Path) -> Result<()> {
-        host.storage.seal(&self.resources.rootfs, layer).await?;
-        self.rootfs_layers.push(layer.to_path_buf());
+    async fn seal_rootfs(&mut self, host: &Host, sealed: &Path) -> Result<()> {
+        let layer = host.storage.seal(&self.resources.rootfs, sealed).await?;
+        self.rootfs_layers.push(layer);
         Ok(())
     }
 }
@@ -152,7 +151,7 @@ impl Resources {
         host: &Host,
         dir: &Path,
         slot: Slot,
-        rootfs_layers: &[PathBuf],
+        rootfs_layers: &[Layer],
         memory_from: Option<&Checkpoint>,
         drives: Vec<DriveState>,
     ) -> Result<Self> {
@@ -239,20 +238,18 @@ impl Resources {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn load_checkpoint(api: &FirecrackerApi, resources: &Resources, checkpoint: &Checkpoint) -> Result<()> {
+async fn load_checkpoint(api: &FirecrackerApi, resources: &Resources, vm_state: &Path) -> Result<()> {
     let memory = resources.memory.as_ref().context("checkpoint without memory")?;
-    api.load(&checkpoint.vm_state, &memory.disk.device)
-        .await
-        .context("load snapshot")?;
+    api.load(vm_state, &memory.disk.device).await.context("load snapshot")?;
     for drive in &resources.drives {
         api.refresh_drive(drive.state.slot).await?;
     }
     Ok(())
 }
 
-fn next_drive_layer(host: &Host, checkpoint_dir: &Path, drive: &DriveState) -> PathBuf {
+fn sealed_drive_path(host: &Host, checkpoint_dir: &Path, drive: &DriveState) -> PathBuf {
     match &drive.volume {
-        Some(volume_id) => host.volumes.layer_path(volume_id, drive.layers.len()),
+        Some(volume_id) => host.volumes.sealed_layer_path(volume_id),
         None => checkpoint_dir.join(format!("drive-{}.commit", drive.slot)),
     }
 }

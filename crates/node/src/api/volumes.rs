@@ -10,31 +10,23 @@ pub async fn create(
     State(state): State<ApiState>,
     Json(body): Json<NewVolume>,
 ) -> ApiResult<(StatusCode, Json<VolumeModel>)> {
-    if state.host.volumes.get(&body.name).is_some() {
+    if state.host.volumes.get(&body.name).await?.is_some() {
         return Err(ApiError::conflict(format!("volume {} already exists", body.name)));
     }
     let volume = state.host.volumes.create(&body.name).await?;
     Ok((StatusCode::CREATED, Json(VolumeModel::new(&volume, true))))
 }
 
-pub async fn list(State(state): State<ApiState>) -> Json<Vec<VolumeModel>> {
-    Json(
-        state
-            .host
-            .volumes
-            .list()
-            .iter()
-            .map(|volume| VolumeModel::new(volume, false))
-            .collect(),
-    )
+pub async fn list(State(state): State<ApiState>) -> ApiResult<Json<Vec<VolumeModel>>> {
+    let volumes = state.host.volumes.list().await?;
+    Ok(Json(
+        volumes.iter().map(|volume| VolumeModel::new(volume, false)).collect(),
+    ))
 }
 
 pub async fn detail(State(state): State<ApiState>, Path(id): Path<String>) -> ApiResult<Json<VolumeModel>> {
-    let volume = state
-        .host
-        .volumes
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("volume", &id))?;
+    let volume = state.host.volumes.get(&id).await?;
+    let volume = volume.ok_or_else(|| ApiError::not_found("volume", &id))?;
     Ok(Json(VolumeModel::new(&volume, true)))
 }
 

@@ -3,10 +3,12 @@ mod checkpoint;
 mod config;
 mod firecracker;
 mod host;
+mod layers;
 mod network;
 mod proxy;
 mod sandbox;
 mod storage;
+mod store;
 mod template;
 mod volume;
 
@@ -19,6 +21,7 @@ use tokio::net::TcpListener;
 use config::{Config, ServeConfig};
 use host::Host;
 use sandbox::Sandboxes;
+use sandbox::record::Owner;
 use template::BuildRequest;
 
 #[derive(Parser)]
@@ -50,17 +53,27 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(host: Arc<Host>, config: ServeConfig) -> Result<()> {
-    let sandboxes = Sandboxes::new(host.clone());
+    let me = Owner {
+        node_id: config.node_id.clone(),
+        api_url: config.node_api_url.clone(),
+        domain: config.domain.clone(),
+    };
+    let sandboxes = Sandboxes::new(host.clone(), me);
     sandboxes.spawn_reaper();
     let api = api::router(api::ApiState {
         host,
         sandboxes: sandboxes.clone(),
         api_key: config.api_key.into(),
-        domain: config.domain.into(),
+        http: reqwest::Client::builder().no_proxy().build()?,
     });
     let api_listener = TcpListener::bind(&config.api_addr).await?;
     let proxy_listener = TcpListener::bind(&config.proxy_addr).await?;
-    tracing::info!(api = config.api_addr, proxy = config.proxy_addr, "e2b-node listening");
+    tracing::info!(
+        node = config.node_id,
+        api = config.api_addr,
+        proxy = config.proxy_addr,
+        "e2b-node listening"
+    );
     tokio::try_join!(
         axum::serve(api_listener, api),
         axum::serve(proxy_listener, proxy::router(sandboxes)),
